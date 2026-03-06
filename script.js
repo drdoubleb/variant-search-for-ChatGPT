@@ -29,6 +29,40 @@ const isGenomicVariant = (variant) => {
     return /:g\./i.test(variant);
 };
 
+
+// Build a SpliceAI lookup tuple from either raw user input (preferred) or a normalised g. variant.
+// Returns an object { chrom, pos, ref, alt } when enough information is available, else null.
+function buildSpliceAiLookupTuple(rawInput, gVariant) {
+    const parseTokenInput = (raw) => {
+        if (!raw) return null;
+        const toks = String(raw).trim().split(/\s+/).filter(Boolean);
+        if (toks.length !== 4 && toks.length !== 5) return null;
+        const tokens = toks.slice();
+        if (tokens.length === 5) {
+            const maybeGene = tokens[2];
+            const isGene = /^[A-Za-z]+$/.test(maybeGene) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(maybeGene);
+            if (!isGene) return null;
+            tokens.splice(2, 1);
+        }
+        const [chrTok, posTok, refTok, altTok] = tokens;
+        const chrom = String(chrTok).replace(/^chr/i, '').toUpperCase();
+        const pos = String(posTok).replace(/,/g, '');
+        const ref = String(refTok).toUpperCase();
+        const alt = String(altTok).toUpperCase();
+        if (!/^[0-9XYMT]+$/.test(chrom)) return null;
+        if (!/^\d+$/.test(pos)) return null;
+        if (!/^[A-Za-z-]+$/.test(ref) || !/^[A-Za-z-]+$/.test(alt)) return null;
+        return { chrom: `chr${chrom}`, pos, ref, alt };
+    };
+    const parseSimpleGenomic = (gv) => {
+        if (!gv) return null;
+        const m = String(gv).match(/^chr([0-9XYMT]+):g\.(\d+)([A-Za-z-]+)>([A-Za-z-]+)$/i);
+        if (!m) return null;
+        return { chrom: `chr${m[1].toUpperCase()}`, pos: m[2], ref: m[3].toUpperCase(), alt: m[4].toUpperCase() };
+    };
+    return parseTokenInput(rawInput) || parseSimpleGenomic(gVariant) || null;
+}
+
 // Convert a triple‑letter amino acid change (e.g. VAL600GLU) to a single‑letter code (V600E).
 // Accepts uppercase three‑letter codes and returns uppercase single‑letter code if mapping exists.
 function tripleToSingle(prot) {
@@ -869,6 +903,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // This will be populated when the user submits a variant and used to build the transcripts list in the variant card.
     let transcriptsFromRecoder = [];
 
+    // Apply a stable thematic class to each card so CSS can render distinct colors per section.
+    const applyCardTheme = (cardEl, cardTitle) => {
+        if (!cardEl || !cardTitle) return;
+        const key = String(cardTitle).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        if (key) cardEl.setAttribute('data-card', key);
+    };
+
     /**
      * Fetch transcripts for a given variant using the Ensembl variant recoder. Returns an array of
      * objects with transcript, cDNA and protein fields. If no transcripts can be obtained, returns an empty array.
@@ -1013,7 +1054,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // "BRAF V600E", "braf:p.v600e", "BRAF:V600E" etc. by converting them
         // to standard HGVS-like strings. This heuristic uppercases gene symbols
         // and prepends "p." to protein variants when missing.
-        let query = input.value.trim();
+        const rawInput = input.value.trim();
+        let query = rawInput;
         const normalizeVariantInput = (raw) => {
             let s = raw.trim();
             // If the input contains a '>' (looks like genomic substitution), attempt to parse flexible genomic formats.
@@ -2336,6 +2378,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.className = 'card';
                 const title = document.createElement('h3');
                 title.textContent = 'Variant';
+                applyCardTheme(card, 'Variant');
                 card.appendChild(title);
                 const content = document.createElement('div');
                 content.className = 'card-content';
@@ -2509,6 +2552,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.className = 'card';
                 const title = document.createElement('h3');
                 title.textContent = 'ClinVar';
+                applyCardTheme(card, 'ClinVar');
                 card.appendChild(title);
                 const content = document.createElement('div');
                 content.className = 'card-content';
@@ -2632,6 +2676,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.className = 'card';
                 const title = document.createElement('h3');
                 title.textContent = 'gnomAD';
+                applyCardTheme(card, 'gnomAD');
                 card.appendChild(title);
                 const content = document.createElement('div');
                 content.className = 'card-content';
@@ -2832,6 +2877,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.className = 'card';
                 const title = document.createElement('h3');
                 title.textContent = 'Predictors';
+                applyCardTheme(card, 'Predictors');
                 card.appendChild(title);
                 const content = document.createElement('div');
                 content.className = 'card-content';
@@ -2886,6 +2932,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.className = 'card';
                 const title = document.createElement('h3');
                 title.textContent = 'OncoKB';
+                applyCardTheme(card, 'OncoKB');
                 card.appendChild(title);
                 const content = document.createElement('div');
                 content.className = 'card-content';
@@ -2922,6 +2969,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.className = 'card';
                 const title = document.createElement('h3');
                 title.textContent = 'COSMIC';
+                applyCardTheme(card, 'COSMIC');
                 card.appendChild(title);
                 const content = document.createElement('div');
                 content.className = 'card-content';
@@ -3013,10 +3061,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const clinicalQuery = encodeURIComponent(`clinical significance of ${firstGene} ${protSingle}`.trim());
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
                 const clinicalUrl = `https://www.google.com/search?q=${clinicalQuery}`;
+                const spliceTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+                const spliceVariantText = spliceTuple ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceTuple.ref} ${spliceTuple.alt}` : '';
+                // SpliceAI lookup defaults to hg38 when hg is omitted. Most MyVariant coordinates
+                // we surface in this app are hg19/GRCh37, so explicitly request hg=37.
+                const spliceAiUrl = spliceVariantText
+                    ? `https://spliceailookup.broadinstitute.org/#variant=${encodeURIComponent(spliceVariantText)}&hg=37`
+                    : 'https://spliceailookup.broadinstitute.org/#hg=37';
+
                 const card = document.createElement('div');
                 card.className = 'card';
                 const titleEl = document.createElement('h3');
                 titleEl.textContent = 'Search';
+                applyCardTheme(card, 'Search');
                 card.appendChild(titleEl);
                 const content = document.createElement('div');
                 content.className = 'card-content';
@@ -3025,6 +3082,33 @@ document.addEventListener('DOMContentLoaded', () => {
                 content.appendChild(span);
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
+
+                const spliceCard = document.createElement('div');
+                spliceCard.className = 'card';
+                const spliceTitle = document.createElement('h3');
+                spliceTitle.textContent = 'SpliceAI';
+                applyCardTheme(spliceCard, 'SpliceAI');
+                spliceCard.appendChild(spliceTitle);
+                const spliceContent = document.createElement('div');
+                spliceContent.className = 'card-content';
+                const spliceLinkLine = document.createElement('span');
+                spliceLinkLine.innerHTML = `<a href="${spliceAiUrl}" target="_blank" rel="noopener noreferrer">Open SpliceAI lookup 🔍</a>`;
+                spliceContent.appendChild(spliceLinkLine);
+                if (spliceVariantText) {
+                    const spliceHint = document.createElement('span');
+                    spliceHint.style.fontSize = '0.85rem';
+                    spliceHint.style.color = '#4a5f73';
+                    spliceHint.textContent = `SpliceAI query: ${spliceVariantText}`;
+                    spliceContent.appendChild(spliceHint);
+                } else {
+                    const spliceHint = document.createElement('span');
+                    spliceHint.style.fontSize = '0.85rem';
+                    spliceHint.style.color = '#4a5f73';
+                    spliceHint.textContent = 'No explicit chr/pos/ref/alt tuple detected; opening SpliceAI home page.';
+                    spliceContent.appendChild(spliceHint);
+                }
+                spliceCard.appendChild(spliceContent);
+                cardsContainer.appendChild(spliceCard);
             }
             // Show cards and hide legacy tables for a cleaner view
             cardsContainer.classList.remove('hidden');

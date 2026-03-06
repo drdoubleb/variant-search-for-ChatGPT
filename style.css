@@ -34,7 +34,7 @@ header p {
 main {
     flex: 1;
     padding: 2rem 1rem;
-    max-width: 800px;
+    max-width: 1200px;
     margin: 0 auto;
 }
 
@@ -184,29 +184,33 @@ footer a:hover {
 
 /* Cards layout for displaying variant annotations */
 .cards-container {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 1rem;
     margin-bottom: 1.5rem;
 }
 
 .card {
-    flex: 1 1 260px;
     background-color: #ffffff;
-    border: 1px solid #e0e0e0;
+    border: 2px solid #d0d7e2;
     border-radius: 6px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
-    padding: 1rem;
+    padding: 0;
     position: relative;
+    overflow: hidden;
 }
 
 .card h3 {
-    margin: 0 0 0.5rem 0;
+    margin: 0;
+    padding: 0.7rem 1rem;
     font-size: 1rem;
-    color: #2c3e50;
+    color: #1f2937;
+    background-color: #eef2f7;
+    border-bottom: 1px solid #d0d7e2;
 }
 
 .card .card-content {
+    padding: 0.85rem 1rem 1rem;
     font-size: 0.95rem;
     line-height: 1.4;
 }
@@ -274,4 +278,82 @@ footer a:hover {
     background-color: #f8f9fb;
     font-weight: 600;
     color: #555;
+}
+
+
+
+.card[data-card="variant"] {
+    border-color: #93c5fd;
+}
+.card[data-card="variant"] h3 {
+    background-color: #dbeafe;
+    border-bottom-color: #93c5fd;
+}
+
+.card[data-card="clinvar"] {
+    border-color: #c4b5fd;
+}
+.card[data-card="clinvar"] h3 {
+    background-color: #ede9fe;
+    border-bottom-color: #c4b5fd;
+}
+
+.card[data-card="gnomad"] {
+    border-color: #6ee7b7;
+}
+.card[data-card="gnomad"] h3 {
+    background-color: #d1fae5;
+    border-bottom-color: #6ee7b7;
+}
+
+.card[data-card="predictors"] {
+    border-color: #fcd34d;
+}
+.card[data-card="predictors"] h3 {
+    background-color: #fef3c7;
+    border-bottom-color: #fcd34d;
+}
+
+.card[data-card="oncokb"] {
+    border-color: #fdba74;
+}
+.card[data-card="oncokb"] h3 {
+    background-color: #ffedd5;
+    border-bottom-color: #fdba74;
+}
+
+.card[data-card="cosmic"] {
+    border-color: #f9a8d4;
+}
+.card[data-card="cosmic"] h3 {
+    background-color: #fce7f3;
+    border-bottom-color: #f9a8d4;
+}
+
+.card[data-card="search"] {
+    border-color: #9ca3af;
+}
+.card[data-card="search"] h3 {
+    background-color: #f3f4f6;
+    border-bottom-color: #9ca3af;
+}
+
+.card[data-card="spliceai"] {
+    border-color: #67e8f9;
+}
+.card[data-card="spliceai"] h3 {
+    background-color: #cffafe;
+    border-bottom-color: #67e8f9;
+}
+
+@media (max-width: 980px) {
+    .cards-container {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 640px) {
+    .cards-container {
+        grid-template-columns: 1fr;
+    }
 }
