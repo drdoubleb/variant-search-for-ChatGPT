@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Variant Search (Beta)</title>
+    <!-- Append a version query parameter to force browsers to reload the updated stylesheet -->
+    <link rel="stylesheet" href="style.css?v=20250847" />
+    <!-- Include a simple Google font for nicer typography -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+    <header>
+        <!-- Updated site title and description to reflect current branding. -->
+        <h1>Variant Search (Beta)</h1>
+        <p>Enter a variant in HGVS genomic (g.), coding (c.) or protein (p.) notation. The tool will convert non‑genomic variants and display annotations from MyVariant.info.</p>
+    </header>
+    <main>
+        <form id="variantForm">
+            <input type="text" id="variantInput" placeholder="e.g. chr7:g.140453136A>T or NM_001256849.2:c.76A>G or AGT:p.Met259Ser" />
+            <button type="submit">Lookup</button>
+        </form>
+        <div id="status"></div>
+        <section id="resultSection" class="hidden">
+            <h2>Variant Summary</h2>
+            <!-- Cards container will be populated dynamically to display key annotation cards -->
+            <div id="cardsContainer" class="cards-container hidden"></div>
+            <!-- Legacy summary table and details are hidden by default to declutter the UI.
+                 They remain in the DOM for potential future use (e.g. exporting) but are not displayed. -->
+            <!-- Hide legacy summary and details containers completely to remove redundant section -->
+            <table id="summaryTable" style="display: none;"></table>
+            <div id="detailsContainer" style="display: none;"></div>
+            <details id="rawDetails">
+                <!--
+                    Display the MyVariant.info annotation in raw JSON form.  Renamed from
+                    "Show raw annotation (JSON)" for clarity, as this section should always
+                    contain the annotation returned by MyVariant.info or a minimal annotation
+                    constructed locally when no MyVariant record is found.
+                -->
+                <summary>Show raw myvariant.info JSON</summary>
+                <pre id="rawOutput"></pre>
+            </details>
+            <details id="ensemblDetails">
+                <!--
+                    Display the Ensembl variant_recoder JSON result.  This section is
+                    separate from the MyVariant.info annotation to avoid confusion when both
+                    sources are available.
+                -->
+                <summary>Show Ensembl recoder result</summary>
+                <pre id="ensemblOutput"></pre>
+            </details>
+        </section>
+    </main>
+    <footer>
+        <p>Powered by <a href="https://myvariant.info/" target="_blank" rel="noopener noreferrer">MyVariant.info</a> and <a href="https://rest.ensembl.org" target="_blank" rel="noopener noreferrer">Ensembl REST API</a>. This tool is for research purposes only.</p>
+    </footer>
+    <!--
+        Configuration for COSMIC API integration.
+        If you have deployed the COSMIC endpoint and meta file, update the values below
+        to point to your server. The JS code reads these globals to fetch extended COSMIC data.
+        Example:
+        window.COSMIC_API_ENDPOINT = "https://drdoubleb.com/api/cosmic";
+        window.COSMIC_META_URL    = "https://drdoubleb.com/cosmic_meta.json";
+    -->
+    <script>
+        /*
+         * Configuration for the COSMIC integration. If you host this page on the same
+         * domain as your FastAPI service and meta file, you can leave these as
+         * relative paths. Otherwise, override them by defining
+         * window.COSMIC_API_ENDPOINT and/or window.COSMIC_META_URL before
+         * including script.js.
+         */
+        // Default to a relative path to the COSMIC API on the same origin. Users
+        // can override this by setting window.COSMIC_API_ENDPOINT in a script tag
+        // before this one.
+        // Use a default absolute path to your COSMIC API hosted on Render. If you
+        // wish to host the API on the same domain as this page, override
+        // window.COSMIC_API_ENDPOINT before loading this script. Without an
+        // override, the API calls will go to the Render deployment.
+        if (typeof window.COSMIC_API_ENDPOINT === 'undefined' || window.COSMIC_API_ENDPOINT === null) {
+            window.COSMIC_API_ENDPOINT = 'https://molecular3.onrender.com/api/cosmic';
+        }
+        // Default to a full URL for the cosmic_meta.json file. If you have
+        // relocated this file, set window.COSMIC_META_URL before loading
+        // script.js.
+        if (typeof window.COSMIC_META_URL === 'undefined' || window.COSMIC_META_URL === null) {
+            window.COSMIC_META_URL = 'https://molecular3.onrender.com/cosmic_meta.json';
+        }
+    </script>
+    <!-- Cache-busting query parameter to ensure browsers fetch the latest script.
+         Increment the version whenever script.js changes to avoid caching issues. -->
+    <!-- Cache-busting query parameter updated to ensure browsers fetch the latest script.
+         Increment the version whenever script.js changes to avoid caching issues. -->
+    <!-- Append a version query parameter to force browsers to reload the updated script -->
+    <!-- Append a version query parameter to force browsers to reload the updated script -->
+    <!-- Update version query parameter to bust cache whenever script.js is modified -->
+    <!-- Updated version query parameter to 20250851 to bust cache after modifying canonical and snpEff handling logic -->
+    <!-- Increment version query parameter to bust cache after updating deletion handling and canonical selection -->
+    <!-- Increment version query parameter after updating canonical selection matching query cDNA -->
+    <!-- Bump the script version to force browsers to fetch the latest script.js after updates -->
+    <!-- Bump version to bust cache after fixing gene extraction and g.-variant selection for intronic variants -->
+    <!-- Bump version to bust cache after adding Ensembl output and improved cDNA candidate matching -->
+    <!-- Bump version to ensure browsers load the latest script when delins handling is updated -->
+    <script src="script.js?v=20250924"></script>
+</body>
+</html>
