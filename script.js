@@ -3063,9 +3063,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const clinicalUrl = `https://www.google.com/search?q=${clinicalQuery}`;
                 const spliceTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
                 const spliceVariantText = spliceTuple ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceTuple.ref} ${spliceTuple.alt}` : '';
+                // SpliceAI lookup defaults to hg38 when hg is omitted. Most MyVariant coordinates
+                // we surface in this app are hg19/GRCh37, so explicitly request hg=37.
                 const spliceAiUrl = spliceVariantText
-                    ? `https://spliceailookup.broadinstitute.org/#variant=${encodeURIComponent(spliceVariantText)}`
-                    : 'https://spliceailookup.broadinstitute.org/';
+                    ? `https://spliceailookup.broadinstitute.org/#variant=${encodeURIComponent(spliceVariantText)}&hg=37`
+                    : 'https://spliceailookup.broadinstitute.org/#hg=37';
 
                 const card = document.createElement('div');
                 card.className = 'card';
