@@ -3064,7 +3064,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const spliceTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
                 const spliceVariantText = spliceTuple ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceTuple.ref} ${spliceTuple.alt}` : '';
                 const spliceAiUrl = spliceVariantText
-                    ? `https://spliceailookup.broadinstitute.org/?variant=${encodeURIComponent(spliceVariantText)}`
+                    ? `https://spliceailookup.broadinstitute.org/#variant=${encodeURIComponent(spliceVariantText)}`
                     : 'https://spliceailookup.broadinstitute.org/';
 
                 const card = document.createElement('div');
