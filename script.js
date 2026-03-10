@@ -63,6 +63,23 @@ function buildSpliceAiLookupTuple(rawInput, gVariant) {
     return parseTokenInput(rawInput) || parseSimpleGenomic(gVariant) || null;
 }
 
+// Build a gnomAD variant-browser URL from either raw token input (preferred) or
+// a simple genomic substitution HGVS string.
+function buildGnomadVariantUrl(rawInput, gVariant, annotationId) {
+    // Raw token input (e.g. "10 89692913 PTEN G GG") is preferred because it
+    // preserves REF/ALT for indels even when gVariant is normalised to ins/delins.
+    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+    if (tuple) {
+        const chrom = tuple.chrom.replace(/^chr/i, '');
+        return `https://gnomad.broadinstitute.org/variant/${chrom}-${tuple.pos}-${tuple.ref}-${tuple.alt}?dataset=gnomad_r2_1`;
+    }
+    // Fallback: use annotation/gVariant only for simple substitutions.
+    const source = annotationId || gVariant || '';
+    const m = String(source).match(/^chr([0-9XYMT]+):g\.(\d+)([A-Za-z-]+)>([A-Za-z-]+)$/i);
+    if (!m) return '';
+    return `https://gnomad.broadinstitute.org/variant/${m[1]}-${m[2]}-${m[3].toUpperCase()}-${m[4].toUpperCase()}?dataset=gnomad_r2_1`;
+}
+
 // Convert a triple‑letter amino acid change (e.g. VAL600GLU) to a single‑letter code (V600E).
 // Accepts uppercase three‑letter codes and returns uppercase single‑letter code if mapping exists.
 function tripleToSingle(prot) {
@@ -593,7 +610,7 @@ function buildSummary(annotation, variant) {
 
 // Build a structured details view from the annotation object. Returns an array of
 // category objects, each with a title and an array of {name, value} pairs.
-function buildDetailsData(annotation) {
+function buildDetailsData(annotation, rawInput, gVariant) {
     const details = [];
     // Basic genomic details
     const basic = {};
@@ -830,17 +847,11 @@ function buildDetailsData(annotation) {
         addGnomadFields(annotation.gnomad_genomes, 'Genome');
         // Some annotations may use a top-level gnomad object
         addGnomadFields(annotation.gnomad, 'gnomAD');
-        // Build link to gnomAD browser using hg19 coordinates if available
-        if (annotation._id) {
-            const m = String(annotation._id).match(/^chr([0-9XYMT]+):g\.(\d+)([A-Za-z-]+)>([A-Za-z-]+)/);
-            if (m) {
-                const chrom = m[1];
-                const pos = m[2];
-                const ref = m[3];
-                const alt = m[4];
-                const url = `https://gnomad.broadinstitute.org/variant/${chrom}-${pos}-${ref}-${alt}?dataset=gnomad_r2_1`;
-                gnomad['gnomAD Link'] = { html: `<a href="${url}" target="_blank" rel="noopener noreferrer">View on gnomAD</a>` };
-            }
+        // Build link to gnomAD browser. Prefer raw token input so indels
+        // still link to a useful region/variant view even without MyVariant hits.
+        const url = buildGnomadVariantUrl(rawInput, gVariant, annotation._id);
+        if (url) {
+            gnomad['gnomAD Link'] = { html: `<a href="${url}" target="_blank" rel="noopener noreferrer">View on gnomAD</a>` };
         }
         if (Object.keys(gnomad).length > 0) details.push({ title: 'gnomAD', items: gnomad });
     }
@@ -1800,7 +1811,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 summaryTable.appendChild(tr);
             });
             // Build detailed sections
-            let detailsData = buildDetailsData(annotation);
+            let detailsData = buildDetailsData(annotation, rawInput, gVariant);
             const detailsContainer = document.getElementById('detailsContainer');
 
             // Attempt to fetch extended COSMIC data from a custom API if configured.
@@ -2659,19 +2670,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const gnomadGenome = annotation.gnomad_genome || annotation.gnomad_genomes;
                 const exomeStats = getGnomadStats(gnomadExome);
                 const genomeStats = getGnomadStats(gnomadGenome);
-                // Build gnomAD link using hg19 coordinates from gVariant
-                let gnomadLink = '';
-                {
-                    const m = String(gVariant).match(/^chr([0-9XYMT]+):g\.(\d+)([A-Za-z-]+)>([A-Za-z-]+)/);
-                    if (m) {
-                        const chrom = m[1];
-                        const pos = m[2];
-                        const ref = m[3];
-                        const alt = m[4];
-                        // Use r2.1 (hg19) dataset by default
-                        gnomadLink = `https://gnomad.broadinstitute.org/variant/${chrom}-${pos}-${ref}-${alt}?dataset=gnomad_r2_1`;
-                    }
-                }
+                // Build gnomAD link. Prefer raw token input so indels can
+                // still open a meaningful gnomAD variant/region page.
+                const gnomadLink = buildGnomadVariantUrl(rawInput, gVariant, annotation && annotation._id);
                 const card = document.createElement('div');
                 card.className = 'card';
                 const title = document.createElement('h3');
