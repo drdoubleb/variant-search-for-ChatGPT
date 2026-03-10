@@ -39,9 +39,8 @@ function buildSpliceAiLookupTuple(rawInput, gVariant) {
         if (toks.length !== 4 && toks.length !== 5) return null;
         const tokens = toks.slice();
         if (tokens.length === 5) {
-            const maybeGene = tokens[2];
-            const isGene = /^[A-Za-z]+$/.test(maybeGene) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(maybeGene);
-            if (!isGene) return null;
+            // For 5-token genomic input, always treat token #3 as an optional gene/label
+            // and remove it. Example: "17 7573954 TP53 T A".
             tokens.splice(2, 1);
         }
         const [chrTok, posTok, refTok, altTok] = tokens;
@@ -1117,14 +1116,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Create a copy of tokens and remove a potential gene symbol at index 2 when length is 5.
                     let tokens = toks.slice();
                     if (tokens.length === 5) {
-                        const maybeGene = tokens[2];
-                        // Consider as a gene if it consists only of letters and is not a simple nucleotide string.
-                        const isGene = /^[A-Za-z]+$/.test(maybeGene) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(maybeGene);
-                        if (isGene) {
-                            // Store gene hint globally for later use when building minimal annotations.
-                            geneHintGlobal = maybeGene.toUpperCase();
-                            tokens.splice(2, 1);
+                        const token3 = tokens[2];
+                        // For 5-token genomic input, always ignore token #3 as an optional gene/label
+                        // so values like TP53, ENSG IDs or other labels do not block normalisation.
+                        // Preserve a simple uppercase token as a gene hint for fallback displays.
+                        if (/^[A-Za-z][A-Za-z0-9-]*$/.test(token3) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(token3)) {
+                            geneHintGlobal = token3.toUpperCase();
                         }
+                        tokens.splice(2, 1);
                     }
                     if (tokens.length === 4) {
                         const [chrTok, posTok, refTok, altTok] = tokens;
