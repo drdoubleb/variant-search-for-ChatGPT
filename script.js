@@ -40,7 +40,9 @@ function buildSpliceAiLookupTuple(rawInput, gVariant) {
         const tokens = toks.slice();
         if (tokens.length === 5) {
             const maybeGene = tokens[2];
-            const isGene = /^[A-Za-z]+$/.test(maybeGene) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(maybeGene);
+            // Accept common HGNC-style symbols that may include digits (e.g. TP53, MSH2)
+            // while still excluding plain nucleotide strings.
+            const isGene = /^[A-Za-z][A-Za-z0-9-]*$/.test(maybeGene) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(maybeGene);
             if (!isGene) return null;
             tokens.splice(2, 1);
         }
@@ -1118,8 +1120,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     let tokens = toks.slice();
                     if (tokens.length === 5) {
                         const maybeGene = tokens[2];
-                        // Consider as a gene if it consists only of letters and is not a simple nucleotide string.
-                        const isGene = /^[A-Za-z]+$/.test(maybeGene) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(maybeGene);
+                        // Consider as a gene if it matches common HGNC-style symbols (letters with optional digits/hyphens)
+                        // and is not a simple nucleotide string.
+                        const isGene = /^[A-Za-z][A-Za-z0-9-]*$/.test(maybeGene) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(maybeGene);
                         if (isGene) {
                             // Store gene hint globally for later use when building minimal annotations.
                             geneHintGlobal = maybeGene.toUpperCase();
