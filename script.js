@@ -1205,7 +1205,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         // For 5-token genomic input, always ignore token #3 as an optional gene/label
                         // so values like TP53, ENSG IDs or other labels do not block normalisation.
                         // Preserve a simple uppercase token as a gene hint for fallback displays.
-                        if (/^[A-Za-z][A-Za-z0-9-]*$/.test(token3) && !/^[ACGTURYMKSWBDHVN-]+$/i.test(token3)) {
+                        if (/^[A-Za-z][A-Za-z0-9-]*$/.test(token3)) {
                             geneHintGlobal = token3.toUpperCase();
                         }
                         tokens.splice(2, 1);
@@ -1277,8 +1277,12 @@ document.addEventListener('DOMContentLoaded', () => {
                                     return `chr${chrom}:g.${delStart2}_${delEnd2}delins${alt}`;
                                 }
                             }
-                            // Lengths equal (simple substitution or multi-nucleotide change)
-                            return `chr${chrom}:g.${pos}${ref}>${alt}`;
+                            // Lengths equal: represent SNVs as ref>alt, but use delins for MNVs.
+                            if (ref.length === 1) {
+                                return `chr${chrom}:g.${pos}${ref}>${alt}`;
+                            }
+                            const endPos = pos + ref.length - 1;
+                            return `chr${chrom}:g.${pos}_${endPos}delins${alt}`;
                         }
                     }
                 }
@@ -3156,6 +3160,26 @@ document.addEventListener('DOMContentLoaded', () => {
                     const m = fromColon.match(/c\.[^\s,;]+/i);
                     return m ? m[0] : (fromColon.startsWith('c.') ? fromColon : '');
                 };
+                const normalizeProteinSearchTerm = (value) => {
+                    if (!value) return '';
+                    const raw = String(value).trim();
+                    const noHtml = raw.replace(/<[^>]+>/g, '');
+                    const first = noHtml.split(',')[0].trim();
+                    const fromColon = first.includes(':') ? first.split(':').slice(1).join(':').trim() : first;
+                    const m = fromColon.match(/p\.[^\s,;]+/i);
+                    if (m) return m[0];
+                    return /^p\./i.test(fromColon) ? fromColon : '';
+                };
+                let protSearch = normalizeProteinSearchTerm(protein);
+                if (!protSearch && transcriptsList && transcriptsList.length > 0) {
+                    const canonicalTx = transcriptsList.find(t => t.canonical) || transcriptsList[0];
+                    protSearch = normalizeProteinSearchTerm(canonicalTx?.protein || '');
+                    if (!protSearch) {
+                        const firstTxWithProt = transcriptsList.find(t => t.protein);
+                        protSearch = normalizeProteinSearchTerm(firstTxWithProt?.protein || '');
+                    }
+                }
+
                 let cdnaSearch = '';
                 if (transcriptsList && transcriptsList.length > 0) {
                     const canonicalTx = transcriptsList.find(t => t.canonical) || transcriptsList[0];
@@ -3168,7 +3192,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!cdnaSearch && cDNAHTML) {
                     cdnaSearch = normalizeCdnaSearchTerm(cDNAHTML);
                 }
-                const searchVariantTerm = protSingle || cdnaSearch;
+                const searchVariantTerm = protSingle || protSearch || cdnaSearch;
 
                 const genes = geneNames ? geneNames.split(',').map(g => g.trim()).filter(Boolean) : [];
                 let firstGene = genes.find(g => !isChromosomeLikeGeneSymbol(g)) || genes[0] || '';
