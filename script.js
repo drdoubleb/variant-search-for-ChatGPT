@@ -23,6 +23,14 @@ const accessionToChr = (accession) => {
 // incorrectly yield "chr7" or similar. See normalizeVariantInput() below.
 let geneHintGlobal = null;
 
+// Chromosome-like placeholders (e.g. "CHR12") can appear in fallback annotations
+// and are not useful for user-facing search links.
+function isChromosomeLikeGeneSymbol(symbol) {
+    if (!symbol) return false;
+    const s = String(symbol).trim().toUpperCase();
+    return /^CHR(?:[0-9]+|X|Y|M|MT)$/.test(s);
+}
+
 // Determine whether the variant string is already in genomic (g.) format.
 const isGenomicVariant = (variant) => {
     // Accept patterns like 'chr7:g.123456A>T' or 'NC_000007.13:g.123456A>T'.
@@ -462,6 +470,83 @@ async function fetchMyVariant(variant) {
 // transcript consequences (if any) from the response. If the request fails or no
 // consequences are found, it throws an error. We use GRCh37 here because many
 // clinical variant coordinates (e.g. hg19) are based on this assembly.
+
+
+// Resolve a reliable gene symbol from VEP consequences. Prefer explicit non-chromosome
+// symbols from VEP, then resolve Ensembl gene IDs (ENSG...) via lookup, and finally
+// fall back to transcript-gene mapping from the variant_recoder payload.
+async function resolveGeneSymbolFromVep(consequences, recoderData) {
+    if (!Array.isArray(consequences) || consequences.length === 0) return '';
+
+    // 1) Prefer any direct gene_symbol that is not chromosome-like.
+    for (const c of consequences) {
+        const sym = c?.gene_symbol ? String(c.gene_symbol).trim() : '';
+        if (sym && !isChromosomeLikeGeneSymbol(sym)) return sym;
+    }
+
+    // 2) Resolve via Ensembl gene IDs when available.
+    const geneIds = Array.from(new Set(
+        consequences
+            .map(c => (c?.gene_id ? String(c.gene_id).trim() : ''))
+            .filter(id => /^ENSG\d+/i.test(id))
+    ));
+    for (const geneId of geneIds) {
+        try {
+            const url = `https://grch37.rest.ensembl.org/lookup/id/${encodeURIComponent(geneId)}?content-type=application/json`;
+            const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+            if (!resp.ok) continue;
+            const data = await resp.json();
+            const sym = data?.display_name ? String(data.display_name).trim() : '';
+            if (sym && !isChromosomeLikeGeneSymbol(sym)) return sym;
+        } catch {
+            // ignore and continue other IDs
+        }
+    }
+
+    // 3) Derive gene from transcript IDs via variant_recoder, then resolve gene symbol.
+    const txIds = Array.from(new Set(
+        consequences
+            .map(c => (c?.transcript_id ? String(c.transcript_id).trim() : ''))
+            .filter(Boolean)
+    ));
+    if (Array.isArray(recoderData) && recoderData.length > 0 && txIds.length > 0) {
+        const recEntry = recoderData[0];
+        for (const subVal of Object.values(recEntry || {})) {
+            if (!subVal || typeof subVal !== 'object') continue;
+            const hgvscList = Array.isArray(subVal.hgvsc) ? subVal.hgvsc : (subVal.hgvsc ? [subVal.hgvsc] : []);
+            for (const sc of hgvscList) {
+                const tx = String(sc).split(':')[0].trim();
+                if (!txIds.includes(tx)) continue;
+                if (/^ENST\d+/i.test(tx)) {
+                    try {
+                        const txUrl = `https://grch37.rest.ensembl.org/lookup/id/${encodeURIComponent(tx)}?content-type=application/json`;
+                        const txResp = await fetch(txUrl, { headers: { 'Accept': 'application/json' } });
+                        if (!txResp.ok) continue;
+                        const txData = await txResp.json();
+                        const parentGeneId = txData?.Parent ? String(txData.Parent).trim() : '';
+                        if (!/^ENSG\d+/i.test(parentGeneId)) continue;
+                        const gUrl = `https://grch37.rest.ensembl.org/lookup/id/${encodeURIComponent(parentGeneId)}?content-type=application/json`;
+                        const gResp = await fetch(gUrl, { headers: { 'Accept': 'application/json' } });
+                        if (!gResp.ok) continue;
+                        const gData = await gResp.json();
+                        const sym = gData?.display_name ? String(gData.display_name).trim() : '';
+                        if (sym && !isChromosomeLikeGeneSymbol(sym)) return sym;
+                    } catch {
+                        // keep trying
+                    }
+                }
+            }
+        }
+    }
+
+    // 4) Last resort: keep first available non-empty symbol, even if chromosome-like.
+    for (const c of consequences) {
+        const sym = c?.gene_symbol ? String(c.gene_symbol).trim() : '';
+        if (sym) return sym;
+    }
+    return '';
+}
+
 async function fetchVepHgvsHg19(variant) {
     if (!variant) throw new Error('No variant provided');
     // Normalize: strip leading "chr" prefix (case-insensitive) before the colon
@@ -1757,7 +1842,12 @@ document.addEventListener('DOMContentLoaded', () => {
                                         // Build a minimal annotation using the first gene symbol from the VEP data. The dbnsfp
                                         // genename field is used for summary display. The _id is set to the original query.
                                         annotation = { _id: query };
-                                        const geneSym = vepConsequences[0].gene_symbol || '';
+                                        let geneSym = await resolveGeneSymbolFromVep(vepConsequences, recoderData);
+                                        // If upstream sources still do not provide a usable gene symbol,
+                                        // then use the optional user hint as the final fallback.
+                                        if ((!geneSym || isChromosomeLikeGeneSymbol(geneSym)) && geneHintGlobal) {
+                                            geneSym = geneHintGlobal;
+                                        }
                                         if (geneSym) {
                                             annotation.dbnsfp = { genename: geneSym };
                                         }
@@ -3056,9 +3146,37 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (m2) protSingle = m2[1].toUpperCase() + m2[2] + m2[3].toUpperCase();
                     }
                 }
-                const firstGene = geneNames ? geneNames.split(',')[0].trim() : '';
-                const pathQuery = encodeURIComponent(`pathogenicity of ${firstGene} ${protSingle}`.trim());
-                const clinicalQuery = encodeURIComponent(`clinical significance of ${firstGene} ${protSingle}`.trim());
+                // If protein notation is unavailable, fall back to canonical cDNA for search queries.
+                const normalizeCdnaSearchTerm = (value) => {
+                    if (!value) return '';
+                    const raw = String(value).trim();
+                    const noHtml = raw.replace(/<[^>]+>/g, '');
+                    const first = noHtml.split(',')[0].trim();
+                    const fromColon = first.includes(':') ? first.split(':').slice(1).join(':').trim() : first;
+                    const m = fromColon.match(/c\.[^\s,;]+/i);
+                    return m ? m[0] : (fromColon.startsWith('c.') ? fromColon : '');
+                };
+                let cdnaSearch = '';
+                if (transcriptsList && transcriptsList.length > 0) {
+                    const canonicalTx = transcriptsList.find(t => t.canonical) || transcriptsList[0];
+                    cdnaSearch = normalizeCdnaSearchTerm(canonicalTx?.cDNA || '');
+                }
+                if (!cdnaSearch && annotation?.hgvsc) {
+                    const h = Array.isArray(annotation.hgvsc) ? annotation.hgvsc[0] : annotation.hgvsc;
+                    cdnaSearch = normalizeCdnaSearchTerm(h);
+                }
+                if (!cdnaSearch && cDNAHTML) {
+                    cdnaSearch = normalizeCdnaSearchTerm(cDNAHTML);
+                }
+                const searchVariantTerm = protSingle || cdnaSearch;
+
+                const genes = geneNames ? geneNames.split(',').map(g => g.trim()).filter(Boolean) : [];
+                let firstGene = genes.find(g => !isChromosomeLikeGeneSymbol(g)) || genes[0] || '';
+                if ((!firstGene || isChromosomeLikeGeneSymbol(firstGene)) && geneHintGlobal) {
+                    firstGene = geneHintGlobal;
+                }
+                const pathQuery = encodeURIComponent(`pathogenicity of ${firstGene} ${searchVariantTerm}`.trim());
+                const clinicalQuery = encodeURIComponent(`clinical significance of ${firstGene} ${searchVariantTerm}`.trim());
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
                 const clinicalUrl = `https://www.google.com/search?q=${clinicalQuery}`;
                 const spliceTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
