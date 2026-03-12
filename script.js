@@ -3146,13 +3146,37 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (m2) protSingle = m2[1].toUpperCase() + m2[2] + m2[3].toUpperCase();
                     }
                 }
+                // If protein notation is unavailable, fall back to canonical cDNA for search queries.
+                const normalizeCdnaSearchTerm = (value) => {
+                    if (!value) return '';
+                    const raw = String(value).trim();
+                    const noHtml = raw.replace(/<[^>]+>/g, '');
+                    const first = noHtml.split(',')[0].trim();
+                    const fromColon = first.includes(':') ? first.split(':').slice(1).join(':').trim() : first;
+                    const m = fromColon.match(/c\.[^\s,;]+/i);
+                    return m ? m[0] : (fromColon.startsWith('c.') ? fromColon : '');
+                };
+                let cdnaSearch = '';
+                if (transcriptsList && transcriptsList.length > 0) {
+                    const canonicalTx = transcriptsList.find(t => t.canonical) || transcriptsList[0];
+                    cdnaSearch = normalizeCdnaSearchTerm(canonicalTx?.cDNA || '');
+                }
+                if (!cdnaSearch && annotation?.hgvsc) {
+                    const h = Array.isArray(annotation.hgvsc) ? annotation.hgvsc[0] : annotation.hgvsc;
+                    cdnaSearch = normalizeCdnaSearchTerm(h);
+                }
+                if (!cdnaSearch && cDNAHTML) {
+                    cdnaSearch = normalizeCdnaSearchTerm(cDNAHTML);
+                }
+                const searchVariantTerm = protSingle || cdnaSearch;
+
                 const genes = geneNames ? geneNames.split(',').map(g => g.trim()).filter(Boolean) : [];
                 let firstGene = genes.find(g => !isChromosomeLikeGeneSymbol(g)) || genes[0] || '';
                 if ((!firstGene || isChromosomeLikeGeneSymbol(firstGene)) && geneHintGlobal) {
                     firstGene = geneHintGlobal;
                 }
-                const pathQuery = encodeURIComponent(`pathogenicity of ${firstGene} ${protSingle}`.trim());
-                const clinicalQuery = encodeURIComponent(`clinical significance of ${firstGene} ${protSingle}`.trim());
+                const pathQuery = encodeURIComponent(`pathogenicity of ${firstGene} ${searchVariantTerm}`.trim());
+                const clinicalQuery = encodeURIComponent(`clinical significance of ${firstGene} ${searchVariantTerm}`.trim());
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
                 const clinicalUrl = `https://www.google.com/search?q=${clinicalQuery}`;
                 const spliceTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
