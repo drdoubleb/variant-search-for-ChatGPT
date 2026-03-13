@@ -89,11 +89,21 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId) {
 
 // Build a UCSC Genome Browser link (hg19/GRCh37) centered on the variant region.
 function buildUcscHg19Url(rawInput, gVariant, annotation) {
+    const toUcscChrom = (chrom) => {
+        if (!chrom) return '';
+        const bare = String(chrom).trim().replace(/^chr/i, '').toUpperCase();
+        if (!bare) return '';
+        // UCSC uses chrM (not chrMT) for mitochondrial chromosome labels.
+        const ucscBare = bare === 'MT' ? 'M' : bare;
+        return `chr${ucscBare}`;
+    };
+
     const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
     if (tuple && tuple.chrom && tuple.pos) {
         const pos = Number(tuple.pos);
-        if (Number.isFinite(pos) && pos > 0) {
-            const region = `chr${tuple.chrom}:${pos}-${pos}`;
+        const ucscChrom = toUcscChrom(tuple.chrom);
+        if (Number.isFinite(pos) && pos > 0 && ucscChrom) {
+            const region = `${ucscChrom}:${pos}-${pos}`;
             return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
         }
     }
@@ -103,8 +113,9 @@ function buildUcscHg19Url(rawInput, gVariant, annotation) {
     if (hg19?.start !== undefined && chrom) {
         const start = Number(hg19.start);
         const end = Number(hg19.end ?? hg19.start);
-        if (Number.isFinite(start) && Number.isFinite(end)) {
-            const region = `chr${String(chrom).replace(/^chr/i, '')}:${start}-${end}`;
+        const ucscChrom = toUcscChrom(chrom);
+        if (Number.isFinite(start) && Number.isFinite(end) && ucscChrom) {
+            const region = `${ucscChrom}:${start}-${end}`;
             return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
         }
     }
