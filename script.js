@@ -87,6 +87,41 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId) {
     return `https://gnomad.broadinstitute.org/variant/${m[1]}-${m[2]}-${m[3].toUpperCase()}-${m[4].toUpperCase()}?dataset=gnomad_r2_1`;
 }
 
+// Build a UCSC Genome Browser link (hg19/GRCh37) centered on the variant region.
+function buildUcscHg19Url(rawInput, gVariant, annotation) {
+    const toUcscChrom = (chrom) => {
+        if (!chrom) return '';
+        const bare = String(chrom).trim().replace(/^chr/i, '').toUpperCase();
+        if (!bare) return '';
+        // UCSC uses chrM (not chrMT) for mitochondrial chromosome labels.
+        const ucscBare = bare === 'MT' ? 'M' : bare;
+        return `chr${ucscBare}`;
+    };
+
+    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+    if (tuple && tuple.chrom && tuple.pos) {
+        const pos = Number(tuple.pos);
+        const ucscChrom = toUcscChrom(tuple.chrom);
+        if (Number.isFinite(pos) && pos > 0 && ucscChrom) {
+            const region = `${ucscChrom}:${pos}-${pos}`;
+            return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
+        }
+    }
+
+    const hg19 = annotation?.hg19 || annotation?.dbsnp?.hg19;
+    const chrom = annotation?.chrom || annotation?.cadd?.chrom || annotation?.dbsnp?.chrom;
+    if (hg19?.start !== undefined && chrom) {
+        const start = Number(hg19.start);
+        const end = Number(hg19.end ?? hg19.start);
+        const ucscChrom = toUcscChrom(chrom);
+        if (Number.isFinite(start) && Number.isFinite(end) && ucscChrom) {
+            const region = `${ucscChrom}:${start}-${end}`;
+            return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
+        }
+    }
+    return '';
+}
+
 // Convert a triple‑letter amino acid change (e.g. VAL600GLU) to a single‑letter code (V600E).
 // Accepts uppercase three‑letter codes and returns uppercase single‑letter code if mapping exists.
 function tripleToSingle(prot) {
@@ -2553,6 +2588,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 content.appendChild(makeLine('c.', canonicalCVal));
                 content.appendChild(makeLine('p.', canonicalProtVal));
                 content.appendChild(makeLine('Effect', effect));
+                const ucscUrl = buildUcscHg19Url(rawInput, gVariant, annotation);
+                if (ucscUrl) {
+                    content.appendChild(makeLine('UCSC (hg19)', `<a href="${ucscUrl}" target="_blank" rel="noopener noreferrer">Zoom to region</a>`));
+                }
                 // Append list of transcripts showing cDNA and protein for each transcript in a collapsible details element
                 if (transcriptsList && transcriptsList.length > 1) {
                     const detailsEl = document.createElement('details');
