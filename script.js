@@ -23,6 +23,32 @@ const accessionToChr = (accession) => {
 // incorrectly yield "chr7" or similar. See normalizeVariantInput() below.
 let geneHintGlobal = null;
 
+// Keep third-party API latency from blocking the UI for long periods.
+const API_TIMEOUT_MS = {
+    myvariant: 7000,
+    recoder: 6000,
+    vep: 7000,
+    lookup: 4000,
+    liftover: 4000,
+    cosmic: 2500,
+    cosmicMeta: 1500
+};
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+        if (err && err.name === 'AbortError') {
+            throw new Error(`Request timed out after ${timeoutMs}ms`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 // Chromosome-like placeholders (e.g. "CHR12") can appear in fallback annotations
 // and are not useful for user-facing search links.
 function isChromosomeLikeGeneSymbol(symbol) {
@@ -470,11 +496,11 @@ async function fetchVariantRecoder(query) {
     // improves consistency and allows detection of variants such as
     // BRAF c.1799_1811delinsA.
     const url = `https://grch37.rest.ensembl.org/variant_recoder/human/${encoded}?content-type=application/json`;
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
         headers: {
             'Accept': 'application/json'
         }
-    });
+    }, API_TIMEOUT_MS.recoder);
     if (!response.ok) {
         const text = await response.text();
         throw new Error(`Variant recoder request failed (${response.status}): ${text}`);
@@ -495,7 +521,7 @@ async function liftoverHg38ToHg19(variant) {
     // Build URL for liftover using Ensembl map endpoint
     const url = `https://rest.ensembl.org/map/human/GRCh38/${chrom}:${pos}..${pos}:1/GRCh37?content-type=application/json`;
     try {
-        const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        const res = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.liftover);
         if (!res.ok) {
             // If error (e.g. 400), just return original
             return variant;
@@ -517,7 +543,7 @@ async function liftoverHg38ToHg19(variant) {
 async function fetchMyVariant(variant) {
     const encoded = encodeURIComponent(variant);
     const url = `https://myvariant.info/v1/variant/${encoded}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.myvariant);
     if (!response.ok) {
         const text = await response.text();
         throw new Error(`MyVariant.info request failed (${response.status}): ${text}`);
@@ -554,7 +580,7 @@ async function resolveGeneSymbolFromVep(consequences, recoderData) {
     for (const geneId of geneIds) {
         try {
             const url = `https://grch37.rest.ensembl.org/lookup/id/${encodeURIComponent(geneId)}?content-type=application/json`;
-            const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+            const resp = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.lookup);
             if (!resp.ok) continue;
             const data = await resp.json();
             const sym = data?.display_name ? String(data.display_name).trim() : '';
@@ -581,13 +607,13 @@ async function resolveGeneSymbolFromVep(consequences, recoderData) {
                 if (/^ENST\d+/i.test(tx)) {
                     try {
                         const txUrl = `https://grch37.rest.ensembl.org/lookup/id/${encodeURIComponent(tx)}?content-type=application/json`;
-                        const txResp = await fetch(txUrl, { headers: { 'Accept': 'application/json' } });
+                        const txResp = await fetchWithTimeout(txUrl, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.lookup);
                         if (!txResp.ok) continue;
                         const txData = await txResp.json();
                         const parentGeneId = txData?.Parent ? String(txData.Parent).trim() : '';
                         if (!/^ENSG\d+/i.test(parentGeneId)) continue;
                         const gUrl = `https://grch37.rest.ensembl.org/lookup/id/${encodeURIComponent(parentGeneId)}?content-type=application/json`;
-                        const gResp = await fetch(gUrl, { headers: { 'Accept': 'application/json' } });
+                        const gResp = await fetchWithTimeout(gUrl, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.lookup);
                         if (!gResp.ok) continue;
                         const gData = await gResp.json();
                         const sym = gData?.display_name ? String(gData.display_name).trim() : '';
@@ -617,11 +643,11 @@ async function fetchVepHgvsHg19(variant) {
         hgvs = `${m[1]}:g.${m[2]}`;
     }
     const url = `https://grch37.rest.ensembl.org/vep/human/hgvs/${encodeURIComponent(hgvs)}?content-type=application/json`;
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
         headers: {
             'Accept': 'application/json'
         }
-    });
+    }, API_TIMEOUT_MS.vep);
     if (!response.ok) {
         const text = await response.text();
         throw new Error(`VEP HGVS request failed (${response.status}): ${text}`);
@@ -640,7 +666,7 @@ async function fetchVepHgvsHg19(variant) {
 async function queryMyVariantById(identifier) {
     const encoded = encodeURIComponent(identifier);
     const url = `https://myvariant.info/v1/query?q=${encoded}&size=1`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.myvariant);
     if (!response.ok) {
         const text = await response.text();
         throw new Error(`MyVariant.info query request failed (${response.status}): ${text}`);
@@ -1973,16 +1999,17 @@ document.addEventListener('DOMContentLoaded', () => {
             const COSMIC_META_URL = window.COSMIC_META_URL || null;
             if (COSMIC_ENDPOINT) {
                 try {
-                    const cosmicRes = await fetch(`${COSMIC_ENDPOINT}?hgvsg=${encodeURIComponent(gVariant)}`);
-                    if (cosmicRes.ok) {
-                        const cosmicData = await cosmicRes.json();
+                    const cosmicPromise = fetchWithTimeout(`${COSMIC_ENDPOINT}?hgvsg=${encodeURIComponent(gVariant)}`, {}, API_TIMEOUT_MS.cosmic);
+                    const metaPromise = COSMIC_META_URL
+                        ? fetchWithTimeout(COSMIC_META_URL, {}, API_TIMEOUT_MS.cosmicMeta)
+                        : Promise.resolve(null);
+                    const [cosmicResult, metaResult] = await Promise.allSettled([cosmicPromise, metaPromise]);
+                    if (cosmicResult.status === 'fulfilled' && cosmicResult.value.ok) {
+                        const cosmicData = await cosmicResult.value.json();
                         // Optionally load cosmic meta to compute frequencies
                         let meta = null;
-                        if (COSMIC_META_URL) {
-                            try {
-                                const metaRes = await fetch(COSMIC_META_URL);
-                                if (metaRes.ok) meta = await metaRes.json();
-                            } catch {}
+                        if (metaResult.status === 'fulfilled' && metaResult.value && metaResult.value.ok) {
+                            meta = await metaResult.value.json();
                         }
                         const cosmicItems = {};
                         // Basic COSMIC metrics
