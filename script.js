@@ -87,7 +87,8 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId) {
     return `https://gnomad.broadinstitute.org/variant/${m[1]}-${m[2]}-${m[3].toUpperCase()}-${m[4].toUpperCase()}?dataset=gnomad_r2_1`;
 }
 
-// Build a UCSC Genome Browser link (hg19/GRCh37) centered on the variant region.
+// Build a UCSC Genome Browser link (hg19/GRCh37) centered on a 20-nt window
+// around the variant location (10 upstream, 9 downstream).
 function buildUcscHg19Url(rawInput, gVariant, annotation) {
     const toUcscChrom = (chrom) => {
         if (!chrom) return '';
@@ -98,12 +99,22 @@ function buildUcscHg19Url(rawInput, gVariant, annotation) {
         return `chr${ucscBare}`;
     };
 
+    const toTwentyNtWindow = (start, end = start) => {
+        const s = Number(start);
+        const e = Number(end);
+        if (!Number.isFinite(s) || !Number.isFinite(e)) return null;
+        const center = Math.round((Math.min(s, e) + Math.max(s, e)) / 2);
+        const winStart = Math.max(1, center - 10);
+        const winEnd = winStart + 19;
+        return { start: winStart, end: winEnd };
+    };
+
     const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
     if (tuple && tuple.chrom && tuple.pos) {
-        const pos = Number(tuple.pos);
         const ucscChrom = toUcscChrom(tuple.chrom);
-        if (Number.isFinite(pos) && pos > 0 && ucscChrom) {
-            const region = `${ucscChrom}:${pos}-${pos}`;
+        const win = toTwentyNtWindow(tuple.pos);
+        if (ucscChrom && win) {
+            const region = `${ucscChrom}:${win.start}-${win.end}`;
             return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
         }
     }
@@ -111,11 +122,10 @@ function buildUcscHg19Url(rawInput, gVariant, annotation) {
     const hg19 = annotation?.hg19 || annotation?.dbsnp?.hg19;
     const chrom = annotation?.chrom || annotation?.cadd?.chrom || annotation?.dbsnp?.chrom;
     if (hg19?.start !== undefined && chrom) {
-        const start = Number(hg19.start);
-        const end = Number(hg19.end ?? hg19.start);
         const ucscChrom = toUcscChrom(chrom);
-        if (Number.isFinite(start) && Number.isFinite(end) && ucscChrom) {
-            const region = `${ucscChrom}:${start}-${end}`;
+        const win = toTwentyNtWindow(hg19.start, hg19.end ?? hg19.start);
+        if (ucscChrom && win) {
+            const region = `${ucscChrom}:${win.start}-${win.end}`;
             return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
         }
     }
