@@ -109,13 +109,24 @@ function buildUcscHg19Url(rawInput, gVariant, annotation) {
         return { start: winStart, end: winEnd };
     };
 
+    const buildUcscUrl = (region, highlightRegion) => {
+        const qs = new URLSearchParams({ db: 'hg19', position: region });
+        if (highlightRegion) {
+            // UCSC highlight syntax: <db>.<chr>:<start>-<end>
+            qs.set('highlight', `hg19.${highlightRegion}`);
+        }
+        return `https://genome.ucsc.edu/cgi-bin/hgTracks?${qs.toString()}`;
+    };
+
     const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
     if (tuple && tuple.chrom && tuple.pos) {
         const ucscChrom = toUcscChrom(tuple.chrom);
-        const win = toTwentyNtWindow(tuple.pos);
-        if (ucscChrom && win) {
+        const pos = Number(tuple.pos);
+        const win = toTwentyNtWindow(pos);
+        if (ucscChrom && Number.isFinite(pos) && win) {
             const region = `${ucscChrom}:${win.start}-${win.end}`;
-            return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
+            const highlightRegion = `${ucscChrom}:${pos}-${pos}`;
+            return buildUcscUrl(region, highlightRegion);
         }
     }
 
@@ -123,10 +134,15 @@ function buildUcscHg19Url(rawInput, gVariant, annotation) {
     const chrom = annotation?.chrom || annotation?.cadd?.chrom || annotation?.dbsnp?.chrom;
     if (hg19?.start !== undefined && chrom) {
         const ucscChrom = toUcscChrom(chrom);
-        const win = toTwentyNtWindow(hg19.start, hg19.end ?? hg19.start);
-        if (ucscChrom && win) {
+        const hStart = Number(hg19.start);
+        const hEnd = Number(hg19.end ?? hg19.start);
+        const win = toTwentyNtWindow(hStart, hEnd);
+        if (ucscChrom && Number.isFinite(hStart) && Number.isFinite(hEnd) && win) {
             const region = `${ucscChrom}:${win.start}-${win.end}`;
-            return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
+            const hMin = Math.min(hStart, hEnd);
+            const hMax = Math.max(hStart, hEnd);
+            const highlightRegion = `${ucscChrom}:${hMin}-${hMax}`;
+            return buildUcscUrl(region, highlightRegion);
         }
     }
     return '';
