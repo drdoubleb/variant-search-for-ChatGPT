@@ -87,6 +87,51 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId) {
     return `https://gnomad.broadinstitute.org/variant/${m[1]}-${m[2]}-${m[3].toUpperCase()}-${m[4].toUpperCase()}?dataset=gnomad_r2_1`;
 }
 
+// Build a UCSC Genome Browser link (hg19/GRCh37) centered on a 20-nt window
+// around the variant location (10 upstream, 9 downstream).
+function buildUcscHg19Url(rawInput, gVariant, annotation) {
+    const toUcscChrom = (chrom) => {
+        if (!chrom) return '';
+        const bare = String(chrom).trim().replace(/^chr/i, '').toUpperCase();
+        if (!bare) return '';
+        // UCSC uses chrM (not chrMT) for mitochondrial chromosome labels.
+        const ucscBare = bare === 'MT' ? 'M' : bare;
+        return `chr${ucscBare}`;
+    };
+
+    const toTwentyNtWindow = (start, end = start) => {
+        const s = Number(start);
+        const e = Number(end);
+        if (!Number.isFinite(s) || !Number.isFinite(e)) return null;
+        const center = Math.round((Math.min(s, e) + Math.max(s, e)) / 2);
+        const winStart = Math.max(1, center - 10);
+        const winEnd = winStart + 19;
+        return { start: winStart, end: winEnd };
+    };
+
+    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+    if (tuple && tuple.chrom && tuple.pos) {
+        const ucscChrom = toUcscChrom(tuple.chrom);
+        const win = toTwentyNtWindow(tuple.pos);
+        if (ucscChrom && win) {
+            const region = `${ucscChrom}:${win.start}-${win.end}`;
+            return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
+        }
+    }
+
+    const hg19 = annotation?.hg19 || annotation?.dbsnp?.hg19;
+    const chrom = annotation?.chrom || annotation?.cadd?.chrom || annotation?.dbsnp?.chrom;
+    if (hg19?.start !== undefined && chrom) {
+        const ucscChrom = toUcscChrom(chrom);
+        const win = toTwentyNtWindow(hg19.start, hg19.end ?? hg19.start);
+        if (ucscChrom && win) {
+            const region = `${ucscChrom}:${win.start}-${win.end}`;
+            return `https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg19&position=${encodeURIComponent(region)}`;
+        }
+    }
+    return '';
+}
+
 // Convert a triple‑letter amino acid change (e.g. VAL600GLU) to a single‑letter code (V600E).
 // Accepts uppercase three‑letter codes and returns uppercase single‑letter code if mapping exists.
 function tripleToSingle(prot) {
@@ -2553,6 +2598,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 content.appendChild(makeLine('c.', canonicalCVal));
                 content.appendChild(makeLine('p.', canonicalProtVal));
                 content.appendChild(makeLine('Effect', effect));
+                const ucscUrl = buildUcscHg19Url(rawInput, gVariant, annotation);
+                if (ucscUrl) {
+                    content.appendChild(makeLine('UCSC (hg19)', `<a href="${ucscUrl}" target="_blank" rel="noopener noreferrer">Zoom to region</a>`));
+                }
                 // Append list of transcripts showing cDNA and protein for each transcript in a collapsible details element
                 if (transcriptsList && transcriptsList.length > 1) {
                     const detailsEl = document.createElement('details');
