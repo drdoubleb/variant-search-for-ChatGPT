@@ -662,10 +662,108 @@ async function fetchVepHgvsHg19(variant) {
     return { vepData: data, consequences };
 }
 
-// Query MyVariant.info by rsID or other variant identifier. Returns the first hit if any.
+function parseProteinTargetFromQueryVariant(variantPart) {
+    if (!variantPart) return null;
+    const aaMap = {
+        ALA: 'A', ARG: 'R', ASN: 'N', ASP: 'D', CYS: 'C', GLN: 'Q', GLU: 'E', GLY: 'G',
+        HIS: 'H', ILE: 'I', LEU: 'L', LYS: 'K', MET: 'M', PHE: 'F', PRO: 'P', SER: 'S',
+        THR: 'T', TRP: 'W', TYR: 'Y', VAL: 'V'
+    };
+    const cleaned = String(variantPart).replace(/^p\./i, '').replace(/[^A-Za-z0-9]/g, '');
+    const mTriple = cleaned.match(/^([A-Za-z]{3})(\d+)([A-Za-z]{3})$/);
+    if (mTriple) {
+        const triple = `${mTriple[1]}${mTriple[2]}${mTriple[3]}`.toUpperCase();
+        const refSingle = aaMap[mTriple[1].toUpperCase()];
+        const altSingle = aaMap[mTriple[3].toUpperCase()];
+        const single = (refSingle && altSingle) ? `${refSingle}${mTriple[2]}${altSingle}` : '';
+        return { triple, single };
+    }
+    const mSingle = cleaned.match(/^([A-Za-z])(\d+)([A-Za-z])$/);
+    if (mSingle) {
+        return { triple: '', single: `${mSingle[1].toUpperCase()}${mSingle[2]}${mSingle[3].toUpperCase()}` };
+    }
+    return null;
+}
+
+function parseMyVariantQueryIntent(identifier) {
+    const out = { gene: '', proteinTarget: null, cdnaTarget: '' };
+    if (!identifier) return out;
+    const s = String(identifier).trim();
+    const m = s.match(/^([A-Za-z0-9_.-]+)\s*[:\s]\s*(.+)$/);
+    if (!m) return out;
+    out.gene = m[1].toUpperCase();
+    const variantPart = m[2].trim();
+    if (/^p\./i.test(variantPart)) {
+        out.proteinTarget = parseProteinTargetFromQueryVariant(variantPart);
+    } else if (/^c\./i.test(variantPart)) {
+        out.cdnaTarget = variantPart.toLowerCase();
+    }
+    return out;
+}
+
+function getHitGenesUpper(hit) {
+    const genes = new Set();
+    const addGene = (g) => {
+        if (!g) return;
+        genes.add(String(g).trim().toUpperCase());
+    };
+    addGene(hit?.dbnsfp?.genename);
+    addGene(hit?.clinvar?.gene?.symbol);
+    if (hit?.snpeff?.ann) {
+        const annList = Array.isArray(hit.snpeff.ann) ? hit.snpeff.ann : [hit.snpeff.ann];
+        for (const ann of annList) {
+            addGene(ann?.genename || ann?.gene_name);
+        }
+    }
+    return genes;
+}
+
+function extractProteinNotationsFromHit(hit) {
+    const vals = [];
+    const pushVal = (v) => {
+        if (!v) return;
+        vals.push(String(v).trim());
+    };
+    if (hit?.dbnsfp?.hgvsp) {
+        const list = Array.isArray(hit.dbnsfp.hgvsp) ? hit.dbnsfp.hgvsp : [hit.dbnsfp.hgvsp];
+        for (const v of list) pushVal(v);
+    }
+    if (hit?.hgvsp) {
+        const list = Array.isArray(hit.hgvsp) ? hit.hgvsp : [hit.hgvsp];
+        for (const v of list) pushVal(v);
+    }
+    if (hit?.snpeff?.ann) {
+        const annList = Array.isArray(hit.snpeff.ann) ? hit.snpeff.ann : [hit.snpeff.ann];
+        for (const ann of annList) pushVal(ann?.hgvs_p);
+    }
+    return vals;
+}
+
+function extractCdnaNotationsFromHit(hit) {
+    const vals = [];
+    const pushVal = (v) => {
+        if (!v) return;
+        vals.push(String(v).trim().toLowerCase());
+    };
+    if (hit?.dbnsfp?.hgvsc) {
+        const list = Array.isArray(hit.dbnsfp.hgvsc) ? hit.dbnsfp.hgvsc : [hit.dbnsfp.hgvsc];
+        for (const v of list) pushVal(v);
+    }
+    if (hit?.hgvsc) {
+        const list = Array.isArray(hit.hgvsc) ? hit.hgvsc : [hit.hgvsc];
+        for (const v of list) pushVal(v);
+    }
+    if (hit?.snpeff?.ann) {
+        const annList = Array.isArray(hit.snpeff.ann) ? hit.snpeff.ann : [hit.snpeff.ann];
+        for (const ann of annList) pushVal(ann?.hgvs_c);
+    }
+    return vals;
+}
+
+// Query MyVariant.info by rsID or other variant identifier. Returns the best matching hit when possible.
 async function queryMyVariantById(identifier) {
     const encoded = encodeURIComponent(identifier);
-    const url = `https://myvariant.info/v1/query?q=${encoded}&size=1`;
+    const url = `https://myvariant.info/v1/query?q=${encoded}&size=20`;
     const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.myvariant);
     if (!response.ok) {
         const text = await response.text();
@@ -673,7 +771,39 @@ async function queryMyVariantById(identifier) {
     }
     const data = await response.json();
     if (data && data.hits && data.hits.length > 0) {
-        return data.hits[0];
+        const intent = parseMyVariantQueryIntent(identifier);
+        const scored = data.hits.map((hit, idx) => {
+            let score = 0;
+            const id = String(hit?._id || '').trim().toLowerCase();
+            const rawId = String(identifier || '').trim().toLowerCase();
+            if (id && rawId && id === rawId) score += 1_000_000;
+            const hitGenes = getHitGenesUpper(hit);
+            if (intent.gene && hitGenes.has(intent.gene)) score += 50_000;
+            if (intent.proteinTarget) {
+                const protVals = extractProteinNotationsFromHit(hit);
+                for (const p of protVals) {
+                    const parsed = parseProteinTargetFromQueryVariant(p);
+                    if (!parsed) continue;
+                    if (intent.proteinTarget.triple && parsed.triple && parsed.triple === intent.proteinTarget.triple) {
+                        score += 500_000;
+                    } else if (intent.proteinTarget.single && parsed.single && parsed.single === intent.proteinTarget.single) {
+                        score += 350_000;
+                    }
+                }
+            }
+            if (intent.cdnaTarget) {
+                const cdnaVals = extractCdnaNotationsFromHit(hit);
+                if (cdnaVals.some(v => v.endsWith(`:${intent.cdnaTarget}`) || v === intent.cdnaTarget)) {
+                    score += 300_000;
+                }
+            }
+            // Prefer richer records on ties.
+            if (hit?.clinvar) score += 10;
+            if (hit?.dbnsfp) score += 10;
+            return { idx, score, hit };
+        });
+        scored.sort((a, b) => b.score - a.score || a.idx - b.idx);
+        return scored[0].hit;
     }
     return null;
 }
