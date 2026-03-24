@@ -192,6 +192,65 @@ function tripleToSingle(prot) {
     return null;
 }
 
+function aaThreeToSingle(aa) {
+    if (!aa) return null;
+    const aaSingle = {
+        ALA: 'A', ARG: 'R', ASN: 'N', ASP: 'D', CYS: 'C', GLN: 'Q', GLU: 'E', GLY: 'G',
+        HIS: 'H', ILE: 'I', LEU: 'L', LYS: 'K', MET: 'M', PHE: 'F', PRO: 'P', SER: 'S',
+        THR: 'T', TRP: 'W', TYR: 'Y', VAL: 'V',
+        TER: '*', STOP: '*'
+    };
+    return aaSingle[String(aa).toUpperCase()] || null;
+}
+
+// Convert a 3-letter protein HGVS body (without "p.") to single-letter HGVS body.
+// Handles substitutions, nonsense and common frameshift forms.
+function convertProteinBodyToSingle(proteinBody) {
+    if (!proteinBody) return null;
+    const body = String(proteinBody).trim();
+
+    // Frameshift with explicit downstream stop: Val133GlyfsTer47 -> V133Gfs*47
+    let m = body.match(/^([A-Za-z]{3})(\d+)([A-Za-z]{3})fs(?:Ter|Stop|\*)(\d+)$/i);
+    if (m) {
+        const ref = aaThreeToSingle(m[1]);
+        const alt = aaThreeToSingle(m[3]);
+        if (ref && alt) return `${ref}${m[2]}${alt}fs*${m[4]}`;
+    }
+
+    // Frameshift without explicit alt amino acid: Arg97fsTer12 -> R97fs*12
+    m = body.match(/^([A-Za-z]{3})(\d+)fs(?:Ter|Stop|\*)(\d+)$/i);
+    if (m) {
+        const ref = aaThreeToSingle(m[1]);
+        if (ref) return `${ref}${m[2]}fs*${m[3]}`;
+    }
+
+    // Simple substitution / nonsense: Arg714Ter -> R714*
+    m = body.match(/^([A-Za-z]{3})(\d+)([A-Za-z]{3}|Ter|Stop|\*)$/i);
+    if (m) {
+        const ref = aaThreeToSingle(m[1]);
+        const alt = aaThreeToSingle(m[3]) || (m[3] === '*' ? '*' : null);
+        if (ref && alt) return `${ref}${m[2]}${alt}`;
+    }
+
+    // Fallback to strict triple substitution converter.
+    const compact = body.toUpperCase();
+    return tripleToSingle(compact);
+}
+
+// Format a protein HGVS string to include the single-letter amino acid code in
+// parentheses when a three-letter protein change is present.
+// Example: "p.Val600Glu" -> "p.Val600Glu (p.V600E)".
+function formatProteinDisplayWithSingleLetter(proteinHgvs) {
+    if (!proteinHgvs) return '';
+    const proteinText = String(proteinHgvs).trim();
+    const proteinIndex = proteinText.toLowerCase().lastIndexOf('p.');
+    if (proteinIndex === -1) return proteinText;
+    const proteinBody = proteinText.slice(proteinIndex + 2).trim();
+    const single = convertProteinBodyToSingle(proteinBody);
+    if (!single) return proteinText;
+    return `${proteinText} (p.${single})`;
+}
+
 // Extract the numeric coordinate from a cDNA string (e.g. "c.1799T>A" -> 1799). If no
 // numeric coordinate can be parsed, returns null. This helper ignores intronic
 // suffixes (e.g. "+43", "-12") and simply extracts the first integer following
@@ -2769,7 +2828,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     canonicalProtVal = protein;
                 }
                 content.appendChild(makeLine('c.', canonicalCVal));
-                content.appendChild(makeLine('p.', canonicalProtVal));
+                content.appendChild(makeLine('p.', formatProteinDisplayWithSingleLetter(canonicalProtVal)));
                 content.appendChild(makeLine('Effect', effect));
                 const ucscUrl = buildUcscHg19Url(rawInput, gVariant, annotation);
                 if (ucscUrl) {
