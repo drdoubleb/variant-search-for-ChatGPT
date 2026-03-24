@@ -192,6 +192,20 @@ function tripleToSingle(prot) {
     return null;
 }
 
+// Format a protein HGVS string to include the single-letter amino acid code in
+// parentheses when a three-letter protein change is present.
+// Example: "p.Val600Glu" -> "p.Val600Glu (p.V600E)".
+function formatProteinDisplayWithSingleLetter(proteinHgvs) {
+    if (!proteinHgvs) return '';
+    const proteinText = String(proteinHgvs).trim();
+    const tripleMatch = proteinText.match(/p\.([A-Za-z]{3})(\d+)([A-Za-z]{3})/);
+    if (!tripleMatch) return proteinText;
+    const tripleCompact = `${tripleMatch[1].toUpperCase()}${tripleMatch[2]}${tripleMatch[3].toUpperCase()}`;
+    const single = tripleToSingle(tripleCompact);
+    if (!single) return proteinText;
+    return `${proteinText} (p.${single})`;
+}
+
 // Extract the numeric coordinate from a cDNA string (e.g. "c.1799T>A" -> 1799). If no
 // numeric coordinate can be parsed, returns null. This helper ignores intronic
 // suffixes (e.g. "+43", "-12") and simply extracts the first integer following
@@ -2769,7 +2783,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     canonicalProtVal = protein;
                 }
                 content.appendChild(makeLine('c.', canonicalCVal));
-                content.appendChild(makeLine('p.', canonicalProtVal));
+                content.appendChild(makeLine('p.', formatProteinDisplayWithSingleLetter(canonicalProtVal)));
                 content.appendChild(makeLine('Effect', effect));
                 const ucscUrl = buildUcscHg19Url(rawInput, gVariant, annotation);
                 if (ucscUrl) {
