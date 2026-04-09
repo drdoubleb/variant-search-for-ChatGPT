@@ -1424,7 +1424,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const m = search.match(/[?&]variant=([^&]*)/);
         if (!m) return '';
         try {
-            return decodeURIComponent(m[1]);
+            const rawValue = m[1];
+            const decodedLiteralPlus = decodeURIComponent(rawValue);
+            const decodedFormStyle = decodeURIComponent(rawValue.replace(/\+/g, '%20'));
+            // Heuristic:
+            // - For generic free-text inputs, treat "+" as space (standard query-string behavior).
+            // - Preserve literal "+" for intronic HGVS patterns (e.g. c.76+1G>A) and for
+            //   explicitly encoded plus signs (%2B), which decode identically in both modes.
+            const looksLikeIntronicHgvs = /(?:^|[\s:])c\.[^\s]*[+-]\d+/i.test(decodedLiteralPlus);
+            if (looksLikeIntronicHgvs) return decodedLiteralPlus;
+            return decodedFormStyle;
         } catch {
             return m[1];
         }
