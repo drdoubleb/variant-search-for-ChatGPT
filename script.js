@@ -1414,6 +1414,47 @@ document.addEventListener('DOMContentLoaded', () => {
     const rawOutput = document.getElementById('rawOutput');
     // Pre element to display the Ensembl variant_recoder JSON response
     const ensemblOutput = document.getElementById('ensemblOutput');
+    // Keep a shareable URL in sync with the current search value so external sites can link
+    // directly to this page with a query string like `/?variant=<any-supported-input>`.
+    // Parse query params from window.location.search while preserving literal "+" characters.
+    // This helps with intronic HGVS such as c.76+1G>A when a referring site provides an
+    // unescaped plus sign in the URL.
+    const getVariantFromUrl = () => {
+        const search = String(window.location.search || '');
+        const m = search.match(/[?&]variant=([^&]*)/);
+        if (!m) return '';
+        try {
+            const rawValue = m[1];
+            const decodedLiteralPlus = decodeURIComponent(rawValue);
+            const decodedFormStyle = decodeURIComponent(rawValue.replace(/\+/g, '%20'));
+            // Heuristic:
+            // - For generic free-text inputs, treat "+" as space (standard query-string behavior).
+            // - Preserve literal "+" for intronic HGVS patterns (e.g. c.76+1G>A) and for
+            //   explicitly encoded plus signs (%2B), which decode identically in both modes.
+            const looksLikeIntronicHgvs = /(?:^|[\s:])c\.[^\s]*[+-]\d+/i.test(decodedLiteralPlus);
+            if (looksLikeIntronicHgvs) return decodedLiteralPlus;
+            return decodedFormStyle;
+        } catch {
+            return m[1];
+        }
+    };
+
+    const syncVariantInUrl = (variantValue) => {
+        try {
+            const url = new URL(window.location.href);
+            const value = String(variantValue || '').trim();
+            if (value) {
+                url.searchParams.set('variant', value);
+            } else {
+                url.searchParams.delete('variant');
+            }
+            const search = url.searchParams.toString();
+            const nextUrl = `${url.pathname}${search ? `?${search}` : ''}${url.hash || ''}`;
+            window.history.replaceState({}, '', nextUrl);
+        } catch {
+            // Ignore URL update errors and continue normal search flow.
+        }
+    };
 
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -1426,6 +1467,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // to standard HGVS-like strings. This heuristic uppercases gene symbols
         // and prepends "p." to protein variants when missing.
         const rawInput = input.value.trim();
+        // Update the URL with the raw submitted value so inbound/outbound links can
+        // preserve flexible user-entered formats (HGVS g./c./p., space-separated tokens, etc.).
+        syncVariantInUrl(rawInput);
         let query = rawInput;
         const normalizeVariantInput = (raw) => {
             let s = raw.trim();
@@ -3555,4 +3599,16 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error(err);
         }
     });
+
+    // Auto-run lookup when the page is opened with ?variant=<value>. This allows direct
+    // linking from external tools while preserving the existing normalization/search logic.
+    const initialVariant = getVariantFromUrl();
+    if (initialVariant && initialVariant.trim()) {
+        input.value = initialVariant.trim();
+        if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+        } else {
+            form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+        }
+    }
 });
