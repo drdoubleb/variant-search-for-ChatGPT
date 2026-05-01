@@ -3507,7 +3507,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 tp53Content.appendChild(variantSummary);
 
                 const dbHomeUrl = 'https://tp53.cancer.gov/';
-                const searchByVariantUrl = 'https://tp53.cancer.gov/search_gene_by_var';
+                const searchByVariantUrl = 'https://tp53.cancer.gov/search_gene_by_mut';
                 const googleTp53Query = encodeURIComponent(`site:tp53.cancer.gov TP53 ${tp53Protein || tp53Cdna || tp53Genomic}`.trim());
                 const googleTp53Url = `https://www.google.com/search?q=${googleTp53Query}`;
                 const linksLine = document.createElement('span');
