@@ -86,6 +86,14 @@
         if (typeof window.COSMIC_META_URL === 'undefined' || window.COSMIC_META_URL === null) {
             window.COSMIC_META_URL = 'https://molecular3.onrender.com/cosmic_meta.json';
         }
+        // TP53 mutation database endpoint.
+        // On Vercel this defaults to the local serverless function at /api/tp53.
+        // You can override it if you host the backend elsewhere.
+        // Example:
+        // window.TP53_API_ENDPOINT = "https://your-domain.example/api/tp53";
+        if (typeof window.TP53_API_ENDPOINT === 'undefined') {
+            window.TP53_API_ENDPOINT = '/api/tp53';
+        }
     </script>
     <!-- Cache-busting query parameter to ensure browsers fetch the latest script.
          Increment the version whenever script.js changes to avoid caching issues. -->

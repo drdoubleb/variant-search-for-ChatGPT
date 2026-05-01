@@ -31,7 +31,8 @@ const API_TIMEOUT_MS = {
     lookup: 4000,
     liftover: 4000,
     cosmic: 2500,
-    cosmicMeta: 1500
+    cosmicMeta: 1500,
+    tp53: 3500
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -249,6 +250,29 @@ function formatProteinDisplayWithSingleLetter(proteinHgvs) {
     const single = convertProteinBodyToSingle(proteinBody);
     if (!single) return proteinText;
     return `${proteinText} (p.${single})`;
+}
+
+function isTp53Gene(geneNames) {
+    if (!geneNames) return false;
+    return String(geneNames)
+        .split(',')
+        .map(g => g.trim().toUpperCase())
+        .some(g => g === 'TP53');
+}
+
+async function fetchTp53MutationDatabase(payload) {
+    const endpoint = String(window.TP53_API_ENDPOINT || '').trim();
+    if (!endpoint) return null;
+    const response = await fetchWithTimeout(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {})
+    }, API_TIMEOUT_MS.tp53);
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`TP53 endpoint failed (${response.status}): ${text}`);
+    }
+    return response.json();
 }
 
 // Extract the numeric coordinate from a cDNA string (e.g. "c.1799T>A" -> 1799). If no
@@ -3451,6 +3475,101 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
+            }
+            // Card: TP53 Mutation Database (shown only for TP53 variants)
+            if (isTp53Gene(geneNames)) {
+                const tp53Card = document.createElement('div');
+                tp53Card.className = 'card';
+                const tp53Title = document.createElement('h3');
+                tp53Title.textContent = 'TP53 Database';
+                applyCardTheme(tp53Card, 'TP53 Database');
+                tp53Card.appendChild(tp53Title);
+                const tp53Content = document.createElement('div');
+                tp53Content.className = 'card-content';
+
+                const normalizePlainVariant = (value) => {
+                    if (!value) return '';
+                    const raw = String(value).trim();
+                    const noHtml = raw.replace(/<[^>]+>/g, '');
+                    const first = noHtml.split(',')[0].trim();
+                    return first.includes(':') ? first.split(':').slice(1).join(':').trim() : first;
+                };
+
+                const tp53Cdna = normalizePlainVariant(cDNAHTML);
+                const tp53Protein = normalizePlainVariant(protein);
+                const tp53Genomic = String(gVariant || '').trim();
+                const summary = document.createElement('span');
+                summary.innerHTML = `<strong>Detected gene:</strong> TP53`;
+                tp53Content.appendChild(summary);
+
+                const variantSummary = document.createElement('span');
+                variantSummary.innerHTML = `<strong>Variant:</strong> ${tp53Protein || tp53Cdna || tp53Genomic || 'N/A'}`;
+                tp53Content.appendChild(variantSummary);
+
+                const dbHomeUrl = 'https://tp53.cancer.gov/';
+                const searchByVariantUrl = 'https://tp53.cancer.gov/search_gene_by_var';
+                const googleTp53Query = encodeURIComponent(`site:tp53.cancer.gov TP53 ${tp53Protein || tp53Cdna || tp53Genomic}`.trim());
+                const googleTp53Url = `https://www.google.com/search?q=${googleTp53Query}`;
+                const linksLine = document.createElement('span');
+                linksLine.innerHTML = `<a href="${dbHomeUrl}" target="_blank" rel="noopener noreferrer">TP53 DB Home</a> | <a href="${searchByVariantUrl}" target="_blank" rel="noopener noreferrer">Search by Gene Variants</a> | <a href="${googleTp53Url}" target="_blank" rel="noopener noreferrer">Variant lookup 🔍</a>`;
+                tp53Content.appendChild(linksLine);
+
+                try {
+                    const tp53Data = await fetchTp53MutationDatabase({
+                        gene: 'TP53',
+                        protein: tp53Protein || '',
+                        cdna: tp53Cdna || '',
+                        genomic: tp53Genomic || '',
+                        debug: true
+                    });
+                    if (tp53Data && typeof tp53Data === 'object') {
+                        const items = [];
+                        if (tp53Data.match_count !== undefined) {
+                            items.push(`<li><strong>Matches:</strong> ${tp53Data.match_count}</li>`);
+                        }
+                        if (tp53Data.prevalence !== undefined) {
+                            items.push(`<li><strong>Prevalence:</strong> ${tp53Data.prevalence}</li>`);
+                        }
+                        if (tp53Data.classification) {
+                            items.push(`<li><strong>Classification:</strong> ${tp53Data.classification}</li>`);
+                        }
+                        if (tp53Data.note) {
+                            items.push(`<li><strong>Note:</strong> ${tp53Data.note}</li>`);
+                        }
+                        if (items.length > 0) {
+                            const details = document.createElement('details');
+                            const s = document.createElement('summary');
+                            s.textContent = 'TP53 query result';
+                            details.appendChild(s);
+                            const ul = document.createElement('ul');
+                            ul.innerHTML = items.join('');
+                            details.appendChild(ul);
+                            tp53Content.appendChild(details);
+                        }
+                        if (tp53Data.debug) {
+                            const dbgDetails = document.createElement('details');
+                            const dbgSummary = document.createElement('summary');
+                            dbgSummary.textContent = 'Debug info';
+                            dbgDetails.appendChild(dbgSummary);
+                            const pre = document.createElement('pre');
+                            pre.style.whiteSpace = 'pre-wrap';
+                            pre.style.fontSize = '0.78rem';
+                            pre.textContent = JSON.stringify(tp53Data.debug, null, 2);
+                            dbgDetails.appendChild(pre);
+                            tp53Content.appendChild(dbgDetails);
+                        }
+                    }
+                } catch (tp53Err) {
+                    const hint = document.createElement('span');
+                    hint.style.fontSize = '0.85rem';
+                    hint.style.color = '#4a5f73';
+                    hint.textContent = 'Live TP53 API query unavailable (ensure /api/tp53 is deployed and TP53_MUTATION_DATASET_URL is configured if needed).';
+                    tp53Content.appendChild(hint);
+                    console.warn('TP53 API error', tp53Err);
+                }
+
+                tp53Card.appendChild(tp53Content);
+                cardsContainer.appendChild(tp53Card);
             }
             // Card: Search
             {
