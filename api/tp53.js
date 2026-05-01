@@ -1,10 +1,10 @@
 const DEFAULT_DATASET_CANDIDATES = [
-  // Hard-coded TP53 database endpoints (May 1, 2026).
-  // These map to the official dataset views exposed by tp53.cancer.gov.
-  'https://tp53.cancer.gov/view_data?bq_view_name=MutationView',
-  'https://tp53.cancer.gov/view_data?bq_view_name=MutationViewDownload',
-  'https://tp53.cancer.gov/view_data?bq_view_name=TumorVariantDownload',
-  'https://tp53.cancer.gov/view_data?bq_view_name=GermlineDownload'
+  // Direct static CSV downloads from the NCI TP53 Database (release r21, Jan 2025).
+  // The view_data?bq_view_name=* URLs render HTML pages, not CSV files.
+  // The actual data files are served from the /static/data/ path.
+  'https://tp53.cancer.gov/static/data/MutationView_r21.csv',
+  'https://tp53.cancer.gov/static/data/TumorVariantDownload_r21.csv',
+  'https://tp53.cancer.gov/static/data/GermlineDownload_r21.csv'
 ];
 
 const CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
@@ -154,7 +154,10 @@ async function fetchDatasetText() {
   for (const url of candidates) {
     try {
       const res = await fetch(url, {
-        headers: { 'User-Agent': 'variant-search-tp53-proxy/1.0' }
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; variant-search-tp53-proxy/1.0)',
+          'Accept': 'text/csv,text/plain,*/*'
+        }
       });
       if (!res.ok) {
         debugAttempts.push({ url, ok: false, status: res.status, reason: 'non-200 response' });
@@ -175,7 +178,10 @@ async function fetchDatasetText() {
         if (extracted) {
           try {
             const res2 = await fetch(extracted, {
-              headers: { 'User-Agent': 'variant-search-tp53-proxy/1.0' }
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; variant-search-tp53-proxy/1.0)',
+                'Accept': 'text/csv,text/plain,*/*'
+              }
             });
             const text2 = await res2.text();
             const ct2 = res2.headers.get('content-type') || '';
