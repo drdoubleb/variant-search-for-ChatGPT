@@ -32,7 +32,7 @@ const API_TIMEOUT_MS = {
     liftover: 4000,
     cosmic: 2500,
     cosmicMeta: 1500,
-    tp53: 1500
+    tp53: 15000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
