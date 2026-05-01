@@ -27,6 +27,10 @@ The API returns:
 - `matches` (top matched rows)
 - `dataset_url` used by the proxy
 
+Protein matching normalizes HGVS three-letter amino-acid notation to single-letter
+notation (for example `p.Arg273His` → `R273H`) before scoring, improving matching
+against TP53 dataset rows that use single-letter protein codes.
+
 ### Dataset source links
 
 The backend now hard-codes TP53 dataset endpoints from `tp53.cancer.gov`:

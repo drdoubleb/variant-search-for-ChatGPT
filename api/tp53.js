@@ -85,8 +85,28 @@ function stripProteinPrefix(p) {
   return s.replace(/^p\./i, '');
 }
 
+const AA3_TO_1 = {
+  ALA: 'A', ARG: 'R', ASN: 'N', ASP: 'D', CYS: 'C', GLN: 'Q', GLU: 'E', GLY: 'G',
+  HIS: 'H', ILE: 'I', LEU: 'L', LYS: 'K', MET: 'M', PHE: 'F', PRO: 'P', SER: 'S',
+  THR: 'T', TRP: 'W', TYR: 'Y', VAL: 'V', TER: '*', STOP: '*'
+};
+
+function toProteinSingleLetter(value) {
+  const raw = stripProteinPrefix(value).replace(/\s+/g, '');
+  const m = raw.match(/^([A-Za-z]{3})(\d+)([A-Za-z]{3}|Ter|Stop|\*)$/i);
+  if (!m) return raw.toUpperCase();
+  const ref = AA3_TO_1[String(m[1]).toUpperCase()];
+  const alt = AA3_TO_1[String(m[3]).toUpperCase()] || (m[3] === '*' ? '*' : null);
+  if (!ref || !alt) return raw.toUpperCase();
+  return `${ref}${m[2]}${alt}`.toUpperCase();
+}
+
 function toProteinCompact(p) {
-  return stripProteinPrefix(p).replace(/\s+/g, '').toUpperCase();
+  const raw = stripProteinPrefix(p).replace(/\s+/g, '').toUpperCase();
+  const single = toProteinSingleLetter(p);
+  // Keep both representations available for matching by returning the canonical
+  // single-letter code when possible; otherwise preserve raw uppercase text.
+  return single || raw;
 }
 
 function parseGenomicPosition(g) {
