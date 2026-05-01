@@ -13,7 +13,8 @@ const MAX_RESPONSE_MATCHES = 5;
 let cache = {
   loadedAt: 0,
   rows: null,
-  datasetUrl: null
+  datasetUrl: null,
+  debug: null
 };
 
 function normalizeKey(k) {
@@ -70,6 +71,36 @@ function parseCsv(text) {
   return rows;
 }
 
+function looksLikeHtml(text) {
+  return /<!doctype html|<html[\s>]|<table[\s>]/i.test(String(text || ''));
+}
+
+function extractDownloadLinkFromHtml(html, baseUrl) {
+  const s = String(html || '');
+  const hrefMatches = [...s.matchAll(/href\s*=\s*["']([^"']+)["']/gi)].map(m => m[1]);
+  const candidates = hrefMatches.filter((h) =>
+    /csv|download|export|view_data/i.test(h)
+  );
+  for (const href of candidates) {
+    try {
+      return new URL(href, baseUrl).toString();
+    } catch {
+      // continue
+    }
+  }
+  // Common fallback patterns used by data-table download buttons.
+  try {
+    const u = new URL(baseUrl);
+    if (!u.searchParams.has('download')) {
+      u.searchParams.set('download', '1');
+      return u.toString();
+    }
+  } catch {
+    // ignore URL parse fallback
+  }
+  return null;
+}
+
 function pickValue(row, normalizedKeys) {
   const entries = Object.entries(row);
   for (const [k, v] of entries) {
@@ -119,21 +150,52 @@ function parseGenomicPosition(g) {
 async function fetchDatasetText() {
   const envUrl = process.env.TP53_MUTATION_DATASET_URL;
   const candidates = envUrl ? [envUrl, ...DEFAULT_DATASET_CANDIDATES] : DEFAULT_DATASET_CANDIDATES;
+  const debugAttempts = [];
   for (const url of candidates) {
     try {
       const res = await fetch(url, {
         headers: { 'User-Agent': 'variant-search-tp53-proxy/1.0' }
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        debugAttempts.push({ url, ok: false, status: res.status, reason: 'non-200 response' });
+        continue;
+      }
       const text = await res.text();
-      if (text && text.includes(',')) {
-        return { text, datasetUrl: url };
+      const contentType = res.headers.get('content-type') || '';
+      const isHtml = looksLikeHtml(text) || /text\/html/i.test(contentType);
+      if (text && text.includes(',') && !isHtml) {
+        debugAttempts.push({ url, ok: true, status: res.status, contentType, rowsHint: text.split('\n').length });
+        return { text, datasetUrl: url, debugAttempts };
+      }
+
+      // Some TP53 links render a webpage with a download button. Try to extract and follow it.
+      if (isHtml) {
+        const extracted = extractDownloadLinkFromHtml(text, url);
+        debugAttempts.push({ url, ok: true, status: res.status, contentType, extractedDownloadUrl: extracted || '' });
+        if (extracted) {
+          try {
+            const res2 = await fetch(extracted, {
+              headers: { 'User-Agent': 'variant-search-tp53-proxy/1.0' }
+            });
+            const text2 = await res2.text();
+            const ct2 = res2.headers.get('content-type') || '';
+            const html2 = looksLikeHtml(text2) || /text\/html/i.test(ct2);
+            if (res2.ok && text2 && text2.includes(',') && !html2) {
+              debugAttempts.push({ url: extracted, ok: true, status: res2.status, contentType: ct2, rowsHint: text2.split('\n').length });
+              return { text: text2, datasetUrl: extracted, debugAttempts };
+            }
+            debugAttempts.push({ url: extracted, ok: res2.ok, status: res2.status, contentType: ct2, reason: 'download candidate did not return CSV' });
+          } catch (subErr) {
+            debugAttempts.push({ url: extracted, ok: false, reason: `download fetch error: ${subErr?.message || String(subErr)}` });
+          }
+        }
       }
     } catch {
+      debugAttempts.push({ url, ok: false, reason: 'fetch exception' });
       // try next URL
     }
   }
-  return null;
+  return { text: null, datasetUrl: null, debugAttempts };
 }
 
 async function ensureDatasetLoaded() {
@@ -142,16 +204,17 @@ async function ensureDatasetLoaded() {
     return cache;
   }
   const fetched = await fetchDatasetText();
-  if (!fetched) {
+  if (!fetched || !fetched.text) {
     throw new Error(
-      'Unable to fetch TP53 dataset. Set TP53_MUTATION_DATASET_URL to the direct CSV URL from tp53.cancer.gov.'
+      `Unable to fetch TP53 dataset. Attempts: ${JSON.stringify((fetched && fetched.debugAttempts) || [])}`
     );
   }
   const rows = parseCsv(fetched.text);
   cache = {
     loadedAt: now,
     rows,
-    datasetUrl: fetched.datasetUrl
+    datasetUrl: fetched.datasetUrl,
+    debug: fetched.debugAttempts || []
   };
   return cache;
 }
@@ -231,12 +294,13 @@ export default async function handler(req, res) {
       });
     }
 
-    const { rows, datasetUrl } = await ensureDatasetLoaded();
+    const debugEnabled = String(body.debug || '').toLowerCase() === 'true' || body.debug === true;
+    const { rows, datasetUrl, debug } = await ensureDatasetLoaded();
     const matches = buildMatches(rows, body);
     const top = matches.slice(0, MAX_RESPONSE_MATCHES);
     const best = top[0] || null;
 
-    return res.status(200).json({
+    const responsePayload = {
       source: 'tp53-database',
       dataset_url: datasetUrl,
       total_records: rows.length,
@@ -247,7 +311,20 @@ export default async function handler(req, res) {
         ? 'Matched against TP53 MutationView dataset using protein/cDNA/genomic similarity.'
         : 'No TP53 dataset row matched the supplied variant.',
       matches: top
-    });
+    };
+    if (debugEnabled) {
+      responsePayload.debug = {
+        query: {
+          protein_input: body.protein || '',
+          protein_normalized: toProteinCompact(body.protein || ''),
+          cdna_input: body.cdna || '',
+          genomic_input: body.genomic || ''
+        },
+        dataset_attempts: debug || [],
+        sample_protein_values: rows.slice(0, 25).map(r => pickValue(r, ['protdescription', 'aachangeinhuman'])).filter(Boolean).slice(0, 10)
+      };
+    }
+    return res.status(200).json(responsePayload);
   } catch (err) {
     return res.status(502).json({
       error: 'TP53 backend query failed',

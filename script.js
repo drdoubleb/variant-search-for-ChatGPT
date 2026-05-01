@@ -3519,7 +3519,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         gene: 'TP53',
                         protein: tp53Protein || '',
                         cdna: tp53Cdna || '',
-                        genomic: tp53Genomic || ''
+                        genomic: tp53Genomic || '',
+                        debug: true
                     });
                     if (tp53Data && typeof tp53Data === 'object') {
                         const items = [];
@@ -3544,6 +3545,18 @@ document.addEventListener('DOMContentLoaded', () => {
                             ul.innerHTML = items.join('');
                             details.appendChild(ul);
                             tp53Content.appendChild(details);
+                        }
+                        if (tp53Data.debug) {
+                            const dbgDetails = document.createElement('details');
+                            const dbgSummary = document.createElement('summary');
+                            dbgSummary.textContent = 'Debug info';
+                            dbgDetails.appendChild(dbgSummary);
+                            const pre = document.createElement('pre');
+                            pre.style.whiteSpace = 'pre-wrap';
+                            pre.style.fontSize = '0.78rem';
+                            pre.textContent = JSON.stringify(tp53Data.debug, null, 2);
+                            dbgDetails.appendChild(pre);
+                            tp53Content.appendChild(dbgDetails);
                         }
                     }
                 } catch (tp53Err) {

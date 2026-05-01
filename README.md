@@ -26,6 +26,7 @@ The API returns:
 - `prevalence`
 - `matches` (top matched rows)
 - `dataset_url` used by the proxy
+- optional `debug` object (when `debug: true` is passed in the request payload)
 
 Protein matching normalizes HGVS three-letter amino-acid notation to single-letter
 notation (for example `p.Arg273His` → `R273H`) before scoring, improving matching
@@ -47,3 +48,10 @@ Set this in Vercel Project Settings → Environment Variables:
 - `TP53_MUTATION_DATASET_URL` = custom direct URL to override the built-in hard-coded list.
 
 If not set, the function uses the built-in hard-coded TP53 URLs above.
+
+### Troubleshooting mode
+
+Pass `debug: true` in the POST body to receive:
+- normalized protein query value used for matching
+- dataset fetch/download attempt log (`dataset_attempts`)
+- sample protein values parsed from rows
