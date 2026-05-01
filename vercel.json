@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/tp53.js": {
+      "maxDuration": 30
+    }
+  }
+}
