@@ -433,6 +433,7 @@ export default async function handler(req, res) {
       matches: top
     };
     if (debugEnabled) {
+      const debugPickValue = buildColumnResolver(rows);
       responsePayload.debug = {
         query: {
           protein_input: body.protein || '',
@@ -441,7 +442,7 @@ export default async function handler(req, res) {
           genomic_input: body.genomic || ''
         },
         dataset_attempts: debug || [],
-        sample_protein_values: rows.slice(0, 25).map(r => pickValue(r, ['protdescription', 'aachangeinhuman'])).filter(Boolean).slice(0, 10),
+        sample_protein_values: rows.slice(0, 25).map(r => debugPickValue(r, ['protdescription', 'aachangeinhuman'])).filter(Boolean).slice(0, 10),
         available_columns: rows.length > 0 ? Object.keys(rows[0]) : []
       };
     }
