@@ -101,14 +101,26 @@ function extractDownloadLinkFromHtml(html, baseUrl) {
   return null;
 }
 
-function pickValue(row, normalizedKeys) {
-  const entries = Object.entries(row);
-  for (const [k, v] of entries) {
-    if (normalizedKeys.includes(normalizeKey(k))) {
-      return v;
+function buildColumnResolver(rows) {
+  const first = rows && rows[0] ? rows[0] : null;
+  const keys = first ? Object.keys(first) : [];
+  const normalizedToActual = new Map();
+  for (const key of keys) {
+    const normalized = normalizeKey(key);
+    if (normalized && !normalizedToActual.has(normalized)) {
+      normalizedToActual.set(normalized, key);
     }
   }
-  return '';
+
+  return function pickValue(row, normalizedKeys) {
+    for (const normalizedKey of normalizedKeys) {
+      const actualKey = normalizedToActual.get(normalizedKey);
+      if (!actualKey) continue;
+      const value = row[actualKey];
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return '';
+  };
 }
 
 function stripProteinPrefix(p) {
@@ -226,6 +238,7 @@ async function ensureDatasetLoaded() {
 }
 
 function buildMatches(rows, { protein, cdna, genomic }) {
+  const pickValue = buildColumnResolver(rows);
   const proteinNeedle = toProteinCompact(protein);
   const cdnaNeedle = normalizeText(cdna);
   const genomicPos = parseGenomicPosition(genomic);
@@ -237,75 +250,6 @@ function buildMatches(rows, { protein, cdna, genomic }) {
     const cd = pickValue(row, ['cdescription', 'gdescription']);
     const hg19 = pickValue(row, ['hg19chr17coordinates']);
     const hg38 = pickValue(row, ['hg38chr17coordinates']);
-    const somaticCount = pickValue(row, ['somaticcount']);
-    const germlineCount = pickValue(row, ['germlinecount']);
-    const exonIntron = pickValue(row, ['exonintron']);
-    const mutId = pickValue(row, ['mutid']);
-
-    // Mutation characterisation
-    // Column: Type
-    const mutationType = pickValue(row, ['type', 'mutationtype', 'varianttype']);
-    // Column: Codon_number
-    const codonNum = pickValue(row, ['codonnumber']);
-    // Column: CpG_site
-    const cpgSite = pickValue(row, ['cpgsite']);
-    // Column: Splice_site
-    const spliceSite = pickValue(row, ['splicesite']);
-    // Column: Hotspot
-    const hotspot = pickValue(row, ['hotspot']);
-
-    // Effect / functional classification
-    // Column: Effect (plain-language effect description)
-    const effect = pickValue(row, ['effect']);
-    // Column: EffectGroup3 (IARC-style functional grouping)
-    const effectGroup = pickValue(row, ['effectgroup3', 'effectgroup']);
-    // Column: TransactivationClass (I–V scale of overall p53 activity)
-    const taClass = pickValue(row, ['transactivationclass', 'taclass']);
-    // Column: DNE_LOFclass (combined dominant-negative + loss-of-function class)
-    const lofClass = pickValue(row, ['dnelofclass']);
-    // Column: DNEclass (dominant-negative class alone)
-    const dneClass = pickValue(row, ['dneclass']);
-    // Column: StructureFunctionClass
-    const structFunc = pickValue(row, ['structurefunctionclass']);
-    // Column: Residue_function
-    const residueFunc = pickValue(row, ['residuefunction']);
-    // Column: Domain_function
-    const domainFunc = pickValue(row, ['domainfunction']);
-    // Column: Structural_motif
-    const structMotif = pickValue(row, ['structuralmotif']);
-
-    // Computational pathogenicity predictors
-    // Column: AGVGDClass
-    const agvgd = pickValue(row, ['agvgdclass']);
-    // Column: SIFTClass
-    const sift = pickValue(row, ['siftclass']);
-    // Column: Polyphen2
-    const polyphen2 = pickValue(row, ['polyphen2']);
-    // Column: BayesDel
-    const bayesDel = pickValue(row, ['bayesdel']);
-    // Column: REVEL
-    const revel = pickValue(row, ['revel']);
-
-    // Epidemiological
-    // Column: TCGA_ICGC_GENIE_count (pan-cancer somatic count across major databases)
-    const tcgaCount = pickValue(row, ['tcgaicgcgeniecount']);
-
-    // Individual p53 transactivation target scores (% of wild-type activity)
-    // Columns: WAF1nWT, MDM2nWT, BAXnWT, h1433snWT, AIP1nWT, GADD45nWT, NOXAnWT, P53R2nWT
-    const taWaf1   = pickValue(row, ['waf1nwt']);
-    const taMdm2   = pickValue(row, ['mdm2nwt']);
-    const taBax    = pickValue(row, ['baxnwt']);
-    const taH1433s = pickValue(row, ['h1433snwt']);
-    const taAip1   = pickValue(row, ['aip1nwt']);
-    const taGadd45 = pickValue(row, ['gadd45nwt']);
-    const taNoxa   = pickValue(row, ['noxanwt']);
-    const taP53r2  = pickValue(row, ['p53r2nwt']);
-
-    // SpliceAI delta scores
-    const spliceAiDsAl = pickValue(row, ['spliceaidssal']);
-    const spliceAiDsAg = pickValue(row, ['spliceaidsag']);
-    const spliceAiDsDg = pickValue(row, ['spliceaidsdg']);
-    const spliceAiDsDl = pickValue(row, ['spliceaidsdl']);
 
     const protCompact = toProteinCompact(prot);
     const cdNorm = normalizeText(cd);
@@ -318,6 +262,43 @@ function buildMatches(rows, { protein, cdna, genomic }) {
       if (String(hg38).includes(String(genomicPos))) score += 2;
     }
     if (score === 0) continue;
+
+    const somaticCount = pickValue(row, ['somaticcount']);
+    const germlineCount = pickValue(row, ['germlinecount']);
+    const exonIntron = pickValue(row, ['exonintron']);
+    const mutId = pickValue(row, ['mutid']);
+    const mutationType = pickValue(row, ['type', 'mutationtype', 'varianttype']);
+    const codonNum = pickValue(row, ['codonnumber']);
+    const cpgSite = pickValue(row, ['cpgsite']);
+    const spliceSite = pickValue(row, ['splicesite']);
+    const hotspot = pickValue(row, ['hotspot']);
+    const effect = pickValue(row, ['effect']);
+    const effectGroup = pickValue(row, ['effectgroup3', 'effectgroup']);
+    const taClass = pickValue(row, ['transactivationclass', 'taclass']);
+    const lofClass = pickValue(row, ['dnelofclass']);
+    const dneClass = pickValue(row, ['dneclass']);
+    const structFunc = pickValue(row, ['structurefunctionclass']);
+    const residueFunc = pickValue(row, ['residuefunction']);
+    const domainFunc = pickValue(row, ['domainfunction']);
+    const structMotif = pickValue(row, ['structuralmotif']);
+    const agvgd = pickValue(row, ['agvgdclass']);
+    const sift = pickValue(row, ['siftclass']);
+    const polyphen2 = pickValue(row, ['polyphen2']);
+    const bayesDel = pickValue(row, ['bayesdel']);
+    const revel = pickValue(row, ['revel']);
+    const tcgaCount = pickValue(row, ['tcgaicgcgeniecount']);
+    const taWaf1 = pickValue(row, ['waf1nwt']);
+    const taMdm2 = pickValue(row, ['mdm2nwt']);
+    const taBax = pickValue(row, ['baxnwt']);
+    const taH1433s = pickValue(row, ['h1433snwt']);
+    const taAip1 = pickValue(row, ['aip1nwt']);
+    const taGadd45 = pickValue(row, ['gadd45nwt']);
+    const taNoxa = pickValue(row, ['noxanwt']);
+    const taP53r2 = pickValue(row, ['p53r2nwt']);
+    const spliceAiDsAl = pickValue(row, ['spliceaidssal']);
+    const spliceAiDsAg = pickValue(row, ['spliceaidsag']);
+    const spliceAiDsDg = pickValue(row, ['spliceaidsdg']);
+    const spliceAiDsDl = pickValue(row, ['spliceaidsdl']);
 
     matches.push({
       score,
