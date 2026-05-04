@@ -3798,6 +3798,20 @@ document.addEventListener('DOMContentLoaded', () => {
                                 addRow(table, 'TCGA/ICGC/GENIE count', tcga);
                             }
 
+                            // Keep functional/epidemiology visible but collapse computational + variant rows by default.
+                            const collapsibleRows = [];
+                            Array.from(table.querySelectorAll('tr')).forEach((tr) => {
+                                const header = tr.firstChild && tr.firstChild.textContent ? tr.firstChild.textContent : '';
+                                if (/Computational predictions \\(collapsed below\\)|Variant \\(collapsed below\\)/.test(header)) {
+                                    collapsibleRows.push(tr);
+                                    let n = tr.nextSibling;
+                                    while (n && !(n.firstChild && n.firstChild.colSpan === 2)) {
+                                        collapsibleRows.push(n);
+                                        n = n.nextSibling;
+                                    }
+                                }
+                            });
+                            collapsibleRows.forEach((r) => { r.style.display = 'none'; });
                             tp53Content.appendChild(table);
                             if (compDetails) tp53Content.appendChild(compDetails);
                             tp53Content.appendChild(variantDetails);
