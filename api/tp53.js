@@ -232,6 +232,7 @@ function buildMatches(rows, { protein, cdna, genomic }) {
 
   const matches = [];
   for (const row of rows) {
+    // Core identification fields
     const prot = pickValue(row, ['protdescription', 'aachangeinhuman']);
     const cd = pickValue(row, ['cdescription', 'gdescription']);
     const hg19 = pickValue(row, ['hg19chr17coordinates']);
@@ -241,18 +242,70 @@ function buildMatches(rows, { protein, cdna, genomic }) {
     const exonIntron = pickValue(row, ['exonintron']);
     const mutId = pickValue(row, ['mutid']);
 
-    // Pathogenicity / functional impact fields (multiple aliases to handle dataset variations)
-    const mutationType = pickValue(row, ['type', 'mutationtype', 'mut_type', 'muttype', 'effecttype', 'varianttype', 'mutclass']);
-    const taClass = pickValue(row, ['taclass', 'ta', 'taactivity', 'transactivation', 'transactivationclass', 'ta_class', 'transcriptionalactivity']);
-    const domNeg = pickValue(row, ['dominantnegative', 'dominant_negative', 'domn', 'dn', 'dneffect', 'dnactivity', 'dominantnegativeactivity']);
-    const lof = pickValue(row, ['lossoffunction', 'lof', 'loss_of_function', 'lossfxn', 'functionalimpact', 'functional_impact']);
-    const hotspot = pickValue(row, ['hotspot', 'hot_spot', 'ishotspot', 'hotspot_status', 'recurringmutation']);
-    const iarcClass = pickValue(row, ['iarcclass', 'class', 'pathogenicityclass', 'pathogenicity', 'iarc_class', 'variantclass', 'clinicalclass', 'clinicalsignificance']);
-    const prevalence = pickValue(row, ['prevalence', 'totalprevalence', 'total_prevalence', 'totalcount', 'total_count', 'freq']);
-    const structFunc = pickValue(row, ['structurefunction', 'structural', 'structurefunctional', 'structurefunctionclass', 'structure', 'sfclass', 'mutstructuraltype']);
-    const codonNum = pickValue(row, ['codonnumber', 'codon_number', 'codonno', 'codon']);
-    const spliceSite = pickValue(row, ['splicesite', 'splice_site', 'splice', 'splicemutation', 'splicingeffect']);
-    const dnContact = pickValue(row, ['dnacontact', 'dna_contact', 'dnabinding', 'dna_binding', 'contactresidue']);
+    // Mutation characterisation
+    // Column: Type
+    const mutationType = pickValue(row, ['type', 'mutationtype', 'varianttype']);
+    // Column: Codon_number
+    const codonNum = pickValue(row, ['codonnumber']);
+    // Column: CpG_site
+    const cpgSite = pickValue(row, ['cpgsite']);
+    // Column: Splice_site
+    const spliceSite = pickValue(row, ['splicesite']);
+    // Column: Hotspot
+    const hotspot = pickValue(row, ['hotspot']);
+
+    // Effect / functional classification
+    // Column: Effect (plain-language effect description)
+    const effect = pickValue(row, ['effect']);
+    // Column: EffectGroup3 (IARC-style functional grouping)
+    const effectGroup = pickValue(row, ['effectgroup3', 'effectgroup']);
+    // Column: TransactivationClass (I–V scale of overall p53 activity)
+    const taClass = pickValue(row, ['transactivationclass', 'taclass']);
+    // Column: DNE_LOFclass (combined dominant-negative + loss-of-function class)
+    const lofClass = pickValue(row, ['dnelofclass']);
+    // Column: DNEclass (dominant-negative class alone)
+    const dneClass = pickValue(row, ['dneclass']);
+    // Column: StructureFunctionClass
+    const structFunc = pickValue(row, ['structurefunctionclass']);
+    // Column: Residue_function
+    const residueFunc = pickValue(row, ['residuefunction']);
+    // Column: Domain_function
+    const domainFunc = pickValue(row, ['domainfunction']);
+    // Column: Structural_motif
+    const structMotif = pickValue(row, ['structuralmotif']);
+
+    // Computational pathogenicity predictors
+    // Column: AGVGDClass
+    const agvgd = pickValue(row, ['agvgdclass']);
+    // Column: SIFTClass
+    const sift = pickValue(row, ['siftclass']);
+    // Column: Polyphen2
+    const polyphen2 = pickValue(row, ['polyphen2']);
+    // Column: BayesDel
+    const bayesDel = pickValue(row, ['bayesdel']);
+    // Column: REVEL
+    const revel = pickValue(row, ['revel']);
+
+    // Epidemiological
+    // Column: TCGA_ICGC_GENIE_count (pan-cancer somatic count across major databases)
+    const tcgaCount = pickValue(row, ['tcgaicgcgeniecount']);
+
+    // Individual p53 transactivation target scores (% of wild-type activity)
+    // Columns: WAF1nWT, MDM2nWT, BAXnWT, h1433snWT, AIP1nWT, GADD45nWT, NOXAnWT, P53R2nWT
+    const taWaf1   = pickValue(row, ['waf1nwt']);
+    const taMdm2   = pickValue(row, ['mdm2nwt']);
+    const taBax    = pickValue(row, ['baxnwt']);
+    const taH1433s = pickValue(row, ['h1433snwt']);
+    const taAip1   = pickValue(row, ['aip1nwt']);
+    const taGadd45 = pickValue(row, ['gadd45nwt']);
+    const taNoxa   = pickValue(row, ['noxanwt']);
+    const taP53r2  = pickValue(row, ['p53r2nwt']);
+
+    // SpliceAI delta scores
+    const spliceAiDsAl = pickValue(row, ['spliceaidssal']);
+    const spliceAiDsAg = pickValue(row, ['spliceaidsag']);
+    const spliceAiDsDg = pickValue(row, ['spliceaidsdg']);
+    const spliceAiDsDl = pickValue(row, ['spliceaidsdl']);
 
     const protCompact = toProteinCompact(prot);
     const cdNorm = normalizeText(cd);
@@ -275,18 +328,43 @@ function buildMatches(rows, { protein, cdna, genomic }) {
       hg38_coordinate: hg38 || '',
       somatic_count: somaticCount || '',
       germline_count: germlineCount || '',
+      tcga_icgc_genie_count: tcgaCount || '',
       exon_intron: exonIntron || '',
-      mutation_type: mutationType || '',
-      ta_class: taClass || '',
-      dominant_negative: domNeg || '',
-      loss_of_function: lof || '',
-      hotspot: hotspot || '',
-      iarc_class: iarcClass || '',
-      prevalence: prevalence || '',
-      structural_class: structFunc || '',
       codon_number: codonNum || '',
+      mutation_type: mutationType || '',
+      cpg_site: cpgSite || '',
       splice_site: spliceSite || '',
-      dna_contact: dnContact || '',
+      hotspot: hotspot || '',
+      effect: effect || '',
+      effect_group: effectGroup || '',
+      ta_class: taClass || '',
+      lof_class: lofClass || '',
+      dne_class: dneClass || '',
+      structural_class: structFunc || '',
+      residue_function: residueFunc || '',
+      domain_function: domainFunc || '',
+      structural_motif: structMotif || '',
+      agvgd_class: agvgd || '',
+      sift_class: sift || '',
+      polyphen2: polyphen2 || '',
+      bayes_del: bayesDel || '',
+      revel: revel || '',
+      ta_targets: {
+        WAF1: taWaf1 || '',
+        MDM2: taMdm2 || '',
+        BAX: taBax || '',
+        '14-3-3σ': taH1433s || '',
+        AIP1: taAip1 || '',
+        GADD45: taGadd45 || '',
+        NOXA: taNoxa || '',
+        P53R2: taP53r2 || '',
+      },
+      splice_ai: {
+        DS_AL: spliceAiDsAl || '',
+        DS_AG: spliceAiDsAg || '',
+        DS_DG: spliceAiDsDg || '',
+        DS_DL: spliceAiDsDl || '',
+      },
     });
   }
   matches.sort((a, b) => b.score - a.score);
@@ -335,17 +413,29 @@ export default async function handler(req, res) {
     const pathogenicitySummary = best ? {
       mutation_type: best.mutation_type || '',
       location: best.exon_intron || '',
-      iarc_class: best.iarc_class || '',
+      codon_number: best.codon_number || '',
+      effect: best.effect || '',
+      effect_group: best.effect_group || '',
       ta_class: best.ta_class || '',
-      dominant_negative: best.dominant_negative || '',
-      loss_of_function: best.loss_of_function || '',
+      lof_class: best.lof_class || '',
+      dne_class: best.dne_class || '',
       hotspot: best.hotspot || '',
+      cpg_site: best.cpg_site || '',
       somatic_count: best.somatic_count || '',
       germline_count: best.germline_count || '',
-      prevalence: best.prevalence || '',
+      tcga_icgc_genie_count: best.tcga_icgc_genie_count || '',
       structural_class: best.structural_class || '',
+      residue_function: best.residue_function || '',
+      domain_function: best.domain_function || '',
+      structural_motif: best.structural_motif || '',
       splice_site: best.splice_site || '',
-      dna_contact: best.dna_contact || '',
+      agvgd_class: best.agvgd_class || '',
+      sift_class: best.sift_class || '',
+      polyphen2: best.polyphen2 || '',
+      bayes_del: best.bayes_del || '',
+      revel: best.revel || '',
+      ta_targets: best.ta_targets || {},
+      splice_ai: best.splice_ai || {},
     } : null;
 
     const responsePayload = {
