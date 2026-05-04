@@ -33,7 +33,8 @@ const API_TIMEOUT_MS = {
     liftover: 4000,
     cosmic: 2500,
     cosmicMeta: 1500,
-    tp53: 15000
+    tp53: 15000,
+    clinvar: 7000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -624,6 +625,38 @@ async function liftoverHg38ToHg19(variant) {
     return variant;
 }
 
+
+
+async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
+    const c = String(chrom || '').replace(/^chr/i, '').toUpperCase();
+    const p = Number(pos);
+    if (!c || !Number.isFinite(p)) return [];
+    const start = Math.max(1, p - windowSize);
+    const end = p + windowSize;
+    const term = `${c}[Chromosome] AND ${start}:${end}[Base Position for Assembly GRCh37]`;
+    const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&retmode=json&retmax=50&term=${encodeURIComponent(term)}`;
+    const searchRes = await fetchWithTimeout(searchUrl, {}, API_TIMEOUT_MS.clinvar);
+    if (!searchRes.ok) return [];
+    const searchData = await searchRes.json();
+    const ids = searchData?.esearchresult?.idlist || [];
+    if (!Array.isArray(ids) || ids.length === 0) return [];
+
+    const sumUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&retmode=json&id=${ids.join(',')}`;
+    const sumRes = await fetchWithTimeout(sumUrl, {}, API_TIMEOUT_MS.clinvar);
+    if (!sumRes.ok) return [];
+    const sumData = await sumRes.json();
+
+    return ids.map((id) => {
+        const rec = sumData?.result?.[id] || {};
+        return {
+            id,
+            title: rec.title || '',
+            germline: rec.germline_classification?.description || '',
+            review: rec.germline_classification?.review_status || '',
+            variationId: rec.variation_set?.[0]?.variation_xrefs?.find?.((x) => String(x.db || '').toLowerCase() === 'dbsnp')?.id || rec.variation_set?.[0]?.variation_name || ''
+        };
+    });
+}
 async function fetchMyVariant(variant) {
     const encoded = encodeURIComponent(variant);
     const url = `https://myvariant.info/v1/variant/${encoded}`;
@@ -3040,6 +3073,39 @@ document.addEventListener('DOMContentLoaded', () => {
                 linkEl.rel = 'noopener noreferrer';
                 linkEl.textContent = 'View on ClinVar';
                 content.appendChild(linkEl);
+                // Nearby ClinVar variants (+/-10bp, GRCh37).
+                const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+                if (tuple && tuple.chrom && tuple.pos) {
+                    const chr = tuple.chrom.replace(/^chr/i, '');
+                    const posNum = Number(tuple.pos);
+                    const regionLink = document.createElement('a');
+                    regionLink.href = `https://www.ncbi.nlm.nih.gov/clinvar/?term=${encodeURIComponent(`${chr}[Chromosome] AND ${Math.max(1, posNum - 10)}:${posNum + 10}[Base Position for Assembly GRCh37]`)}`;
+                    regionLink.target = '_blank';
+                    regionLink.rel = 'noopener noreferrer';
+                    regionLink.style.display = 'block';
+                    regionLink.textContent = 'Search region in ClinVar';
+                    content.appendChild(regionLink);
+                    try {
+                        const nearby = await fetchClinvarRegionVariants(chr, posNum, 10);
+                        if (nearby.length > 0) {
+                            const detailsEl = document.createElement('details');
+                            const summaryEl = document.createElement('summary');
+                            summaryEl.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}`;
+                            detailsEl.appendChild(summaryEl);
+                            const ul = document.createElement('ul');
+                            ul.style.marginTop = '0.5rem';
+                            nearby.slice(0, 25).forEach((v) => {
+                                const li = document.createElement('li');
+                                li.textContent = [v.id, v.germline || 'N/A', v.review || 'N/A', v.title || ''].filter(Boolean).join(' | ');
+                                ul.appendChild(li);
+                            });
+                            detailsEl.appendChild(ul);
+                            content.appendChild(detailsEl);
+                        }
+                    } catch (e) {
+                        console.warn('ClinVar regional query failed', e);
+                    }
+                }
                 // Details: list RCV entries if more than one
                 if (rcvDetails.length > 0) {
                     const detailsEl = document.createElement('details');
@@ -3063,6 +3129,65 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
+            }
+            // Card: CIViC
+            {
+                const entries = Array.isArray(annotation.cgi) ? annotation.cgi : (Array.isArray(annotation.civic) ? annotation.civic : []);
+                const legacy = (annotation.civic && typeof annotation.civic === 'object' && !Array.isArray(annotation.civic)) ? annotation.civic : null;
+                if (entries.length > 0 || legacy) {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    const title = document.createElement('h3');
+                    title.textContent = 'CIViC';
+                    applyCardTheme(card, 'CIViC');
+                    card.appendChild(title);
+                    const content = document.createElement('div');
+                    content.className = 'card-content';
+                    const addLine = (label, value) => {
+                        if (!value) return;
+                        const div = document.createElement('div');
+                        div.innerHTML = `<strong>${label}:</strong> ${value}`;
+                        content.appendChild(div);
+                    };
+                    if (legacy) {
+                        addLine('Gene', legacy?.gene?.name);
+                        addLine('Variant', legacy?.variant?.name);
+                        addLine('Evidence items', legacy?.evidence_items?.length);
+                    } else {
+                        const diseases = new Set();
+                        const drugs = new Set();
+                        const evidenceTypes = new Set();
+                        const evidenceLevels = new Set();
+                        entries.forEach((e) => {
+                            if (e?.primary_disease) diseases.add(String(e.primary_disease));
+                            if (Array.isArray(e?.drugs)) e.drugs.forEach((d) => drugs.add(String(d)));
+                            if (e?.evidence_type) evidenceTypes.add(String(e.evidence_type));
+                            if (e?.evidence_level) evidenceLevels.add(String(e.evidence_level));
+                        });
+                        addLine('Evidence items', entries.length);
+                        addLine('Disease(s)', Array.from(diseases).slice(0, 5).join(', '));
+                        addLine('Drug(s)', Array.from(drugs).slice(0, 5).join(', '));
+                        addLine('Evidence type(s)', Array.from(evidenceTypes).join(', '));
+                        addLine('Evidence level(s)', Array.from(evidenceLevels).join(', '));
+                    }
+                    const detailsEl = document.createElement('details');
+                    const summaryEl = document.createElement('summary');
+                    summaryEl.textContent = 'CIViC API opportunities';
+                    detailsEl.appendChild(summaryEl);
+                    const note = document.createElement('div');
+                    note.style.marginTop = '0.4rem';
+                    note.innerHTML = 'Potential additions from CIViC API: assertion/AMP tiering, full evidence statements, source-level provenance (PubMed), and variant-level coordinates. This could improve treatment-level interpretation versus the compact MyVariant CIViC projection.';
+                    detailsEl.appendChild(note);
+                    const civicLink = document.createElement('a');
+                    civicLink.href = 'https://civicdb.org/api';
+                    civicLink.target = '_blank';
+                    civicLink.rel = 'noopener noreferrer';
+                    civicLink.textContent = 'CIViC API docs';
+                    detailsEl.appendChild(civicLink);
+                    content.appendChild(detailsEl);
+                    card.appendChild(content);
+                    cardsContainer.appendChild(card);
+                }
             }
             // Card: gnomAD
             {
@@ -3613,7 +3738,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             const bayesDel = path.bayes_del || best.bayes_del;
                             const revel = path.revel || best.revel;
                             if (agvgd || sift || polyphen2 || bayesDel || revel) {
-                                makeSectionHead(table, 'Computational predictions');
+                                makeSectionHead(table, 'Computational predictions (collapsed below)');
                                 addRow(table, 'AGVGD class', agvgd);
                                 addRow(table, 'SIFT class', sift);
                                 addRow(table, 'PolyPhen-2', polyphen2);
@@ -3622,7 +3747,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
 
                             // — Variant characterisation —
-                            makeSectionHead(table, 'Variant');
+                            makeSectionHead(table, 'Variant (collapsed below)');
                             addRow(table, 'Mutation type', best.mutation_type);
                             addRow(table, 'Codon / location', [best.codon_number, best.exon_intron].filter(Boolean).join(' — '));
                             addRow(table, 'CpG site', path.cpg_site || best.cpg_site);
@@ -3641,7 +3766,31 @@ document.addEventListener('DOMContentLoaded', () => {
                                 addRow(table, 'TCGA/ICGC/GENIE count', tcga);
                             }
 
+                            // Keep functional/epidemiology visible but collapse computational + variant rows by default.
+                            const collapsibleRows = [];
+                            Array.from(table.querySelectorAll('tr')).forEach((tr) => {
+                                const header = tr.firstChild && tr.firstChild.textContent ? tr.firstChild.textContent : '';
+                                if (/Computational predictions \\(collapsed below\\)|Variant \\(collapsed below\\)/.test(header)) {
+                                    collapsibleRows.push(tr);
+                                    let n = tr.nextSibling;
+                                    while (n && !(n.firstChild && n.firstChild.colSpan === 2)) {
+                                        collapsibleRows.push(n);
+                                        n = n.nextSibling;
+                                    }
+                                }
+                            });
+                            collapsibleRows.forEach((r) => { r.style.display = 'none'; });
                             tp53Content.appendChild(table);
+                            if (collapsibleRows.length > 0) {
+                                const tp53Details = document.createElement('details');
+                                const tp53Summary = document.createElement('summary');
+                                tp53Summary.textContent = 'Show computational predictions and variant details';
+                                tp53Details.appendChild(tp53Summary);
+                                tp53Details.addEventListener('toggle', () => {
+                                    collapsibleRows.forEach((r) => { r.style.display = tp53Details.open ? '' : 'none'; });
+                                });
+                                tp53Content.appendChild(tp53Details);
+                            }
 
                             // — Collapsible: p53 transactivation target activity —
                             const taTargets = path.ta_targets || best.ta_targets || {};
