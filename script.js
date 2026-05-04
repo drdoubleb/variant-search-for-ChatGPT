@@ -3150,9 +3150,26 @@ document.addEventListener('DOMContentLoaded', () => {
                         content.appendChild(div);
                     };
                     if (legacy) {
+                        const legacyEvidenceItems = legacy?.molecularProfiles?.evidenceItems || [];
+                        const legacyDiseases = new Set();
+                        const legacyDrugs = new Set();
+                        const legacyEvidenceTypes = new Set();
+                        const legacyEvidenceLevels = new Set();
+                        legacyEvidenceItems.forEach((item) => {
+                            if (item?.disease?.name) legacyDiseases.add(String(item.disease.name));
+                            if (Array.isArray(item?.therapies)) item.therapies.forEach((t) => { if (t?.name) legacyDrugs.add(String(t.name)); });
+                            if (item?.evidenceType) legacyEvidenceTypes.add(String(item.evidenceType));
+                            if (item?.evidenceLevel) legacyEvidenceLevels.add(String(item.evidenceLevel));
+                        });
                         addLine('Gene', legacy?.gene?.name);
-                        addLine('Variant', legacy?.variant?.name);
-                        addLine('Evidence items', legacy?.evidence_items?.length);
+                        addLine('Variant', legacy?.variant?.name || legacy?.name);
+                        addLine('CIViC Variant ID', legacy?.id);
+                        addLine('ClinVar ID(s)', legacy?.clinvarIds);
+                        addLine('Evidence items', legacyEvidenceItems.length || legacy?.evidence_items?.length);
+                        addLine('Disease(s)', Array.from(legacyDiseases).slice(0, 5).join(', '));
+                        addLine('Drug(s)', Array.from(legacyDrugs).slice(0, 5).join(', '));
+                        addLine('Evidence type(s)', Array.from(legacyEvidenceTypes).join(', '));
+                        addLine('Evidence level(s)', Array.from(legacyEvidenceLevels).join(', '));
                     } else {
                         const diseases = new Set();
                         const drugs = new Set();
@@ -3737,23 +3754,38 @@ document.addEventListener('DOMContentLoaded', () => {
                             const polyphen2 = path.polyphen2 || best.polyphen2;
                             const bayesDel = path.bayes_del || best.bayes_del;
                             const revel = path.revel || best.revel;
+                            let compDetails = null;
                             if (agvgd || sift || polyphen2 || bayesDel || revel) {
-                                makeSectionHead(table, 'Computational predictions (collapsed below)');
-                                addRow(table, 'AGVGD class', agvgd);
-                                addRow(table, 'SIFT class', sift);
-                                addRow(table, 'PolyPhen-2', polyphen2);
-                                addRow(table, 'BayesDel', bayesDel);
-                                addRow(table, 'REVEL', revel);
+                                compDetails = document.createElement('details');
+                                const compSummary = document.createElement('summary');
+                                compSummary.style.cssText = 'cursor:pointer; font-size:0.82rem; color:#4a5f73; font-weight:600; margin:4px 0;';
+                                compSummary.textContent = 'Computational predictions';
+                                compDetails.appendChild(compSummary);
+                                const compTable = document.createElement('table');
+                                compTable.style.cssText = 'border-collapse:collapse; font-size:0.82rem;';
+                                addRow(compTable, 'AGVGD class', agvgd);
+                                addRow(compTable, 'SIFT class', sift);
+                                addRow(compTable, 'PolyPhen-2', polyphen2);
+                                addRow(compTable, 'BayesDel', bayesDel);
+                                addRow(compTable, 'REVEL', revel);
+                                compDetails.appendChild(compTable);
                             }
 
                             // — Variant characterisation —
-                            makeSectionHead(table, 'Variant (collapsed below)');
-                            addRow(table, 'Mutation type', best.mutation_type);
-                            addRow(table, 'Codon / location', [best.codon_number, best.exon_intron].filter(Boolean).join(' — '));
-                            addRow(table, 'CpG site', path.cpg_site || best.cpg_site);
-                            addRow(table, 'Splice site', path.splice_site || best.splice_site);
-                            addRow(table, 'Protein (DB)', best.protein);
-                            addRow(table, 'cDNA/Genomic (DB)', best.cdna_or_genomic);
+                            const variantDetails = document.createElement('details');
+                            const variantSummary = document.createElement('summary');
+                            variantSummary.style.cssText = 'cursor:pointer; font-size:0.82rem; color:#4a5f73; font-weight:600; margin:4px 0;';
+                            variantSummary.textContent = 'Variant';
+                            variantDetails.appendChild(variantSummary);
+                            const variantTable = document.createElement('table');
+                            variantTable.style.cssText = 'border-collapse:collapse; font-size:0.82rem;';
+                            addRow(variantTable, 'Mutation type', best.mutation_type);
+                            addRow(variantTable, 'Codon / location', [best.codon_number, best.exon_intron].filter(Boolean).join(' — '));
+                            addRow(variantTable, 'CpG site', path.cpg_site || best.cpg_site);
+                            addRow(variantTable, 'Splice site', path.splice_site || best.splice_site);
+                            addRow(variantTable, 'Protein (DB)', best.protein);
+                            addRow(variantTable, 'cDNA/Genomic (DB)', best.cdna_or_genomic);
+                            variantDetails.appendChild(variantTable);
 
                             // — Epidemiological evidence —
                             const somatic = best.somatic_count;
@@ -3781,16 +3813,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             });
                             collapsibleRows.forEach((r) => { r.style.display = 'none'; });
                             tp53Content.appendChild(table);
-                            if (collapsibleRows.length > 0) {
-                                const tp53Details = document.createElement('details');
-                                const tp53Summary = document.createElement('summary');
-                                tp53Summary.textContent = 'Show computational predictions and variant details';
-                                tp53Details.appendChild(tp53Summary);
-                                tp53Details.addEventListener('toggle', () => {
-                                    collapsibleRows.forEach((r) => { r.style.display = tp53Details.open ? '' : 'none'; });
-                                });
-                                tp53Content.appendChild(tp53Details);
-                            }
+                            if (compDetails) tp53Content.appendChild(compDetails);
+                            tp53Content.appendChild(variantDetails);
 
                             // — Collapsible: p53 transactivation target activity —
                             const taTargets = path.ta_targets || best.ta_targets || {};
