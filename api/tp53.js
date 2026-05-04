@@ -241,6 +241,19 @@ function buildMatches(rows, { protein, cdna, genomic }) {
     const exonIntron = pickValue(row, ['exonintron']);
     const mutId = pickValue(row, ['mutid']);
 
+    // Pathogenicity / functional impact fields (multiple aliases to handle dataset variations)
+    const mutationType = pickValue(row, ['type', 'mutationtype', 'mut_type', 'muttype', 'effecttype', 'varianttype', 'mutclass']);
+    const taClass = pickValue(row, ['taclass', 'ta', 'taactivity', 'transactivation', 'transactivationclass', 'ta_class', 'transcriptionalactivity']);
+    const domNeg = pickValue(row, ['dominantnegative', 'dominant_negative', 'domn', 'dn', 'dneffect', 'dnactivity', 'dominantnegativeactivity']);
+    const lof = pickValue(row, ['lossoffunction', 'lof', 'loss_of_function', 'lossfxn', 'functionalimpact', 'functional_impact']);
+    const hotspot = pickValue(row, ['hotspot', 'hot_spot', 'ishotspot', 'hotspot_status', 'recurringmutation']);
+    const iarcClass = pickValue(row, ['iarcclass', 'class', 'pathogenicityclass', 'pathogenicity', 'iarc_class', 'variantclass', 'clinicalclass', 'clinicalsignificance']);
+    const prevalence = pickValue(row, ['prevalence', 'totalprevalence', 'total_prevalence', 'totalcount', 'total_count', 'freq']);
+    const structFunc = pickValue(row, ['structurefunction', 'structural', 'structurefunctional', 'structurefunctionclass', 'structure', 'sfclass', 'mutstructuraltype']);
+    const codonNum = pickValue(row, ['codonnumber', 'codon_number', 'codonno', 'codon']);
+    const spliceSite = pickValue(row, ['splicesite', 'splice_site', 'splice', 'splicemutation', 'splicingeffect']);
+    const dnContact = pickValue(row, ['dnacontact', 'dna_contact', 'dnabinding', 'dna_binding', 'contactresidue']);
+
     const protCompact = toProteinCompact(prot);
     const cdNorm = normalizeText(cd);
 
@@ -262,7 +275,18 @@ function buildMatches(rows, { protein, cdna, genomic }) {
       hg38_coordinate: hg38 || '',
       somatic_count: somaticCount || '',
       germline_count: germlineCount || '',
-      exon_intron: exonIntron || ''
+      exon_intron: exonIntron || '',
+      mutation_type: mutationType || '',
+      ta_class: taClass || '',
+      dominant_negative: domNeg || '',
+      loss_of_function: lof || '',
+      hotspot: hotspot || '',
+      iarc_class: iarcClass || '',
+      prevalence: prevalence || '',
+      structural_class: structFunc || '',
+      codon_number: codonNum || '',
+      splice_site: spliceSite || '',
+      dna_contact: dnContact || '',
     });
   }
   matches.sort((a, b) => b.score - a.score);
@@ -307,11 +331,29 @@ export default async function handler(req, res) {
     const top = matches.slice(0, MAX_RESPONSE_MATCHES);
     const best = top[0] || null;
 
+    // Build a concise pathogenicity summary from the best match for top-level consumption
+    const pathogenicitySummary = best ? {
+      mutation_type: best.mutation_type || '',
+      location: best.exon_intron || '',
+      iarc_class: best.iarc_class || '',
+      ta_class: best.ta_class || '',
+      dominant_negative: best.dominant_negative || '',
+      loss_of_function: best.loss_of_function || '',
+      hotspot: best.hotspot || '',
+      somatic_count: best.somatic_count || '',
+      germline_count: best.germline_count || '',
+      prevalence: best.prevalence || '',
+      structural_class: best.structural_class || '',
+      splice_site: best.splice_site || '',
+      dna_contact: best.dna_contact || '',
+    } : null;
+
     const responsePayload = {
       source: 'tp53-database',
       dataset_url: datasetUrl,
       total_records: rows.length,
       match_count: matches.length,
+      pathogenicity: pathogenicitySummary,
       classification: best?.exon_intron || '',
       prevalence: best?.somatic_count ? `somatic count: ${best.somatic_count}` : '',
       note: matches.length
@@ -328,7 +370,8 @@ export default async function handler(req, res) {
           genomic_input: body.genomic || ''
         },
         dataset_attempts: debug || [],
-        sample_protein_values: rows.slice(0, 25).map(r => pickValue(r, ['protdescription', 'aachangeinhuman'])).filter(Boolean).slice(0, 10)
+        sample_protein_values: rows.slice(0, 25).map(r => pickValue(r, ['protdescription', 'aachangeinhuman'])).filter(Boolean).slice(0, 10),
+        available_columns: rows.length > 0 ? Object.keys(rows[0]) : []
       };
     }
     return res.status(200).json(responsePayload);

@@ -3524,37 +3524,162 @@ document.addEventListener('DOMContentLoaded', () => {
                         debug: true
                     });
                     if (tp53Data && typeof tp53Data === 'object') {
-                        const items = [];
-                        if (tp53Data.match_count !== undefined) {
-                            items.push(`<li><strong>Matches:</strong> ${tp53Data.match_count}</li>`);
+                        const best = tp53Data.matches && tp53Data.matches[0];
+                        const path = tp53Data.pathogenicity || (best ? best : null);
+
+                        // Match status banner
+                        const statusDiv = document.createElement('div');
+                        statusDiv.style.cssText = 'margin:6px 0 10px; padding:6px 10px; border-radius:4px; font-size:0.88rem;';
+                        if (tp53Data.match_count > 0 && best) {
+                            statusDiv.style.background = '#e8f5e9';
+                            statusDiv.style.borderLeft = '3px solid #4caf50';
+                            const countLabel = tp53Data.match_count === 1 ? '1 record' : `${tp53Data.match_count} records`;
+                            const s = document.createElement('strong');
+                            s.textContent = 'Database match: ';
+                            statusDiv.appendChild(s);
+                            statusDiv.appendChild(document.createTextNode(`found ${countLabel} in TP53 database`));
+                        } else {
+                            statusDiv.style.background = '#fff8e1';
+                            statusDiv.style.borderLeft = '3px solid #ffa726';
+                            const s = document.createElement('strong');
+                            s.textContent = 'No match: ';
+                            statusDiv.appendChild(s);
+                            statusDiv.appendChild(document.createTextNode('this exact variant was not found in the TP53 MutationView dataset'));
                         }
-                        if (tp53Data.prevalence !== undefined) {
-                            items.push(`<li><strong>Prevalence:</strong> ${tp53Data.prevalence}</li>`);
+                        tp53Content.appendChild(statusDiv);
+
+                        // Pathogenicity evidence table
+                        if (best) {
+                            // Helper: add a labeled row to a table element
+                            const addRow = (table, label, value, highlight) => {
+                                if (!value && value !== 0) return;
+                                const tr = document.createElement('tr');
+                                if (highlight) tr.style.background = highlight;
+                                const td1 = document.createElement('td');
+                                td1.style.cssText = 'padding:3px 12px 3px 0; font-weight:600; white-space:nowrap; vertical-align:top; color:#555; font-size:0.83rem;';
+                                td1.textContent = label;
+                                const td2 = document.createElement('td');
+                                td2.style.cssText = 'padding:3px 0; color:#222; font-size:0.85rem;';
+                                td2.textContent = String(value);
+                                tr.appendChild(td1);
+                                tr.appendChild(td2);
+                                table.appendChild(tr);
+                                return tr;
+                            };
+
+                            // Section heading
+                            const pathHeading = document.createElement('div');
+                            pathHeading.style.cssText = 'font-weight:700; font-size:0.85rem; color:#333; margin-bottom:4px; border-bottom:1px solid #ddd; padding-bottom:2px;';
+                            pathHeading.textContent = 'Pathogenicity evidence (best match)';
+                            tp53Content.appendChild(pathHeading);
+
+                            const table = document.createElement('table');
+                            table.style.cssText = 'width:100%; border-collapse:collapse; margin-bottom:8px;';
+
+                            // Primary pathogenicity indicators — show these even if empty to make absences visible
+                            const iarcVal = path.iarc_class;
+                            const taVal = path.ta_class;
+                            const domNegVal = path.dominant_negative;
+                            const lofVal = path.loss_of_function;
+                            const hotspotVal = path.hotspot;
+
+                            // If any primary pathogenicity fields are present, show them first
+                            const hasPrimaryPath = iarcVal || taVal || domNegVal || lofVal || hotspotVal;
+                            if (hasPrimaryPath) {
+                                addRow(table, 'IARC/Pathogenicity class', iarcVal);
+                                addRow(table, 'Transactivation activity', taVal);
+                                addRow(table, 'Dominant negative effect', domNegVal);
+                                addRow(table, 'Loss of function', lofVal);
+                                addRow(table, 'Hot spot', hotspotVal);
+                                addRow(table, 'Structural/functional class', path.structural_class);
+                                addRow(table, 'DNA contact residue', path.dna_contact);
+                                addRow(table, 'Splice site effect', path.splice_site);
+                            }
+
+                            // Always show mutation type, location, somatic/germline counts
+                            addRow(table, 'Mutation type', best.mutation_type || path.mutation_type);
+                            addRow(table, 'Codon / location', [best.codon_number, best.exon_intron || path.location].filter(Boolean).join(' — '));
+                            addRow(table, 'Protein (DB)', best.protein);
+                            addRow(table, 'cDNA/Genomic (DB)', best.cdna_or_genomic);
+
+                            // Epidemiological evidence
+                            const somatic = best.somatic_count || path.somatic_count;
+                            const germline = best.germline_count || path.germline_count;
+                            const prevalence = best.prevalence || path.prevalence;
+                            if (somatic || germline || prevalence) {
+                                const sepRow = document.createElement('tr');
+                                const sepTd = document.createElement('td');
+                                sepTd.colSpan = 2;
+                                sepTd.style.cssText = 'padding:5px 0 2px; font-weight:700; font-size:0.83rem; color:#555; border-top:1px solid #eee;';
+                                sepTd.textContent = 'Epidemiological evidence';
+                                sepRow.appendChild(sepTd);
+                                table.appendChild(sepRow);
+                                if (somatic) {
+                                    addRow(table, 'Somatic occurrences', somatic);
+                                }
+                                if (germline) {
+                                    addRow(table, 'Germline occurrences', germline);
+                                }
+                                if (prevalence) {
+                                    addRow(table, 'Prevalence', prevalence);
+                                }
+                            }
+
+                            // If no pathogenicity fields were in the CSV, show a note
+                            if (!hasPrimaryPath) {
+                                const noteRow = document.createElement('tr');
+                                const noteTd = document.createElement('td');
+                                noteTd.colSpan = 2;
+                                noteTd.style.cssText = 'padding:4px 0; font-size:0.8rem; color:#888; font-style:italic;';
+                                noteTd.textContent = 'Functional impact fields (IARC class, TA class, dominant negative, LOF) not present in the fetched dataset version. Check the TP53 DB directly for full classification.';
+                                noteRow.appendChild(noteTd);
+                                table.appendChild(noteRow);
+                            }
+
+                            tp53Content.appendChild(table);
+
+                            // Collapsible: all top matches
+                            if (tp53Data.matches.length > 1) {
+                                const matchDetails = document.createElement('details');
+                                matchDetails.style.marginTop = '4px';
+                                const matchSummaryEl = document.createElement('summary');
+                                matchSummaryEl.style.cssText = 'cursor:pointer; font-size:0.8rem; color:#4a5f73;';
+                                matchSummaryEl.textContent = `All matches (${tp53Data.matches.length})`;
+                                matchDetails.appendChild(matchSummaryEl);
+                                for (const m of tp53Data.matches) {
+                                    const mDiv = document.createElement('div');
+                                    mDiv.style.cssText = 'padding:4px 0 4px 8px; border-left:2px solid #ddd; margin:4px 0; font-size:0.79rem; color:#333;';
+                                    const parts = [
+                                        m.protein && `Protein: ${m.protein}`,
+                                        m.cdna_or_genomic && `cDNA: ${m.cdna_or_genomic}`,
+                                        m.mutation_type && `Type: ${m.mutation_type}`,
+                                        m.exon_intron && `Location: ${m.exon_intron}`,
+                                        m.iarc_class && `IARC class: ${m.iarc_class}`,
+                                        m.ta_class && `TA: ${m.ta_class}`,
+                                        m.dominant_negative && `Dom.neg: ${m.dominant_negative}`,
+                                        m.loss_of_function && `LOF: ${m.loss_of_function}`,
+                                        m.hotspot && `Hotspot: ${m.hotspot}`,
+                                        m.somatic_count && `Somatic: ${m.somatic_count}`,
+                                        m.germline_count && `Germline: ${m.germline_count}`,
+                                        m.mut_id && `ID: ${m.mut_id}`,
+                                    ].filter(Boolean);
+                                    mDiv.textContent = parts.join(' | ') || '(no detail fields)';
+                                    matchDetails.appendChild(mDiv);
+                                }
+                                tp53Content.appendChild(matchDetails);
+                            }
                         }
-                        if (tp53Data.classification) {
-                            items.push(`<li><strong>Classification:</strong> ${tp53Data.classification}</li>`);
-                        }
-                        if (tp53Data.note) {
-                            items.push(`<li><strong>Note:</strong> ${tp53Data.note}</li>`);
-                        }
-                        if (items.length > 0) {
-                            const details = document.createElement('details');
-                            const s = document.createElement('summary');
-                            s.textContent = 'TP53 query result';
-                            details.appendChild(s);
-                            const ul = document.createElement('ul');
-                            ul.innerHTML = items.join('');
-                            details.appendChild(ul);
-                            tp53Content.appendChild(details);
-                        }
+
+                        // Debug (collapsed, small)
                         if (tp53Data.debug) {
                             const dbgDetails = document.createElement('details');
+                            dbgDetails.style.marginTop = '6px';
                             const dbgSummary = document.createElement('summary');
+                            dbgSummary.style.cssText = 'cursor:pointer; font-size:0.76rem; color:#aaa;';
                             dbgSummary.textContent = 'Debug info';
                             dbgDetails.appendChild(dbgSummary);
                             const pre = document.createElement('pre');
-                            pre.style.whiteSpace = 'pre-wrap';
-                            pre.style.fontSize = '0.78rem';
+                            pre.style.cssText = 'white-space:pre-wrap; font-size:0.72rem; color:#666; margin-top:4px;';
                             pre.textContent = JSON.stringify(tp53Data.debug, null, 2);
                             dbgDetails.appendChild(pre);
                             tp53Content.appendChild(dbgDetails);
