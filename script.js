@@ -3149,8 +3149,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         div.innerHTML = `<strong>${label}:</strong> ${value}`;
                         content.appendChild(div);
                     };
+                    let evidenceItemsForDetails = [];
                     if (legacy) {
                         const legacyEvidenceItems = legacy?.molecularProfiles?.evidenceItems || [];
+                        evidenceItemsForDetails = legacyEvidenceItems;
                         const legacyDiseases = new Set();
                         const legacyDrugs = new Set();
                         const legacyEvidenceTypes = new Set();
@@ -3181,11 +3183,41 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (e?.evidence_type) evidenceTypes.add(String(e.evidence_type));
                             if (e?.evidence_level) evidenceLevels.add(String(e.evidence_level));
                         });
+                        evidenceItemsForDetails = entries;
                         addLine('Evidence items', entries.length);
                         addLine('Disease(s)', Array.from(diseases).slice(0, 5).join(', '));
                         addLine('Drug(s)', Array.from(drugs).slice(0, 5).join(', '));
                         addLine('Evidence type(s)', Array.from(evidenceTypes).join(', '));
                         addLine('Evidence level(s)', Array.from(evidenceLevels).join(', '));
+                    }
+                    if (Array.isArray(evidenceItemsForDetails) && evidenceItemsForDetails.length > 0) {
+                        const evDetails = document.createElement('details');
+                        const evSummary = document.createElement('summary');
+                        evSummary.textContent = `Show evidence item details (${evidenceItemsForDetails.length})`;
+                        evDetails.appendChild(evSummary);
+                        const evList = document.createElement('ul');
+                        evList.style.marginTop = '0.5rem';
+                        evList.style.paddingLeft = '1.2rem';
+                        evidenceItemsForDetails.slice(0, 30).forEach((item, idx) => {
+                            const li = document.createElement('li');
+                            const id = item?.id || item?.name || `item-${idx + 1}`;
+                            const type = item?.evidenceType || item?.evidence_type || 'N/A';
+                            const level = item?.evidenceLevel || item?.evidence_level || 'N/A';
+                            const disease = item?.disease?.name || item?.primary_disease || 'N/A';
+                            const significance = item?.significance || 'N/A';
+                            const source = item?.source?.citation || item?.source?.name || '';
+                            li.textContent = [id, type, `L${level}`, disease, significance, source].filter(Boolean).join(' | ');
+                            evList.appendChild(li);
+                        });
+                        evDetails.appendChild(evList);
+                        if (evidenceItemsForDetails.length > 30) {
+                            const more = document.createElement('div');
+                            more.style.fontSize = '0.82rem';
+                            more.style.color = '#666';
+                            more.textContent = `Showing first 30 of ${evidenceItemsForDetails.length} evidence items.`;
+                            evDetails.appendChild(more);
+                        }
+                        content.appendChild(evDetails);
                     }
                     const detailsEl = document.createElement('details');
                     const summaryEl = document.createElement('summary');
