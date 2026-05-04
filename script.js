@@ -3151,7 +3151,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     };
                     let evidenceItemsForDetails = [];
                     if (legacy) {
-                        const legacyEvidenceItems = legacy?.molecularProfiles?.evidenceItems || [];
+                        const mp = legacy?.molecularProfiles;
+                        const legacyEvidenceItems = Array.isArray(mp)
+                            ? mp.flatMap((profile) => Array.isArray(profile?.evidenceItems) ? profile.evidenceItems : [])
+                            : (Array.isArray(mp?.evidenceItems) ? mp.evidenceItems : []);
                         evidenceItemsForDetails = legacyEvidenceItems;
                         const legacyDiseases = new Set();
                         const legacyDrugs = new Set();
@@ -3166,7 +3169,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         addLine('Gene', legacy?.gene?.name);
                         addLine('Variant', legacy?.variant?.name || legacy?.name);
                         addLine('CIViC Variant ID', legacy?.id);
-                        addLine('ClinVar ID(s)', legacy?.clinvarIds);
+                        const clinvarIdsDisplay = Array.isArray(legacy?.clinvarIds) ? legacy.clinvarIds.join(', ') : legacy?.clinvarIds;
+                        addLine('ClinVar ID(s)', clinvarIdsDisplay);
                         addLine('Evidence items', legacyEvidenceItems.length || legacy?.evidence_items?.length);
                         addLine('Disease(s)', Array.from(legacyDiseases).slice(0, 5).join(', '));
                         addLine('Drug(s)', Array.from(legacyDrugs).slice(0, 5).join(', '));
