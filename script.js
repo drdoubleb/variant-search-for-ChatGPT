@@ -1,3 +1,4 @@
+// Test comment added to verify GitHub PR integration.
 // Helper mapping from NCBI reference sequence accessions to chromosome names.
 // According to NCBI, accessions NC_000001.11 ... NC_000024.10 correspond to chromosomes 1-22, X (23) and Y (24).
 // NC_012920.1 corresponds to mitochondrial DNA (MT).
