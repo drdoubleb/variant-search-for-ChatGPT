@@ -4,14 +4,14 @@
 
 const CIVIC_GRAPHQL = 'https://civicdb.org/api/graphql';
 
-async function civicPost(query) {
+async function civicPost(query, variables = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12000);
     try {
         const res = await fetch(CIVIC_GRAPHQL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({ query }),
+            body: JSON.stringify({ query, variables }),
             signal: controller.signal
         });
         const text = await res.text();
@@ -26,106 +26,187 @@ async function civicPost(query) {
     }
 }
 
-// Step 1: find the numeric gene ID by name.
-// Tries geneTypeahead (CivicDB v2), then genes(name:), then features(name:).
+// Step 1: find gene ID using CIViC v2 schema
 async function lookupGeneId(safeGene) {
     const errs = [];
 
-    // Attempt A — geneTypeahead (most reliable name search in CivicDB v2)
-    const rA = await civicPost(`{ geneTypeahead(queryString: "${safeGene}") { id name } }`);
-    if (!rA.errors?.length) {
-        const arr = rA.data?.geneTypeahead;
-        if (Array.isArray(arr) && arr.length > 0) {
-            const match = arr.find(g => String(g.name || '').toUpperCase() === safeGene.toUpperCase()) || arr[0];
-            if (match?.id) return { id: match.id, name: match.name, queryErrors: null };
+    const geneQuery = `
+        query CivicGeneBySymbol($symbol: String!) {
+            gene(entrezSymbol: $symbol) {
+                id
+                name
+            }
         }
+    `;
+
+    const queryGene = safeGene.toUpperCase();
+    const rA = await civicPost(geneQuery, { symbol: queryGene });
+
+    if (!rA.errors?.length) {
+        const gene = rA.data?.gene;
+        if (gene?.id) return { id: Number(gene.id), name: gene.name, queryErrors: null };
     } else {
-        errs.push(...rA.errors.map(e => `typeahead: ${e.message}`));
+        errs.push(...rA.errors.map(e => `gene(entrezSymbol): ${e.message}`));
     }
 
-    // Attempt B — genes(name:) connection
-    const rB = await civicPost(`{ genes(name: "${safeGene}") { nodes { id name } } }`);
+    const genesQuery = `
+        query CivicGenesBySymbols($symbols: [String!]!) {
+            genes(entrezSymbols: $symbols) {
+                nodes {
+                    id
+                    name
+                }
+            }
+        }
+    `;
+
+    const rB = await civicPost(genesQuery, { symbols: [queryGene] });
+
     if (!rB.errors?.length) {
-        const node = rB.data?.genes?.nodes?.[0];
-        if (node?.id) return { id: node.id, name: node.name, queryErrors: null };
+        const nodes = rB.data?.genes?.nodes || [];
+        const match = nodes.find(g => String(g.name || '').toUpperCase() === safeGene.toUpperCase()) || nodes[0];
+        if (match?.id) return { id: Number(match.id), name: match.name, queryErrors: null };
     } else {
-        errs.push(...rB.errors.map(e => `genes: ${e.message}`));
-    }
-
-    // Attempt C — features(name:) (CivicDB may have renamed the type)
-    const rC = await civicPost(`{ features(name: "${safeGene}") { nodes { id name } } }`);
-    if (!rC.errors?.length) {
-        const node = rC.data?.features?.nodes?.[0];
-        if (node?.id) return { id: node.id, name: node.name, queryErrors: null };
-    } else {
-        errs.push(...rC.errors.map(e => `features: ${e.message}`));
+        errs.push(...rB.errors.map(e => `genes(entrezSymbols): ${e.message}`));
     }
 
     return { id: null, name: null, queryErrors: errs.length ? errs : ['Gene not found'] };
 }
 
-// Step 2: fetch full gene data by numeric ID.
+// Step 2: fetch gene data
 async function fetchGeneById(geneId) {
-    // Try genes(ids: [...]) connection
-    const rA = await civicPost(`{
-        genes(ids: [${geneId}]) {
-            nodes {
-                id name description
-                variants { nodes { id name variantTypes { nodes { name } } } }
-            }
-        }
-    }`);
-    if (!rA.errors?.length) {
-        const node = rA.data?.genes?.nodes?.[0];
-        if (node) return node;
-    }
-
-    // Fallback: features(ids: [...])
-    const rB = await civicPost(`{
-        features(ids: [${geneId}]) {
-            nodes {
-                id name
-                ... on Gene {
-                    description
-                    variants { nodes { id name variantTypes { nodes { name } } } }
+    const geneQuery = `
+        query CivicGeneById($id: Int!) {
+            gene(id: $id) {
+                id
+                name
+                description
+                variants(first: 100) {
+                    nodes {
+                        id
+                        name
+                        variantTypes { name }
+                    }
+                    totalCount
                 }
             }
         }
-    }`);
-    if (!rB.errors?.length) {
-        const node = rB.data?.features?.nodes?.[0];
-        if (node) return node;
+    `;
+
+    const rA = await civicPost(geneQuery, { id: Number(geneId) });
+
+    if (!rA.errors?.length) {
+        const gene = rA.data?.gene;
+        if (gene) return normaliseGene(gene);
     }
 
-    // Minimal fallback — just id + name from typeahead step
+    const genesQuery = `
+        query CivicGenesByIds($ids: [Int!]!) {
+            genes(ids: $ids) {
+                nodes {
+                    id
+                    name
+                    description
+                    variants(first: 100) {
+                        nodes {
+                            id
+                            name
+                            variantTypes { name }
+                        }
+                        totalCount
+                    }
+                }
+            }
+        }
+    `;
+
+    const rB = await civicPost(genesQuery, { ids: [Number(geneId)] });
+
+    if (!rB.errors?.length) {
+        const gene = rB.data?.genes?.nodes?.[0];
+        if (gene) return normaliseGene(gene);
+    }
+
     return null;
 }
 
-// Step 3: fetch accepted assertions for a gene.
-async function fetchAssertions(geneId) {
-    const rA = await civicPost(`{
-        assertions(geneIds: [${geneId}], status: ACCEPTED) {
-            nodes {
-                id ampLevel clinicalSignificance significance summary
-                disease { name }
-                therapies { nodes { name } }
-            }
+function normaliseGene(gene) {
+    if (!gene) return gene;
+    const nodes = Array.isArray(gene.variants?.nodes) ? gene.variants.nodes : [];
+    return {
+        ...gene,
+        variants: {
+            ...(gene.variants || {}),
+            nodes: nodes.map((variant) => ({
+                ...variant,
+                variantTypes: normaliseVariantTypes(variant.variantTypes)
+            }))
         }
-    }`);
-    if (!rA.errors?.length && rA.data?.assertions) return rA.data.assertions.nodes || [];
+    };
+}
 
-    const rB = await civicPost(`{
-        assertions(featureIds: [${geneId}], status: ACCEPTED) {
-            nodes {
-                id ampLevel clinicalSignificance significance summary
-                disease { name }
-                therapies { nodes { name } }
+function normaliseVariantTypes(variantTypes) {
+    if (Array.isArray(variantTypes)) return { nodes: variantTypes };
+    if (Array.isArray(variantTypes?.nodes)) return variantTypes;
+    return { nodes: [] };
+}
+
+// Step 3: fetch assertions
+async function fetchAssertions(geneId, geneName) {
+    const assertionsQuery = `
+        query CivicAssertionsForGene($name: String!) {
+            assertions(molecularProfileName: $name, status: ACCEPTED, first: 25) {
+                nodes {
+                    id
+                    ampLevel
+                    clinicalSignificance
+                    significance
+                    summary
+                    disease { name }
+                    therapies { name }
+                }
             }
         }
-    }`);
-    if (!rB.errors?.length && rB.data?.assertions) return rB.data.assertions.nodes || [];
+    `;
+
+    const rA = await civicPost(assertionsQuery, { name: geneName || '' });
+
+    if (!rA.errors?.length && rA.data?.assertions) {
+        return normaliseAssertions(rA.data.assertions.nodes || []);
+    }
+
+    const fallbackQuery = `
+        query CivicAssertionsByVariantFeature($id: Int!) {
+            assertions(variantFeatureId: $id, status: ACCEPTED, first: 25) {
+                nodes {
+                    id
+                    ampLevel
+                    clinicalSignificance
+                    significance
+                    summary
+                    disease { name }
+                    therapies { name }
+                }
+            }
+        }
+    `;
+
+    const rB = await civicPost(fallbackQuery, { id: Number(geneId) });
+
+    if (!rB.errors?.length && rB.data?.assertions) {
+        return normaliseAssertions(rB.data.assertions.nodes || []);
+    }
 
     return [];
+}
+
+function normaliseAssertions(assertions) {
+    return assertions.map((assertion) => ({
+        ...assertion,
+        therapies: Array.isArray(assertion.therapies)
+            ? { nodes: assertion.therapies }
+            : assertion.therapies
+    }));
 }
 
 export default async function handler(req, res) {
@@ -137,6 +218,7 @@ export default async function handler(req, res) {
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
     const { gene, protein } = req.query;
+
     if (!gene || !String(gene).trim()) {
         return res.status(400).json({ error: 'Missing required query parameter: gene' });
     }
@@ -144,29 +226,39 @@ export default async function handler(req, res) {
     const safeGene = String(gene).replace(/[^A-Za-z0-9\-_.]/g, '');
     if (!safeGene) return res.status(400).json({ error: 'Invalid gene name' });
 
-    // Step 1: resolve gene ID by name
     const { id: geneId, name: geneName, queryErrors } = await lookupGeneId(safeGene);
+
     if (!geneId) {
         console.warn('CivicDB gene not found:', safeGene, queryErrors);
         return res.status(200).json({ gene: null, matchedVariant: null, assertions: [], queryErrors });
     }
 
-    // Steps 2 + 3 in parallel
     const [fullGene, assertions] = await Promise.all([
         fetchGeneById(geneId),
-        fetchAssertions(geneId)
+        fetchAssertions(geneId, geneName)
     ]);
 
-    // Build gene object (use full data if available, else minimal from typeahead)
-    const apiGene = fullGene || { id: geneId, name: geneName, description: '', variants: { nodes: [] } };
+    const apiGene = fullGene || {
+        id: geneId,
+        name: geneName,
+        description: '',
+        variants: { nodes: [] }
+    };
 
-    // Match variant by protein change
     let matchedVariant = null;
-    const normInput = String(protein || '').replace(/^p\./i, '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
+    const normInput = String(protein || '')
+        .replace(/^p\./i, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9*_]/g, '');
+
     const variantNodes = apiGene.variants?.nodes || [];
+
     if (normInput && variantNodes.length > 0) {
         for (const v of variantNodes) {
-            const vn = String(v.name || '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
+            const vn = String(v.name || '')
+                .toLowerCase()
+                .replace(/[^a-z0-9*_]/g, '');
+
             if (vn && (vn === normInput || normInput.includes(vn) || vn.includes(normInput))) {
                 matchedVariant = v;
                 break;
