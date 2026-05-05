@@ -4,21 +4,104 @@
 //
 // GET /api/civic?gene=BRAF&protein=V600E
 //
-// No API key is required for public read access to CivicDB.
+// No API key required for public CivicDB read access.
+// Always returns HTTP 200 — errors are reported in the response body so the
+// frontend can degrade gracefully instead of showing a 502.
 
 const CIVIC_GRAPHQL = 'https://civicdb.org/api/graphql';
 
-async function civicQuery(query) {
-    const res = await fetch(CIVIC_GRAPHQL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ query }),
-        signal: AbortSignal.timeout(12000)
-    });
-    if (!res.ok) throw new Error(`CivicDB request failed: ${res.status}`);
-    const data = await res.json();
-    if (data?.errors?.length) throw new Error(`CivicDB GraphQL error: ${data.errors[0]?.message}`);
-    return data;
+// Post a GraphQL query and return the parsed JSON body.
+// Returns { data, errors } — never throws (catches network + JSON errors).
+async function civicPost(query) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+        const res = await fetch(CIVIC_GRAPHQL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ query }),
+            signal: controller.signal
+        });
+        const text = await res.text();
+        let body;
+        try { body = JSON.parse(text); } catch { body = {}; }
+        if (!res.ok) return { data: null, errors: [{ message: `HTTP ${res.status}: ${text.slice(0, 300)}` }] };
+        return body;
+    } catch (e) {
+        return { data: null, errors: [{ message: e.message || String(e) }] };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Attempt several query shapes to accommodate CivicDB API schema variations.
+// CivicDB v2 renamed entities ("genes" may be "features") — we try both.
+async function findGene(safeGene) {
+    // Attempt 1 — canonical shape used in CivicDB v2 docs
+    const r1 = await civicPost(`{
+        genes(name: "${safeGene}") {
+            nodes {
+                id name description
+                variants { nodes { id name variantTypes { nodes { name } } } }
+            }
+        }
+    }`);
+    const g1 = r1?.data?.genes?.nodes?.[0];
+    if (g1) return { gene: g1, queryErrors: null };
+
+    // Attempt 2 — "features" schema (CivicDB may use this name)
+    const r2 = await civicPost(`{
+        features(name: "${safeGene}") {
+            nodes {
+                id name
+                ... on Gene {
+                    description
+                    variants { nodes { id name variantTypes { nodes { name } } } }
+                }
+            }
+        }
+    }`);
+    const g2 = r2?.data?.features?.nodes?.[0];
+    if (g2) return { gene: g2, queryErrors: null };
+
+    // Collect errors for debugging
+    const errs = [
+        ...(r1?.errors || []).map(e => `genes: ${e.message}`),
+        ...(r2?.errors || []).map(e => `features: ${e.message}`)
+    ];
+    return { gene: null, queryErrors: errs.length ? errs : ['No results'] };
+}
+
+async function findAssertions(geneId) {
+    // Attempt 1 — geneIds filter
+    const r1 = await civicPost(`{
+        assertions(geneIds: [${geneId}], status: ACCEPTED) {
+            nodes {
+                id ampLevel clinicalSignificance significance summary
+                disease { name }
+                therapies { nodes { name } }
+            }
+        }
+    }`);
+    if (!r1?.errors?.length && r1?.data?.assertions) {
+        return r1.data.assertions.nodes || [];
+    }
+
+    // Attempt 2 — featureIds filter
+    const r2 = await civicPost(`{
+        assertions(featureIds: [${geneId}], status: ACCEPTED) {
+            nodes {
+                id ampLevel clinicalSignificance significance summary
+                disease { name }
+                therapies { nodes { name } }
+            }
+        }
+    }`);
+    if (!r2?.errors?.length && r2?.data?.assertions) {
+        return r2.data.assertions.nodes || [];
+    }
+
+    return [];
 }
 
 export default async function handler(req, res) {
@@ -37,63 +120,27 @@ export default async function handler(req, res) {
     const safeGene = String(gene).replace(/[^A-Za-z0-9\-_.]/g, '');
     if (!safeGene) return res.status(400).json({ error: 'Invalid gene name' });
 
-    try {
-        // Step 1: get gene info + variant list
-        const geneData = await civicQuery(`{
-            genes(name: "${safeGene}") {
-                nodes {
-                    id name description
-                    variants {
-                        nodes {
-                            id name
-                            variantTypes { nodes { name } }
-                        }
-                    }
-                }
-            }
-        }`);
+    const { gene: apiGene, queryErrors } = await findGene(safeGene);
 
-        const apiGene = geneData?.data?.genes?.nodes?.[0] || null;
-        if (!apiGene) {
-            return res.status(200).json({ gene: null, matchedVariant: null, assertions: [] });
-        }
-
-        // Match variant by protein change (normalised comparison)
-        let matchedVariant = null;
-        if (protein && Array.isArray(apiGene.variants?.nodes)) {
-            const normProt = String(protein).replace(/^p\./i, '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
-            for (const v of apiGene.variants.nodes) {
-                const vn = String(v.name || '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
-                if (vn && normProt && (vn === normProt || normProt.includes(vn) || vn.includes(normProt))) {
-                    matchedVariant = v;
-                    break;
-                }
-            }
-        }
-
-        // Step 2: get accepted assertions for this gene
-        let assertions = [];
-        if (apiGene.id) {
-            try {
-                const assertData = await civicQuery(`{
-                    assertions(geneIds: [${apiGene.id}], status: ACCEPTED) {
-                        nodes {
-                            id ampLevel clinicalSignificance significance summary
-                            disease { name }
-                            therapies { nodes { name } }
-                        }
-                    }
-                }`);
-                assertions = assertData?.data?.assertions?.nodes || [];
-            } catch (assertErr) {
-                // Assertions unavailable — return gene data without them
-                console.warn('CivicDB assertions fetch failed:', assertErr.message);
-            }
-        }
-
-        return res.status(200).json({ gene: apiGene, matchedVariant, assertions });
-    } catch (err) {
-        console.error('CivicDB proxy error:', err);
-        return res.status(502).json({ error: 'CivicDB lookup failed', detail: err.message });
+    if (!apiGene) {
+        console.warn('CivicDB gene lookup failed for', safeGene, queryErrors);
+        return res.status(200).json({ gene: null, matchedVariant: null, assertions: [], queryErrors });
     }
+
+    // Match variant by protein change (normalised comparison, supports triple-letter)
+    let matchedVariant = null;
+    const normInput = String(protein || '').replace(/^p\./i, '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
+    if (normInput && Array.isArray(apiGene.variants?.nodes)) {
+        for (const v of apiGene.variants.nodes) {
+            const vn = String(v.name || '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
+            if (vn && (vn === normInput || normInput.includes(vn) || vn.includes(normInput))) {
+                matchedVariant = v;
+                break;
+            }
+        }
+    }
+
+    const assertions = apiGene.id ? await findAssertions(apiGene.id) : [];
+
+    return res.status(200).json({ gene: apiGene, matchedVariant, assertions });
 }
