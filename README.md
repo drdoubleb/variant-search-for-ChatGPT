@@ -3,6 +3,7 @@
 ## TP53 backend (Vercel)
 
 This repo now includes a serverless endpoint at `api/tp53.js` for TP53 mutation database lookups.
+It is intended as a lightweight beta reference for validating variant-search behavior.
 
 ### Endpoint
 
