@@ -16,6 +16,29 @@ const accessionToChr = (accession) => {
     return null;
 };
 
+
+const DEFAULT_BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
+
+function trimTrailingSlash(value) {
+    return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function getBackendApiBaseUrl() {
+    return trimTrailingSlash(window.BACKEND_API_BASE_URL || DEFAULT_BACKEND_API_BASE_URL);
+}
+
+function getConfiguredApiEndpoint(globalName, apiPath) {
+    const configured = String(window[globalName] || '').trim();
+    if (configured) return configured;
+    const base = getBackendApiBaseUrl();
+    return base ? `${base}${apiPath}` : apiPath;
+}
+
+function appendQueryParams(endpoint, params) {
+    const separator = endpoint.includes('?') ? '&' : '?';
+    return `${endpoint}${separator}${params}`;
+}
+
 // When the user provides a gene symbol in a five‑token genomic variant input
 // (e.g. "7 140453122 BRAF TCCATCGAGATTTCA TCT"), we temporarily store that
 // gene here during normalisation so that it can be used later when
@@ -265,7 +288,7 @@ function isTp53Gene(geneNames) {
 }
 
 async function fetchTp53MutationDatabase(payload) {
-    const endpoint = String(window.TP53_API_ENDPOINT || '').trim();
+    const endpoint = getConfiguredApiEndpoint('TP53_API_ENDPOINT', '/api/tp53');
     if (!endpoint) return null;
     const response = await fetchWithTimeout(endpoint, {
         method: 'POST',
@@ -662,12 +685,24 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
             germline: rec.germline_classification?.description || '',
             review: rec.germline_classification?.review_status || '',
             variationId: rec.variation_set?.[0]?.variation_xrefs?.find?.((x) => String(x.db || '').toLowerCase() === 'dbsnp')?.id || rec.variation_set?.[0]?.variation_name || '',
+            variationName: rec.variation_set?.[0]?.variation_name || '',
+            molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
             pos: varPos !== null ? Number(varPos) : null
         };
     });
 }
+function isSynonymousClinvarVariant(variant) {
+    const text = [
+        variant?.title,
+        variant?.molecularConsequence,
+        variant?.variationName
+    ].filter(Boolean).join(' ').toLowerCase();
+    return /\bsynonymous\b/.test(text) || /\bp\.\s*\(?=\)?/.test(text) || /\bp\.\s*[a-z]{1,3}\d+=/i.test(text);
+}
+
 // Returns a color hex string for a ClinVar/CIViC pathogenicity classification.
-function getPathogenicityColor(classification) {
+function getPathogenicityColor(classification, variant = null) {
+    if (variant && isSynonymousClinvarVariant(variant)) return '#9ca3af';
     const c = String(classification || '').toLowerCase();
     if (c === 'pathogenic') return '#dc2626';
     if (c.includes('likely pathogenic')) return '#ef4444';
@@ -734,8 +769,8 @@ function buildLollipopPlot(variants, queryPos) {
     svg.appendChild(dia);
 
     // Legend
-    [['#dc2626', 'Pathogenic/LP'], ['#16a34a', 'Benign/LB'], ['#f59e0b', 'VUS/Other']].forEach(([col, lbl], i) => {
-        const lx = 5 + i * 91;
+    [['#dc2626', 'Pathogenic/LP'], ['#16a34a', 'Benign/LB'], ['#f59e0b', 'VUS/Other'], ['#9ca3af', 'Synonymous']].forEach(([col, lbl], i) => {
+        const lx = 5 + i * 68;
         const lc = document.createElementNS(NS, 'circle');
         lc.setAttribute('cx', String(lx)); lc.setAttribute('cy', '7');
         lc.setAttribute('r', '4'); lc.setAttribute('fill', col);
@@ -753,7 +788,7 @@ function buildLollipopPlot(variants, queryPos) {
         if (v.pos === null || v.pos === undefined || !Number.isFinite(Number(v.pos))) return;
         const x = posToX(Number(v.pos));
         if (x < ML - 8 || x > W - MR + 8) return; // out of range
-        const color = getPathogenicityColor(v.germline);
+        const color = getPathogenicityColor(v.germline, v);
         const sh = stackHeight(x);
         const cy = AY - 16 - sh;
         const stemY = Math.max(cy + 5, 18);
@@ -771,7 +806,7 @@ function buildLollipopPlot(variants, queryPos) {
         circ.setAttribute('opacity', '0.88');
         circ.setAttribute('style', 'cursor:pointer');
         const tip = document.createElementNS(NS, 'title');
-        tip.textContent = `${v.germline || 'Unknown'} (pos ${v.pos}): ${v.title || v.id}`;
+        tip.textContent = `${isSynonymousClinvarVariant(v) ? 'Synonymous; ' : ''}${v.germline || 'Unknown'} (pos ${v.pos}): ${v.title || v.id}`;
         circ.appendChild(tip);
         svg.appendChild(circ);
         plotted++;
@@ -799,7 +834,8 @@ async function fetchCivicApiData(geneName, proteinChange) {
     try {
         const params = new URLSearchParams({ gene: safeGene });
         if (proteinChange) params.set('protein', String(proteinChange).replace(/^p\./i, ''));
-        const res = await fetchWithTimeout(`/api/civic?${params}`, {}, API_TIMEOUT_MS.civic);
+        const endpoint = getConfiguredApiEndpoint('CIVIC_API_ENDPOINT', '/api/civic');
+        const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.civic);
         if (!res.ok) return null;
         const data = await res.json();
         if (data?.error) return null;
@@ -816,7 +852,8 @@ async function fetchPubmedArticles(searchTerm, limit = 5) {
     if (!searchTerm) return { total: 0, articles: [] };
     try {
         const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
-        const res = await fetchWithTimeout(`/api/pubmed?${params}`, {}, API_TIMEOUT_MS.pubmed);
+        const endpoint = getConfiguredApiEndpoint('PUBMED_API_ENDPOINT', '/api/pubmed');
+        const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.pubmed);
         if (!res.ok) return { total: 0, articles: [] };
         const data = await res.json();
         if (data?.error) return { total: 0, articles: [] };
@@ -3280,7 +3317,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             ul.style.cssText = 'margin-top:0.4rem;font-size:0.8rem;padding-left:1.2rem;line-height:1.5;';
                             nearby.forEach((v) => {
                                 const li = document.createElement('li');
-                                const color = getPathogenicityColor(v.germline);
+                                const color = getPathogenicityColor(v.germline, v);
                                 const sigSpan = `<span style="color:${color};font-weight:600">${v.germline || 'Unknown'}</span>`;
                                 const posInfo = v.pos ? ` · pos ${v.pos}` : '';
                                 const cvLink = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${v.id}</a>`;

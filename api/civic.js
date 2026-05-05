@@ -86,6 +86,21 @@ async function fetchGeneById(geneId) {
                         id
                         name
                         variantTypes { name }
+                        singleVariantMolecularProfile {
+                            id
+                            assertions(first: 10) {
+                                nodes {
+                                    id
+                                    ampLevel
+                                    assertionType
+                                    significance
+                                    status
+                                    summary
+                                    disease { name }
+                                    therapies { name }
+                                }
+                            }
+                        }
                     }
                     totalCount
                 }
@@ -159,7 +174,7 @@ async function fetchAssertions(geneId, geneName) {
                 nodes {
                     id
                     ampLevel
-                    clinicalSignificance
+                    assertionType
                     significance
                     summary
                     disease { name }
@@ -175,38 +190,38 @@ async function fetchAssertions(geneId, geneName) {
         return normaliseAssertions(rA.data.assertions.nodes || []);
     }
 
-    const fallbackQuery = `
-        query CivicAssertionsByVariantFeature($id: Int!) {
-            assertions(variantFeatureId: $id, status: ACCEPTED, first: 25) {
-                nodes {
-                    id
-                    ampLevel
-                    clinicalSignificance
-                    significance
-                    summary
-                    disease { name }
-                    therapies { name }
-                }
-            }
-        }
-    `;
-
-    const rB = await civicPost(fallbackQuery, { id: Number(geneId) });
-
-    if (!rB.errors?.length && rB.data?.assertions) {
-        return normaliseAssertions(rB.data.assertions.nodes || []);
-    }
-
     return [];
 }
 
 function normaliseAssertions(assertions) {
-    return assertions.map((assertion) => ({
-        ...assertion,
-        therapies: Array.isArray(assertion.therapies)
-            ? { nodes: assertion.therapies }
-            : assertion.therapies
-    }));
+    const seen = new Set();
+    return assertions
+        .filter((assertion) => {
+            const status = String(assertion?.status || 'accepted').toLowerCase();
+            return status !== 'rejected' && status !== 'submitted';
+        })
+        .filter((assertion) => {
+            const key = assertion?.id || JSON.stringify(assertion);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        })
+        .map((assertion) => ({
+            ...assertion,
+            therapies: Array.isArray(assertion.therapies)
+                ? { nodes: assertion.therapies }
+                : assertion.therapies
+        }));
+}
+
+function collectAssertionsFromGene(gene) {
+    const variants = Array.isArray(gene?.variants?.nodes) ? gene.variants.nodes : [];
+    const nested = [];
+    for (const variant of variants) {
+        const nodes = variant?.singleVariantMolecularProfile?.assertions?.nodes;
+        if (Array.isArray(nodes)) nested.push(...nodes);
+    }
+    return normaliseAssertions(nested);
 }
 
 export default async function handler(req, res) {
@@ -233,7 +248,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ gene: null, matchedVariant: null, assertions: [], queryErrors });
     }
 
-    const [fullGene, assertions] = await Promise.all([
+    const [fullGene, fetchedAssertions] = await Promise.all([
         fetchGeneById(geneId),
         fetchAssertions(geneId, geneName)
     ]);
@@ -244,6 +259,11 @@ export default async function handler(req, res) {
         description: '',
         variants: { nodes: [] }
     };
+
+    let assertions = fetchedAssertions;
+    if (!assertions || assertions.length === 0) {
+        assertions = collectAssertionsFromGene(apiGene);
+    }
 
     let matchedVariant = null;
     const normInput = String(protein || '')
