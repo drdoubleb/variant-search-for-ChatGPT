@@ -2,6 +2,12 @@
   "functions": {
     "api/tp53.js": {
       "maxDuration": 30
+    },
+    "api/pubmed.js": {
+      "maxDuration": 15
+    },
+    "api/civic.js": {
+      "maxDuration": 15
     }
   }
 }

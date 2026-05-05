@@ -791,62 +791,19 @@ function buildLollipopPlot(variants, queryPos) {
     return svg;
 }
 
-// Query CivicDB GraphQL API for gene-level data and accepted assertions.
+// Query CivicDB via the /api/civic serverless proxy (avoids browser CORS).
 async function fetchCivicApiData(geneName, proteinChange) {
     if (!geneName) return null;
     const safeGene = String(geneName).replace(/[^A-Za-z0-9\-_.]/g, '');
     if (!safeGene) return null;
     try {
-        // Step 1: get gene info + variant list
-        const geneQuery = JSON.stringify({
-            query: `{ genes(name: "${safeGene}") { nodes { id name description variants { nodes { id name variantTypes { nodes { name } } } } } } }`
-        });
-        const geneRes = await fetchWithTimeout('https://civicdb.org/api/graphql', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: geneQuery
-        }, API_TIMEOUT_MS.civic);
-        if (!geneRes.ok) return null;
-        const geneData = await geneRes.json();
-        if (geneData?.errors) return null;
-        const gene = geneData?.data?.genes?.nodes?.[0] || null;
-        if (!gene) return { gene: null, matchedVariant: null, assertions: [] };
-
-        // Try to match the specific variant by protein change
-        let matchedVariant = null;
-        if (proteinChange && Array.isArray(gene.variants?.nodes)) {
-            const normProt = String(proteinChange).replace(/^p\./i, '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
-            for (const v of gene.variants.nodes) {
-                const vn = String(v.name || '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
-                if (vn && normProt && (vn === normProt || normProt.includes(vn) || vn.includes(normProt))) {
-                    matchedVariant = v;
-                    break;
-                }
-            }
-        }
-
-        // Step 2: get accepted assertions for this gene
-        let assertions = [];
-        if (gene.id) {
-            try {
-                const assertQuery = JSON.stringify({
-                    query: `{ assertions(geneIds: [${gene.id}], status: ACCEPTED) { nodes { id ampLevel clinicalSignificance significance summary disease { name } therapies { nodes { name } } } } }`
-                });
-                const assertRes = await fetchWithTimeout('https://civicdb.org/api/graphql', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-                    body: assertQuery
-                }, API_TIMEOUT_MS.civic);
-                if (assertRes.ok) {
-                    const assertData = await assertRes.json();
-                    if (!assertData?.errors) {
-                        assertions = assertData?.data?.assertions?.nodes || [];
-                    }
-                }
-            } catch (_) { /* assertions fetch failed, continue */ }
-        }
-
-        return { gene, matchedVariant, assertions };
+        const params = new URLSearchParams({ gene: safeGene });
+        if (proteinChange) params.set('protein', String(proteinChange).replace(/^p\./i, ''));
+        const res = await fetchWithTimeout(`/api/civic?${params}`, {}, API_TIMEOUT_MS.civic);
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data?.error) return null;
+        return data; // { gene, matchedVariant, assertions }
     } catch (e) {
         console.warn('CivicDB API fetch failed', e);
         return null;
@@ -854,22 +811,16 @@ async function fetchCivicApiData(geneName, proteinChange) {
 }
 
 // Query PubMed via NCBI E-utilities for articles about a variant.
-// Query PubMed via Europe PMC (CORS-friendly) for articles about a variant.
+// Query PubMed via the /api/pubmed serverless proxy (avoids browser CORS on NCBI eutils).
 async function fetchPubmedArticles(searchTerm, limit = 5) {
     if (!searchTerm) return { total: 0, articles: [] };
     try {
-        const url = `https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(searchTerm)}&format=json&resultType=lite&pageSize=${limit}&sort=relevance`;
-        const res = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.pubmed);
+        const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
+        const res = await fetchWithTimeout(`/api/pubmed?${params}`, {}, API_TIMEOUT_MS.pubmed);
         if (!res.ok) return { total: 0, articles: [] };
         const data = await res.json();
-        const total = data?.hitCount || 0;
-        const results = data?.resultList?.result || [];
-        const articles = results.map((r) => {
-            const pmid = r.pmid || r.id || '';
-            const authors = String(r.authorString || '').replace(/\.$/, '');
-            return { pmid, title: r.title || '', authors, journal: r.journalTitle || r.journalAbbreviation || '', year: r.pubYear || '' };
-        });
-        return { total, articles };
+        if (data?.error) return { total: 0, articles: [] };
+        return { total: data.total || 0, articles: data.articles || [] };
     } catch (e) {
         console.warn('PubMed fetch failed', e);
         return { total: 0, articles: [] };
