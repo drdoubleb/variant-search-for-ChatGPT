@@ -854,31 +854,21 @@ async function fetchCivicApiData(geneName, proteinChange) {
 }
 
 // Query PubMed via NCBI E-utilities for articles about a variant.
+// Query PubMed via Europe PMC (CORS-friendly) for articles about a variant.
 async function fetchPubmedArticles(searchTerm, limit = 5) {
     if (!searchTerm) return { total: 0, articles: [] };
     try {
-        const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&retmode=json&retmax=${limit}&sort=relevance&term=${encodeURIComponent(searchTerm)}`;
-        const searchRes = await fetchWithTimeout(searchUrl, {}, API_TIMEOUT_MS.pubmed);
-        if (!searchRes.ok) return { total: 0, articles: [] };
-        const searchData = await searchRes.json();
-        const ids = searchData?.esearchresult?.idlist || [];
-        const total = parseInt(searchData?.esearchresult?.count || '0', 10);
-        if (ids.length === 0) return { total, articles: [] };
-
-        const sumUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&retmode=json&id=${ids.join(',')}`;
-        const sumRes = await fetchWithTimeout(sumUrl, {}, API_TIMEOUT_MS.pubmed);
-        if (!sumRes.ok) return { total, articles: [] };
-        const sumData = await sumRes.json();
-
-        const articles = ids.map((id) => {
-            const rec = sumData?.result?.[id] || {};
-            const authList = Array.isArray(rec.authors) ? rec.authors : [];
-            const firstTwo = authList.slice(0, 2).map((a) => a.name || '').filter(Boolean);
-            const authors = firstTwo.length > 0 ? firstTwo.join(', ') + (authList.length > 2 ? ' et al.' : '') : '';
-            const year = rec.pubdate ? String(rec.pubdate).slice(0, 4) : '';
-            return { pmid: id, title: rec.title || '', authors, journal: rec.source || '', year };
+        const url = `https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(searchTerm)}&format=json&resultType=lite&pageSize=${limit}&sort=relevance`;
+        const res = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.pubmed);
+        if (!res.ok) return { total: 0, articles: [] };
+        const data = await res.json();
+        const total = data?.hitCount || 0;
+        const results = data?.resultList?.result || [];
+        const articles = results.map((r) => {
+            const pmid = r.pmid || r.id || '';
+            const authors = String(r.authorString || '').replace(/\.$/, '');
+            return { pmid, title: r.title || '', authors, journal: r.journalTitle || r.journalAbbreviation || '', year: r.pubYear || '' };
         });
-
         return { total, articles };
     } catch (e) {
         console.warn('PubMed fetch failed', e);
@@ -3407,28 +3397,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 const firstProtein = rawProtein.split(',')[0].trim();
                 const civicProtein = legacy?.variant?.name || (firstProtein.includes(':') ? firstProtein.split(':').slice(1).join(':').trim() : firstProtein);
 
-                // Always-visible links
+                // Always-visible links (use search URLs by default; API callback upgrades to feature/variant URLs when IDs are known)
                 const encodedCivicGene = encodeURIComponent(civicGene || '');
-                const genePageUrl = civicGene ? `https://civicdb.org/genes/${encodedCivicGene}` : '';
+                const encodedCivicProtein = encodeURIComponent(civicProtein || '');
                 const linksDiv = document.createElement('div');
                 linksDiv.style.marginBottom = '0.4rem';
                 let variantLinkEl = null;
+                let geneLinkEl = null;
                 if (civicGene && civicProtein) {
                     variantLinkEl = document.createElement('a');
-                    variantLinkEl.href = `https://civicdb.org/search#geneName=${encodedCivicGene}&variantName=${encodeURIComponent(civicProtein)}`;
+                    variantLinkEl.href = `https://civicdb.org/search?query=${encodedCivicGene}+${encodedCivicProtein}`;
                     variantLinkEl.target = '_blank';
                     variantLinkEl.rel = 'noopener noreferrer';
                     variantLinkEl.textContent = 'View variant on CIViC';
                     linksDiv.appendChild(variantLinkEl);
                 }
-                if (genePageUrl) {
+                if (civicGene) {
                     if (variantLinkEl) linksDiv.appendChild(document.createTextNode(' | '));
-                    const geneEl = document.createElement('a');
-                    geneEl.href = genePageUrl;
-                    geneEl.target = '_blank';
-                    geneEl.rel = 'noopener noreferrer';
-                    geneEl.textContent = 'View gene on CIViC';
-                    linksDiv.appendChild(geneEl);
+                    geneLinkEl = document.createElement('a');
+                    geneLinkEl.href = `https://civicdb.org/search?query=${encodedCivicGene}`;
+                    geneLinkEl.target = '_blank';
+                    geneLinkEl.rel = 'noopener noreferrer';
+                    geneLinkEl.textContent = 'View gene on CIViC';
+                    linksDiv.appendChild(geneLinkEl);
                 }
                 content.appendChild(linksDiv);
 
@@ -3570,7 +3561,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     fetchCivicApiData(civicGene, civicProtein).then((civicApiData) => {
                         civicApiDiv.innerHTML = '';
                         if (!civicApiData) {
-                            civicApiDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">CIViC API unavailable.</div>';
+                            civicApiDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">CIViC API not accessible from browser — use the links above to search CIViC directly.</div>';
                             return;
                         }
                         const { gene: apiGene, matchedVariant, assertions } = civicApiData;
@@ -3579,7 +3570,12 @@ document.addEventListener('DOMContentLoaded', () => {
                             return;
                         }
 
-                        // Update variant link to specific variant page if we matched one
+                        // Upgrade gene link to the specific feature page now that we have the numeric ID
+                        if (apiGene.id && geneLinkEl) {
+                            geneLinkEl.href = `https://civicdb.org/features/${apiGene.id}/summary`;
+                        }
+
+                        // Upgrade variant link to specific variant page if we matched one
                         if (matchedVariant?.id && variantLinkEl) {
                             variantLinkEl.href = `https://civicdb.org/variants/${matchedVariant.id}/summary`;
                             variantLinkEl.textContent = 'View variant on CIViC';
