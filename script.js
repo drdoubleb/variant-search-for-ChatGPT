@@ -34,7 +34,9 @@ const API_TIMEOUT_MS = {
     cosmic: 2500,
     cosmicMeta: 1500,
     tp53: 15000,
-    clinvar: 7000
+    clinvar: 7000,
+    civic: 8000,
+    pubmed: 7000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -648,15 +650,242 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
 
     return ids.map((id) => {
         const rec = sumData?.result?.[id] || {};
+        const varLoc = rec.variation_set?.[0]?.variation_loc?.find?.((l) => String(l.assembly_name || '').toLowerCase().includes('grch37'))
+            || rec.location?.find?.((l) => String(l.assembly || '').toLowerCase().includes('grch37'))
+            || rec.variation_set?.[0]?.variation_loc?.[0]
+            || rec.location?.[0]
+            || null;
+        const varPos = varLoc ? (varLoc.display_start || varLoc.start || varLoc.chr_start || null) : null;
         return {
             id,
             title: rec.title || '',
             germline: rec.germline_classification?.description || '',
             review: rec.germline_classification?.review_status || '',
-            variationId: rec.variation_set?.[0]?.variation_xrefs?.find?.((x) => String(x.db || '').toLowerCase() === 'dbsnp')?.id || rec.variation_set?.[0]?.variation_name || ''
+            variationId: rec.variation_set?.[0]?.variation_xrefs?.find?.((x) => String(x.db || '').toLowerCase() === 'dbsnp')?.id || rec.variation_set?.[0]?.variation_name || '',
+            pos: varPos !== null ? Number(varPos) : null
         };
     });
 }
+// Returns a color hex string for a ClinVar/CIViC pathogenicity classification.
+function getPathogenicityColor(classification) {
+    const c = String(classification || '').toLowerCase();
+    if (c === 'pathogenic') return '#dc2626';
+    if (c.includes('likely pathogenic')) return '#ef4444';
+    if (c === 'benign') return '#16a34a';
+    if (c.includes('likely benign')) return '#22c55e';
+    if (c.includes('pathogenic')) return '#ef4444';
+    if (c.includes('benign')) return '#22c55e';
+    return '#f59e0b';
+}
+
+// Build an SVG lollipop plot for nearby ClinVar variants.
+// variants: [{id, title, germline, pos}], queryPos: integer position
+function buildLollipopPlot(variants, queryPos) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const W = 280, H = 95, ML = 18, MR = 18, AY = 72, PW = W - ML - MR;
+    const RANGE = 10;
+    const posToX = (p) => ML + ((p - queryPos + RANGE) / (2 * RANGE)) * PW;
+
+    // Track column heights to stack overlapping lollipops
+    const buckets = {};
+    const stackHeight = (x) => {
+        const b = Math.round(x / 4) * 4;
+        if (!buckets[b]) buckets[b] = 0;
+        const h = buckets[b];
+        buckets[b] += 13;
+        return h;
+    };
+
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', String(H));
+    svg.style.display = 'block';
+    svg.style.overflow = 'visible';
+
+    // X axis line
+    const axis = document.createElementNS(NS, 'line');
+    axis.setAttribute('x1', String(ML)); axis.setAttribute('y1', String(AY));
+    axis.setAttribute('x2', String(W - MR)); axis.setAttribute('y2', String(AY));
+    axis.setAttribute('stroke', '#cbd5e1'); axis.setAttribute('stroke-width', '1');
+    svg.appendChild(axis);
+
+    // Ticks and labels at -10, -5, 0, +5, +10
+    [-10, -5, 0, 5, 10].forEach((o) => {
+        const x = posToX(queryPos + o);
+        const tick = document.createElementNS(NS, 'line');
+        tick.setAttribute('x1', String(x)); tick.setAttribute('y1', String(AY));
+        tick.setAttribute('x2', String(x)); tick.setAttribute('y2', String(AY + 4));
+        tick.setAttribute('stroke', '#94a3b8'); tick.setAttribute('stroke-width', '1');
+        svg.appendChild(tick);
+        const lbl = document.createElementNS(NS, 'text');
+        lbl.setAttribute('x', String(x)); lbl.setAttribute('y', String(AY + 13));
+        lbl.setAttribute('text-anchor', 'middle'); lbl.setAttribute('font-size', '7');
+        lbl.setAttribute('fill', '#64748b');
+        lbl.textContent = o === 0 ? '0' : (o > 0 ? `+${o}` : String(o));
+        svg.appendChild(lbl);
+    });
+
+    // Query position marker: blue diamond on axis
+    const qx = posToX(queryPos);
+    const dia = document.createElementNS(NS, 'polygon');
+    dia.setAttribute('points', `${qx},${AY - 5} ${qx + 4},${AY} ${qx},${AY + 5} ${qx - 4},${AY}`);
+    dia.setAttribute('fill', '#3b82f6');
+    svg.appendChild(dia);
+
+    // Legend
+    [['#dc2626', 'Pathogenic/LP'], ['#16a34a', 'Benign/LB'], ['#f59e0b', 'VUS/Other']].forEach(([col, lbl], i) => {
+        const lx = 5 + i * 91;
+        const lc = document.createElementNS(NS, 'circle');
+        lc.setAttribute('cx', String(lx)); lc.setAttribute('cy', '7');
+        lc.setAttribute('r', '4'); lc.setAttribute('fill', col);
+        svg.appendChild(lc);
+        const lt = document.createElementNS(NS, 'text');
+        lt.setAttribute('x', String(lx + 7)); lt.setAttribute('y', '11');
+        lt.setAttribute('font-size', '7.5'); lt.setAttribute('fill', '#374151');
+        lt.textContent = lbl;
+        svg.appendChild(lt);
+    });
+
+    // Plot each variant with known position
+    let plotted = 0;
+    variants.forEach((v) => {
+        if (v.pos === null || v.pos === undefined || !Number.isFinite(Number(v.pos))) return;
+        const x = posToX(Number(v.pos));
+        if (x < ML - 8 || x > W - MR + 8) return; // out of range
+        const color = getPathogenicityColor(v.germline);
+        const sh = stackHeight(x);
+        const cy = AY - 16 - sh;
+        const stemY = Math.max(cy + 5, 18);
+
+        const stem = document.createElementNS(NS, 'line');
+        stem.setAttribute('x1', String(x)); stem.setAttribute('y1', String(stemY));
+        stem.setAttribute('x2', String(x)); stem.setAttribute('y2', String(AY));
+        stem.setAttribute('stroke', color); stem.setAttribute('stroke-width', '1.5');
+        stem.setAttribute('opacity', '0.65');
+        svg.appendChild(stem);
+
+        const circ = document.createElementNS(NS, 'circle');
+        circ.setAttribute('cx', String(x)); circ.setAttribute('cy', String(cy));
+        circ.setAttribute('r', '4.5'); circ.setAttribute('fill', color);
+        circ.setAttribute('opacity', '0.88');
+        circ.setAttribute('style', 'cursor:pointer');
+        const tip = document.createElementNS(NS, 'title');
+        tip.textContent = `${v.germline || 'Unknown'} (pos ${v.pos}): ${v.title || v.id}`;
+        circ.appendChild(tip);
+        svg.appendChild(circ);
+        plotted++;
+    });
+
+    // Note for variants without position
+    const noPos = variants.filter((v) => v.pos === null || v.pos === undefined || !Number.isFinite(Number(v.pos)));
+    if (noPos.length > 0) {
+        const note = document.createElementNS(NS, 'text');
+        note.setAttribute('x', String(W - MR)); note.setAttribute('y', String(H - 2));
+        note.setAttribute('text-anchor', 'end'); note.setAttribute('font-size', '6.5');
+        note.setAttribute('fill', '#94a3b8');
+        note.textContent = `${noPos.length} variant${noPos.length > 1 ? 's' : ''} without position not shown`;
+        svg.appendChild(note);
+    }
+
+    return svg;
+}
+
+// Query CivicDB GraphQL API for gene-level data and accepted assertions.
+async function fetchCivicApiData(geneName, proteinChange) {
+    if (!geneName) return null;
+    const safeGene = String(geneName).replace(/[^A-Za-z0-9\-_.]/g, '');
+    if (!safeGene) return null;
+    try {
+        // Step 1: get gene info + variant list
+        const geneQuery = JSON.stringify({
+            query: `{ genes(name: "${safeGene}") { nodes { id name description variants { nodes { id name variantTypes { nodes { name } } } } } } }`
+        });
+        const geneRes = await fetchWithTimeout('https://civicdb.org/api/graphql', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: geneQuery
+        }, API_TIMEOUT_MS.civic);
+        if (!geneRes.ok) return null;
+        const geneData = await geneRes.json();
+        if (geneData?.errors) return null;
+        const gene = geneData?.data?.genes?.nodes?.[0] || null;
+        if (!gene) return { gene: null, matchedVariant: null, assertions: [] };
+
+        // Try to match the specific variant by protein change
+        let matchedVariant = null;
+        if (proteinChange && Array.isArray(gene.variants?.nodes)) {
+            const normProt = String(proteinChange).replace(/^p\./i, '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
+            for (const v of gene.variants.nodes) {
+                const vn = String(v.name || '').toLowerCase().replace(/[^a-z0-9*_]/g, '');
+                if (vn && normProt && (vn === normProt || normProt.includes(vn) || vn.includes(normProt))) {
+                    matchedVariant = v;
+                    break;
+                }
+            }
+        }
+
+        // Step 2: get accepted assertions for this gene
+        let assertions = [];
+        if (gene.id) {
+            try {
+                const assertQuery = JSON.stringify({
+                    query: `{ assertions(geneIds: [${gene.id}], status: ACCEPTED) { nodes { id ampLevel clinicalSignificance significance summary disease { name } therapies { nodes { name } } } } }`
+                });
+                const assertRes = await fetchWithTimeout('https://civicdb.org/api/graphql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: assertQuery
+                }, API_TIMEOUT_MS.civic);
+                if (assertRes.ok) {
+                    const assertData = await assertRes.json();
+                    if (!assertData?.errors) {
+                        assertions = assertData?.data?.assertions?.nodes || [];
+                    }
+                }
+            } catch (_) { /* assertions fetch failed, continue */ }
+        }
+
+        return { gene, matchedVariant, assertions };
+    } catch (e) {
+        console.warn('CivicDB API fetch failed', e);
+        return null;
+    }
+}
+
+// Query PubMed via NCBI E-utilities for articles about a variant.
+async function fetchPubmedArticles(searchTerm, limit = 5) {
+    if (!searchTerm) return { total: 0, articles: [] };
+    try {
+        const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&retmode=json&retmax=${limit}&sort=relevance&term=${encodeURIComponent(searchTerm)}`;
+        const searchRes = await fetchWithTimeout(searchUrl, {}, API_TIMEOUT_MS.pubmed);
+        if (!searchRes.ok) return { total: 0, articles: [] };
+        const searchData = await searchRes.json();
+        const ids = searchData?.esearchresult?.idlist || [];
+        const total = parseInt(searchData?.esearchresult?.count || '0', 10);
+        if (ids.length === 0) return { total, articles: [] };
+
+        const sumUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&retmode=json&id=${ids.join(',')}`;
+        const sumRes = await fetchWithTimeout(sumUrl, {}, API_TIMEOUT_MS.pubmed);
+        if (!sumRes.ok) return { total, articles: [] };
+        const sumData = await sumRes.json();
+
+        const articles = ids.map((id) => {
+            const rec = sumData?.result?.[id] || {};
+            const authList = Array.isArray(rec.authors) ? rec.authors : [];
+            const firstTwo = authList.slice(0, 2).map((a) => a.name || '').filter(Boolean);
+            const authors = firstTwo.length > 0 ? firstTwo.join(', ') + (authList.length > 2 ? ' et al.' : '') : '';
+            const year = rec.pubdate ? String(rec.pubdate).slice(0, 4) : '';
+            return { pmid: id, title: rec.title || '', authors, journal: rec.source || '', year };
+        });
+
+        return { total, articles };
+    } catch (e) {
+        console.warn('PubMed fetch failed', e);
+        return { total: 0, articles: [] };
+    }
+}
+
 async function fetchMyVariant(variant) {
     const encoded = encodeURIComponent(variant);
     const url = `https://myvariant.info/v1/variant/${encoded}`;
@@ -3092,14 +3321,33 @@ document.addEventListener('DOMContentLoaded', () => {
                             const summaryEl = document.createElement('summary');
                             summaryEl.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}`;
                             detailsEl.appendChild(summaryEl);
+
+                            // Lollipop plot
+                            const plotWrap = document.createElement('div');
+                            plotWrap.style.cssText = 'margin:6px 0 4px;';
+                            plotWrap.appendChild(buildLollipopPlot(nearby, posNum));
+                            detailsEl.appendChild(plotWrap);
+
+                            // Condensed variant list (nested details)
+                            const listDet = document.createElement('details');
+                            listDet.style.marginTop = '4px';
+                            const listSum = document.createElement('summary');
+                            listSum.style.cssText = 'font-size:0.82rem;font-weight:normal;';
+                            listSum.textContent = 'Show variant list';
+                            listDet.appendChild(listSum);
                             const ul = document.createElement('ul');
-                            ul.style.marginTop = '0.5rem';
-                            nearby.slice(0, 25).forEach((v) => {
+                            ul.style.cssText = 'margin-top:0.4rem;font-size:0.8rem;padding-left:1.2rem;line-height:1.5;';
+                            nearby.forEach((v) => {
                                 const li = document.createElement('li');
-                                li.textContent = [v.id, v.germline || 'N/A', v.review || 'N/A', v.title || ''].filter(Boolean).join(' | ');
+                                const color = getPathogenicityColor(v.germline);
+                                const sigSpan = `<span style="color:${color};font-weight:600">${v.germline || 'Unknown'}</span>`;
+                                const posInfo = v.pos ? ` · pos ${v.pos}` : '';
+                                const cvLink = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${v.id}</a>`;
+                                li.innerHTML = `${sigSpan}${posInfo} — ${v.title || cvLink}`;
                                 ul.appendChild(li);
                             });
-                            detailsEl.appendChild(ul);
+                            listDet.appendChild(ul);
+                            detailsEl.appendChild(listDet);
                             content.appendChild(detailsEl);
                         }
                     } catch (e) {
@@ -3130,116 +3378,305 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
             }
-            // Card: CIViC
+            // Card: CIViC (always shown)
             {
                 const entries = Array.isArray(annotation.cgi) ? annotation.cgi : (Array.isArray(annotation.civic) ? annotation.civic : []);
                 const legacy = (annotation.civic && typeof annotation.civic === 'object' && !Array.isArray(annotation.civic)) ? annotation.civic : null;
-                if (entries.length > 0 || legacy) {
-                    const card = document.createElement('div');
-                    card.className = 'card';
-                    const title = document.createElement('h3');
-                    title.textContent = 'CIViC';
-                    applyCardTheme(card, 'CIViC');
-                    card.appendChild(title);
-                    const content = document.createElement('div');
-                    content.className = 'card-content';
-                    const addLine = (label, value) => {
-                        if (!value) return;
-                        const div = document.createElement('div');
-                        div.innerHTML = `<strong>${label}:</strong> ${value}`;
-                        content.appendChild(div);
-                    };
+                const hasMyVariantData = entries.length > 0 || legacy;
+
+                const card = document.createElement('div');
+                card.className = 'card';
+                const civicTitle = document.createElement('h3');
+                civicTitle.textContent = 'CIViC';
+                applyCardTheme(card, 'CIViC');
+                card.appendChild(civicTitle);
+                const content = document.createElement('div');
+                content.className = 'card-content';
+
+                const addLine = (label, value) => {
+                    if (value === null || value === undefined || value === '') return;
+                    const div = document.createElement('div');
+                    div.style.marginBottom = '0.2rem';
+                    div.innerHTML = `<strong>${label}:</strong> ${value}`;
+                    content.appendChild(div);
+                };
+
+                // Determine gene name and protein change for links and API call
+                const civicGene = legacy?.gene?.name || (geneNames ? geneNames.split(',')[0].trim() : '');
+                const rawProtein = String(protein || '').replace(/<[^>]+>/g, '');
+                const firstProtein = rawProtein.split(',')[0].trim();
+                const civicProtein = legacy?.variant?.name || (firstProtein.includes(':') ? firstProtein.split(':').slice(1).join(':').trim() : firstProtein);
+
+                // Always-visible links
+                const encodedCivicGene = encodeURIComponent(civicGene || '');
+                const genePageUrl = civicGene ? `https://civicdb.org/genes/${encodedCivicGene}` : '';
+                const linksDiv = document.createElement('div');
+                linksDiv.style.marginBottom = '0.4rem';
+                let variantLinkEl = null;
+                if (civicGene && civicProtein) {
+                    variantLinkEl = document.createElement('a');
+                    variantLinkEl.href = `https://civicdb.org/search#geneName=${encodedCivicGene}&variantName=${encodeURIComponent(civicProtein)}`;
+                    variantLinkEl.target = '_blank';
+                    variantLinkEl.rel = 'noopener noreferrer';
+                    variantLinkEl.textContent = 'View variant on CIViC';
+                    linksDiv.appendChild(variantLinkEl);
+                }
+                if (genePageUrl) {
+                    if (variantLinkEl) linksDiv.appendChild(document.createTextNode(' | '));
+                    const geneEl = document.createElement('a');
+                    geneEl.href = genePageUrl;
+                    geneEl.target = '_blank';
+                    geneEl.rel = 'noopener noreferrer';
+                    geneEl.textContent = 'View gene on CIViC';
+                    linksDiv.appendChild(geneEl);
+                }
+                content.appendChild(linksDiv);
+
+                // Display MyVariant.info CIViC data (clinically prioritised)
+                if (hasMyVariantData) {
                     let evidenceItemsForDetails = [];
                     if (legacy) {
                         const mp = legacy?.molecularProfiles;
-                        const legacyEvidenceItems = Array.isArray(mp)
-                            ? mp.flatMap((profile) => Array.isArray(profile?.evidenceItems) ? profile.evidenceItems : [])
+                        const legacyItems = Array.isArray(mp)
+                            ? mp.flatMap((p) => Array.isArray(p?.evidenceItems) ? p.evidenceItems : [])
                             : (Array.isArray(mp?.evidenceItems) ? mp.evidenceItems : []);
-                        evidenceItemsForDetails = legacyEvidenceItems;
-                        const legacyDiseases = new Set();
-                        const legacyDrugs = new Set();
-                        const legacyEvidenceTypes = new Set();
-                        const legacyEvidenceLevels = new Set();
-                        legacyEvidenceItems.forEach((item) => {
-                            if (item?.disease?.name) legacyDiseases.add(String(item.disease.name));
-                            if (Array.isArray(item?.therapies)) item.therapies.forEach((t) => { if (t?.name) legacyDrugs.add(String(t.name)); });
-                            if (item?.evidenceType) legacyEvidenceTypes.add(String(item.evidenceType));
-                            if (item?.evidenceLevel) legacyEvidenceLevels.add(String(item.evidenceLevel));
+                        evidenceItemsForDetails = legacyItems;
+
+                        const diseases = new Set(), drugs = new Set();
+                        const byType = {};
+                        legacyItems.forEach((item) => {
+                            if (item?.disease?.name) diseases.add(String(item.disease.name));
+                            if (Array.isArray(item?.therapies)) item.therapies.forEach((t) => { if (t?.name) drugs.add(String(t.name)); });
+                            const t = item?.evidenceType || 'OTHER';
+                            byType[t] = (byType[t] || 0) + 1;
                         });
+
                         addLine('Gene', legacy?.gene?.name);
                         addLine('Variant', legacy?.variant?.name || legacy?.name);
-                        addLine('CIViC Variant ID', legacy?.id);
-                        const clinvarIdsDisplay = Array.isArray(legacy?.clinvarIds) ? legacy.clinvarIds.join(', ') : legacy?.clinvarIds;
-                        addLine('ClinVar ID(s)', clinvarIdsDisplay);
-                        addLine('Evidence items', legacyEvidenceItems.length || legacy?.evidence_items?.length);
-                        addLine('Disease(s)', Array.from(legacyDiseases).slice(0, 5).join(', '));
-                        addLine('Drug(s)', Array.from(legacyDrugs).slice(0, 5).join(', '));
-                        addLine('Evidence type(s)', Array.from(legacyEvidenceTypes).join(', '));
-                        addLine('Evidence level(s)', Array.from(legacyEvidenceLevels).join(', '));
+                        if (legacyItems.length > 0) {
+                            const typeSummary = Object.entries(byType).sort(([,a],[,b]) => b - a)
+                                .map(([t, n]) => `${t} (${n})`).join(', ');
+                            addLine('Evidence', `${legacyItems.length} items — ${typeSummary}`);
+                        }
+                        if (diseases.size > 0) addLine('Diseases', Array.from(diseases).slice(0, 4).join(', '));
+                        if (drugs.size > 0) addLine('Therapies', Array.from(drugs).slice(0, 4).join(', '));
+
+                        // Highlight top predictive/prognostic evidence
+                        const topItems = legacyItems
+                            .filter((i) => ['PREDICTIVE', 'PROGNOSTIC', 'DIAGNOSTIC'].includes(String(i?.evidenceType || '').toUpperCase()))
+                            .sort((a, b) => {
+                                const order = { A: 0, B: 1, C: 2, D: 3, E: 4 };
+                                return (order[String(a?.evidenceLevel || '').toUpperCase()] ?? 9) - (order[String(b?.evidenceLevel || '').toUpperCase()] ?? 9);
+                            });
+                        if (topItems.length > 0) {
+                            const ti = topItems[0];
+                            const parts = [
+                                ti?.disease?.name,
+                                Array.isArray(ti?.therapies) ? ti.therapies.map((x) => x.name).join(', ') : null,
+                                ti?.significance ? `Sig: ${ti.significance}` : null,
+                                ti?.evidenceLevel ? `Level ${ti.evidenceLevel}` : null
+                            ].filter(Boolean);
+                            addLine('Top clinical evidence', parts.join(' — '));
+                        }
                     } else {
-                        const diseases = new Set();
-                        const drugs = new Set();
-                        const evidenceTypes = new Set();
-                        const evidenceLevels = new Set();
+                        // Array-format entries (annotation.cgi)
+                        evidenceItemsForDetails = entries;
+                        const diseases = new Set(), drugs = new Set();
+                        const byType = {};
                         entries.forEach((e) => {
                             if (e?.primary_disease) diseases.add(String(e.primary_disease));
                             if (Array.isArray(e?.drugs)) e.drugs.forEach((d) => drugs.add(String(d)));
-                            if (e?.evidence_type) evidenceTypes.add(String(e.evidence_type));
-                            if (e?.evidence_level) evidenceLevels.add(String(e.evidence_level));
+                            const t = e?.evidence_type || 'OTHER';
+                            byType[t] = (byType[t] || 0) + 1;
                         });
-                        evidenceItemsForDetails = entries;
-                        addLine('Evidence items', entries.length);
-                        addLine('Disease(s)', Array.from(diseases).slice(0, 5).join(', '));
-                        addLine('Drug(s)', Array.from(drugs).slice(0, 5).join(', '));
-                        addLine('Evidence type(s)', Array.from(evidenceTypes).join(', '));
-                        addLine('Evidence level(s)', Array.from(evidenceLevels).join(', '));
+                        const typeSummary = Object.entries(byType).sort(([,a],[,b]) => b - a)
+                            .map(([t, n]) => `${t} (${n})`).join(', ');
+                        if (entries.length > 0) addLine('Evidence', `${entries.length} items — ${typeSummary}`);
+                        if (diseases.size > 0) addLine('Diseases', Array.from(diseases).slice(0, 4).join(', '));
+                        if (drugs.size > 0) addLine('Therapies', Array.from(drugs).slice(0, 4).join(', '));
                     }
-                    if (Array.isArray(evidenceItemsForDetails) && evidenceItemsForDetails.length > 0) {
-                        const evDetails = document.createElement('details');
-                        const evSummary = document.createElement('summary');
-                        evSummary.textContent = `Show evidence item details (${evidenceItemsForDetails.length})`;
-                        evDetails.appendChild(evSummary);
-                        const evList = document.createElement('ul');
-                        evList.style.marginTop = '0.5rem';
-                        evList.style.paddingLeft = '1.2rem';
-                        evidenceItemsForDetails.slice(0, 30).forEach((item, idx) => {
-                            const li = document.createElement('li');
-                            const id = item?.id || item?.name || `item-${idx + 1}`;
-                            const type = item?.evidenceType || item?.evidence_type || 'N/A';
-                            const level = item?.evidenceLevel || item?.evidence_level || 'N/A';
-                            const disease = item?.disease?.name || item?.primary_disease || 'N/A';
-                            const significance = item?.significance || 'N/A';
-                            const source = item?.source?.citation || item?.source?.name || '';
-                            li.textContent = [id, type, `L${level}`, disease, significance, source].filter(Boolean).join(' | ');
-                            evList.appendChild(li);
+
+                    // Collapsible evidence table (sorted: high-level predictive first)
+                    if (evidenceItemsForDetails.length > 0) {
+                        const levelOrder = { A: 0, B: 1, C: 2, D: 3, E: 4 };
+                        const typeOrder = { PREDICTIVE: 0, PROGNOSTIC: 1, DIAGNOSTIC: 2, PREDISPOSING: 3 };
+                        const sorted = [...evidenceItemsForDetails].sort((a, b) => {
+                            const ta = String(a?.evidenceType || a?.evidence_type || '').toUpperCase();
+                            const tb = String(b?.evidenceType || b?.evidence_type || '').toUpperCase();
+                            const typeDiff = (typeOrder[ta] ?? 9) - (typeOrder[tb] ?? 9);
+                            if (typeDiff !== 0) return typeDiff;
+                            const la = String(a?.evidenceLevel || a?.evidence_level || '').toUpperCase();
+                            const lb = String(b?.evidenceLevel || b?.evidence_level || '').toUpperCase();
+                            return (levelOrder[la] ?? 9) - (levelOrder[lb] ?? 9);
                         });
-                        evDetails.appendChild(evList);
-                        if (evidenceItemsForDetails.length > 30) {
+
+                        const evDetails = document.createElement('details');
+                        const evSum = document.createElement('summary');
+                        evSum.textContent = `MyVariant evidence details (${evidenceItemsForDetails.length})`;
+                        evDetails.appendChild(evSum);
+                        const evTable = document.createElement('table');
+                        evTable.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.8rem;margin-top:4px;';
+                        const thead = evTable.createTHead();
+                        const hrow = thead.insertRow();
+                        ['Type', 'Lvl', 'Disease', 'Therapies', 'Significance'].forEach((h) => {
+                            const th = document.createElement('th');
+                            th.textContent = h;
+                            th.style.cssText = 'text-align:left;padding:2px 5px;background:#f3f4f6;font-size:0.78rem;';
+                            hrow.appendChild(th);
+                        });
+                        const tbody = evTable.createTBody();
+                        sorted.slice(0, 25).forEach((item) => {
+                            const tr = tbody.insertRow();
+                            const type = item?.evidenceType || item?.evidence_type || 'N/A';
+                            const lvl = item?.evidenceLevel || item?.evidence_level || '';
+                            const disease = item?.disease?.name || item?.primary_disease || 'N/A';
+                            const therapies = Array.isArray(item?.therapies) ? item.therapies.map((t) => t.name).join(', ')
+                                : (Array.isArray(item?.drugs) ? item.drugs.join(', ') : 'N/A');
+                            const sig = item?.significance || item?.clinicalSignificance || 'N/A';
+                            [type, lvl ? `L${lvl}` : 'N/A', disease, therapies, sig].forEach((val) => {
+                                const td = tr.insertCell();
+                                td.textContent = val;
+                                td.style.cssText = 'padding:2px 5px;border-bottom:1px solid #f0f0f0;vertical-align:top;';
+                            });
+                        });
+                        evDetails.appendChild(evTable);
+                        if (evidenceItemsForDetails.length > 25) {
                             const more = document.createElement('div');
-                            more.style.fontSize = '0.82rem';
-                            more.style.color = '#666';
-                            more.textContent = `Showing first 30 of ${evidenceItemsForDetails.length} evidence items.`;
+                            more.style.cssText = 'font-size:0.78rem;color:#666;padding:3px 5px;';
+                            more.textContent = `Showing 25 of ${evidenceItemsForDetails.length} items (sorted by evidence type and level).`;
                             evDetails.appendChild(more);
                         }
                         content.appendChild(evDetails);
                     }
-                    const detailsEl = document.createElement('details');
-                    const summaryEl = document.createElement('summary');
-                    summaryEl.textContent = 'CIViC API opportunities';
-                    detailsEl.appendChild(summaryEl);
-                    const note = document.createElement('div');
-                    note.style.marginTop = '0.4rem';
-                    note.innerHTML = 'Potential additions from CIViC API: assertion/AMP tiering, full evidence statements, source-level provenance (PubMed), and variant-level coordinates. This could improve treatment-level interpretation versus the compact MyVariant CIViC projection.';
-                    detailsEl.appendChild(note);
-                    const civicLink = document.createElement('a');
-                    civicLink.href = 'https://civicdb.org/api';
-                    civicLink.target = '_blank';
-                    civicLink.rel = 'noopener noreferrer';
-                    civicLink.textContent = 'CIViC API docs';
-                    detailsEl.appendChild(civicLink);
-                    content.appendChild(detailsEl);
-                    card.appendChild(content);
-                    cardsContainer.appendChild(card);
+                } else {
+                    const noData = document.createElement('div');
+                    noData.style.cssText = 'color:#6b7280;font-size:0.9rem;margin:0.3rem 0;';
+                    noData.textContent = 'No CIViC data in MyVariant annotation for this variant.';
+                    content.appendChild(noData);
+                }
+
+                // CivicDB API section (async, non-blocking)
+                const civicApiDiv = document.createElement('div');
+                civicApiDiv.style.marginTop = '0.5rem';
+                const civicApiSpinner = document.createElement('div');
+                civicApiSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+                civicApiSpinner.textContent = 'Loading CIViC API data…';
+                civicApiDiv.appendChild(civicApiSpinner);
+                content.appendChild(civicApiDiv);
+                card.appendChild(content);
+                cardsContainer.appendChild(card);
+
+                if (civicGene) {
+                    fetchCivicApiData(civicGene, civicProtein).then((civicApiData) => {
+                        civicApiDiv.innerHTML = '';
+                        if (!civicApiData) {
+                            civicApiDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">CIViC API unavailable.</div>';
+                            return;
+                        }
+                        const { gene: apiGene, matchedVariant, assertions } = civicApiData;
+                        if (!apiGene) {
+                            civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${civicGene}" not found in CIViC.</div>`;
+                            return;
+                        }
+
+                        // Update variant link to specific variant page if we matched one
+                        if (matchedVariant?.id && variantLinkEl) {
+                            variantLinkEl.href = `https://civicdb.org/variants/${matchedVariant.id}/summary`;
+                            variantLinkEl.textContent = 'View variant on CIViC';
+                        }
+
+                        // Show top AMP assertion level prominently
+                        if (assertions && assertions.length > 0) {
+                            const topAssert = assertions[0];
+                            const ampLevel = topAssert.ampLevel || topAssert.significance || '';
+                            if (ampLevel) {
+                                const ampEl = document.createElement('div');
+                                ampEl.style.cssText = 'font-size:0.9rem;font-weight:600;margin-bottom:4px;';
+                                ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${ampLevel}`;
+                                civicApiDiv.appendChild(ampEl);
+                            }
+                        }
+
+                        // Matched variant info + variant types
+                        if (matchedVariant) {
+                            const vTypes = Array.isArray(matchedVariant.variantTypes?.nodes)
+                                ? matchedVariant.variantTypes.nodes.map((vt) => vt.name).filter(Boolean).join(', ')
+                                : '';
+                            const varEl = document.createElement('div');
+                            varEl.style.fontSize = '0.88rem';
+                            varEl.innerHTML = `<strong>CIViC variant:</strong> ${matchedVariant.name}${vTypes ? ` <span style="color:#6b7280">(${vTypes})</span>` : ''} — <a href="https://civicdb.org/variants/${matchedVariant.id}/summary" target="_blank" rel="noopener noreferrer">View ↗</a>`;
+                            civicApiDiv.appendChild(varEl);
+                        }
+
+                        // Gene description (collapsible)
+                        if (apiGene.description) {
+                            const descDet = document.createElement('details');
+                            const descSum = document.createElement('summary');
+                            descSum.style.fontSize = '0.85rem';
+                            descSum.textContent = 'CIViC gene description';
+                            descDet.appendChild(descSum);
+                            const descText = document.createElement('div');
+                            descText.style.cssText = 'font-size:0.82rem;padding:4px 0;line-height:1.45;color:#374151;';
+                            const desc = String(apiGene.description);
+                            descText.textContent = desc.length > 600 ? desc.slice(0, 600) + '…' : desc;
+                            descDet.appendChild(descText);
+                            civicApiDiv.appendChild(descDet);
+                        }
+
+                        // Assertions table (AMP tiering — most clinically important)
+                        if (assertions && assertions.length > 0) {
+                            const assertDet = document.createElement('details');
+                            const assertSum = document.createElement('summary');
+                            assertSum.style.fontSize = '0.85rem';
+                            assertSum.textContent = `CIViC assertions — AMP/ACMG (${assertions.length})`;
+                            assertDet.appendChild(assertSum);
+                            const aTable = document.createElement('table');
+                            aTable.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.79rem;margin-top:4px;';
+                            const aThead = aTable.createTHead();
+                            const aHrow = aThead.insertRow();
+                            ['AMP Level', 'Significance', 'Disease', 'Therapies'].forEach((h) => {
+                                const th = document.createElement('th');
+                                th.textContent = h;
+                                th.style.cssText = 'text-align:left;padding:2px 5px;background:#f3f4f6;font-size:0.77rem;';
+                                aHrow.appendChild(th);
+                            });
+                            const aTbody = aTable.createTBody();
+                            assertions.slice(0, 8).forEach((a) => {
+                                const tr = aTbody.insertRow();
+                                const amp = a.ampLevel || 'N/A';
+                                const sig = a.clinicalSignificance || a.significance || 'N/A';
+                                const disease = a.disease?.name || 'N/A';
+                                const therapies = Array.isArray(a.therapies?.nodes)
+                                    ? a.therapies.nodes.map((t) => t.name).join(', ')
+                                    : (Array.isArray(a.therapies) ? a.therapies.join(', ') : 'N/A');
+                                [amp, sig, disease, therapies].forEach((val) => {
+                                    const td = tr.insertCell();
+                                    td.textContent = val;
+                                    td.style.cssText = 'padding:2px 5px;border-bottom:1px solid #f0f0f0;vertical-align:top;';
+                                });
+                            });
+                            assertDet.appendChild(aTable);
+                            civicApiDiv.appendChild(assertDet);
+                        } else {
+                            const noAssert = document.createElement('div');
+                            noAssert.style.cssText = 'font-size:0.82rem;color:#6b7280;margin-top:2px;';
+                            noAssert.textContent = 'No accepted CIViC assertions for this gene.';
+                            civicApiDiv.appendChild(noAssert);
+                        }
+
+                        // Show total variant count for gene
+                        const variantCount = Array.isArray(apiGene.variants?.nodes) ? apiGene.variants.nodes.length : 0;
+                        if (variantCount > 0) {
+                            const vcEl = document.createElement('div');
+                            vcEl.style.cssText = 'font-size:0.8rem;color:#6b7280;margin-top:3px;';
+                            vcEl.textContent = `${variantCount} variant${variantCount !== 1 ? 's' : ''} catalogued in CIViC for ${apiGene.name}.`;
+                            civicApiDiv.appendChild(vcEl);
+                        }
+                    }).catch(() => {
+                        civicApiDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">CIViC API unavailable.</div>';
+                    });
+                } else {
+                    civicApiDiv.innerHTML = '';
                 }
             }
             // Card: gnomAD
@@ -4104,6 +4541,93 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 spliceCard.appendChild(spliceContent);
                 cardsContainer.appendChild(spliceCard);
+
+                // Card: PubMed
+                {
+                    const PUBMED_LIMIT = 5;
+                    const pmCard = document.createElement('div');
+                    pmCard.className = 'card';
+                    const pmTitle = document.createElement('h3');
+                    pmTitle.textContent = 'PubMed';
+                    applyCardTheme(pmCard, 'PubMed');
+                    pmCard.appendChild(pmTitle);
+                    const pmContent = document.createElement('div');
+                    pmContent.className = 'card-content';
+
+                    const pmSearchTerm = [firstGene, searchVariantTerm].filter(Boolean).join(' ');
+                    const pmQueryUrl = pmSearchTerm
+                        ? `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(pmSearchTerm)}&sort=relevance`
+                        : 'https://pubmed.ncbi.nlm.nih.gov/';
+
+                    const pmLinkEl = document.createElement('a');
+                    pmLinkEl.href = pmQueryUrl;
+                    pmLinkEl.target = '_blank';
+                    pmLinkEl.rel = 'noopener noreferrer';
+                    pmLinkEl.textContent = 'Search PubMed ↗';
+                    pmContent.appendChild(pmLinkEl);
+
+                    if (pmSearchTerm) {
+                        const pmQueryLabel = document.createElement('div');
+                        pmQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+                        pmQueryLabel.textContent = `Query: "${pmSearchTerm}"`;
+                        pmContent.appendChild(pmQueryLabel);
+                    }
+
+                    const pmResultsDiv = document.createElement('div');
+                    if (pmSearchTerm) {
+                        const pmSpinner = document.createElement('div');
+                        pmSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+                        pmSpinner.textContent = 'Loading PubMed results…';
+                        pmResultsDiv.appendChild(pmSpinner);
+                    }
+                    pmContent.appendChild(pmResultsDiv);
+                    pmCard.appendChild(pmContent);
+                    cardsContainer.appendChild(pmCard);
+
+                    if (pmSearchTerm) {
+                        fetchPubmedArticles(pmSearchTerm, PUBMED_LIMIT).then(({ total, articles }) => {
+                            pmResultsDiv.innerHTML = '';
+                            if (total === 0 || articles.length === 0) {
+                                pmResultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No PubMed results found.</div>';
+                                return;
+                            }
+                            const countEl = document.createElement('div');
+                            countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
+                            countEl.textContent = total > PUBMED_LIMIT
+                                ? `Showing ${articles.length} of ${total.toLocaleString()} results (most relevant)`
+                                : `${articles.length} result${articles.length !== 1 ? 's' : ''}`;
+                            pmResultsDiv.appendChild(countEl);
+                            articles.forEach((art) => {
+                                const artEl = document.createElement('div');
+                                artEl.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;font-size:0.82rem;';
+                                const titleLink = document.createElement('a');
+                                titleLink.href = `https://pubmed.ncbi.nlm.nih.gov/${art.pmid}/`;
+                                titleLink.target = '_blank';
+                                titleLink.rel = 'noopener noreferrer';
+                                titleLink.style.fontWeight = '600';
+                                titleLink.textContent = art.title;
+                                artEl.appendChild(titleLink);
+                                const meta = document.createElement('div');
+                                meta.style.cssText = 'color:#6b7280;margin-top:2px;';
+                                const parts = [art.authors, art.journal, art.year].filter(Boolean);
+                                meta.textContent = parts.join(' · ') + (art.pmid ? ` · PMID ${art.pmid}` : '');
+                                artEl.appendChild(meta);
+                                pmResultsDiv.appendChild(artEl);
+                            });
+                            if (total > PUBMED_LIMIT) {
+                                const seeAll = document.createElement('a');
+                                seeAll.href = pmQueryUrl;
+                                seeAll.target = '_blank';
+                                seeAll.rel = 'noopener noreferrer';
+                                seeAll.style.fontSize = '0.82rem';
+                                seeAll.textContent = `See all ${total.toLocaleString()} results on PubMed ↗`;
+                                pmResultsDiv.appendChild(seeAll);
+                            }
+                        }).catch(() => {
+                            pmResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">PubMed unavailable.</div>';
+                        });
+                    }
+                }
             }
             // Show cards and hide legacy tables for a cleaner view
             cardsContainer.classList.remove('hidden');

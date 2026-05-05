@@ -346,6 +346,22 @@ footer a:hover {
     border-bottom-color: #67e8f9;
 }
 
+.card[data-card="civic"] {
+    border-color: #a5b4fc;
+}
+.card[data-card="civic"] h3 {
+    background-color: #e0e7ff;
+    border-bottom-color: #a5b4fc;
+}
+
+.card[data-card="pubmed"] {
+    border-color: #86efac;
+}
+.card[data-card="pubmed"] h3 {
+    background-color: #dcfce7;
+    border-bottom-color: #86efac;
+}
+
 @media (max-width: 980px) {
     .cards-container {
         grid-template-columns: repeat(2, minmax(0, 1fr));
