@@ -691,17 +691,30 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
         };
     });
 }
-function isSynonymousClinvarVariant(variant) {
-    const text = [
+function getClinvarVariantText(variant) {
+    return [
         variant?.title,
         variant?.molecularConsequence,
         variant?.variationName
-    ].filter(Boolean).join(' ').toLowerCase();
+    ].filter(Boolean).join(' ');
+}
+
+function isSynonymousClinvarVariant(variant) {
+    const text = getClinvarVariantText(variant).toLowerCase();
     return /\bsynonymous\b/.test(text) || /\bp\.\s*\(?=\)?/.test(text) || /\bp\.\s*[a-z]{1,3}\d+=/i.test(text);
+}
+
+function isTruncatingClinvarVariant(variant) {
+    const text = getClinvarVariantText(variant).toLowerCase();
+    return /\b(?:nonsense|frameshift|frame[- ]shift|stop[- ]gained|stop gained|stop_gained|protein truncating|truncating)\b/.test(text)
+        || /\bp\.\s*\(?[a-z]{1,3}\d+(?:ter|\*|x)\)?/i.test(text)
+        || /\bp\.\s*\(?[a-z]{1,3}\d+[a-z]{1,3}fs/i.test(text)
+        || /\b(?:fs|ter|\*)\d*\b/i.test(text);
 }
 
 // Returns a color hex string for a ClinVar/CIViC pathogenicity classification.
 function getPathogenicityColor(classification, variant = null) {
+    if (variant && isTruncatingClinvarVariant(variant)) return '#111827';
     if (variant && isSynonymousClinvarVariant(variant)) return '#9ca3af';
     const c = String(classification || '').toLowerCase();
     if (c === 'pathogenic') return '#dc2626';
@@ -769,8 +782,8 @@ function buildLollipopPlot(variants, queryPos) {
     svg.appendChild(dia);
 
     // Legend
-    [['#dc2626', 'Pathogenic/LP'], ['#16a34a', 'Benign/LB'], ['#f59e0b', 'VUS/Other'], ['#9ca3af', 'Synonymous']].forEach(([col, lbl], i) => {
-        const lx = 5 + i * 68;
+    [['#111827', 'Truncating'], ['#dc2626', 'Pathogenic/LP'], ['#16a34a', 'Benign/LB'], ['#f59e0b', 'VUS/Other'], ['#9ca3af', 'Synonymous']].forEach(([col, lbl], i) => {
+        const lx = 5 + i * 54;
         const lc = document.createElementNS(NS, 'circle');
         lc.setAttribute('cx', String(lx)); lc.setAttribute('cy', '7');
         lc.setAttribute('r', '4'); lc.setAttribute('fill', col);
@@ -806,7 +819,8 @@ function buildLollipopPlot(variants, queryPos) {
         circ.setAttribute('opacity', '0.88');
         circ.setAttribute('style', 'cursor:pointer');
         const tip = document.createElementNS(NS, 'title');
-        tip.textContent = `${isSynonymousClinvarVariant(v) ? 'Synonymous; ' : ''}${v.germline || 'Unknown'} (pos ${v.pos}): ${v.title || v.id}`;
+        const consequenceLabel = isTruncatingClinvarVariant(v) ? 'Truncating; ' : (isSynonymousClinvarVariant(v) ? 'Synonymous; ' : '');
+        tip.textContent = `${consequenceLabel}${v.germline || 'Unknown'} (pos ${v.pos}): ${v.title || v.id}`;
         circ.appendChild(tip);
         svg.appendChild(circ);
         plotted++;
@@ -3295,18 +3309,18 @@ document.addEventListener('DOMContentLoaded', () => {
                     try {
                         const nearby = await fetchClinvarRegionVariants(chr, posNum, 10);
                         if (nearby.length > 0) {
-                            const detailsEl = document.createElement('details');
-                            const summaryEl = document.createElement('summary');
-                            summaryEl.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}`;
-                            detailsEl.appendChild(summaryEl);
+                            const nearbyTitle = document.createElement('div');
+                            nearbyTitle.style.cssText = 'font-size:0.86rem;font-weight:600;margin-top:0.5rem;';
+                            nearbyTitle.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}`;
+                            content.appendChild(nearbyTitle);
 
-                            // Lollipop plot
+                            // Always show the lollipop plot; keep only the full variant list collapsed.
                             const plotWrap = document.createElement('div');
                             plotWrap.style.cssText = 'margin:6px 0 4px;';
                             plotWrap.appendChild(buildLollipopPlot(nearby, posNum));
-                            detailsEl.appendChild(plotWrap);
+                            content.appendChild(plotWrap);
 
-                            // Condensed variant list (nested details)
+                            // Condensed variant list (collapsed by default)
                             const listDet = document.createElement('details');
                             listDet.style.marginTop = '4px';
                             const listSum = document.createElement('summary');
@@ -3325,8 +3339,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ul.appendChild(li);
                             });
                             listDet.appendChild(ul);
-                            detailsEl.appendChild(listDet);
-                            content.appendChild(detailsEl);
+                            content.appendChild(listDet);
                         }
                     } catch (e) {
                         console.warn('ClinVar regional query failed', e);
