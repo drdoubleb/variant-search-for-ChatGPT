@@ -16,6 +16,29 @@ const accessionToChr = (accession) => {
     return null;
 };
 
+
+const DEFAULT_BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
+
+function trimTrailingSlash(value) {
+    return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function getBackendApiBaseUrl() {
+    return trimTrailingSlash(window.BACKEND_API_BASE_URL || DEFAULT_BACKEND_API_BASE_URL);
+}
+
+function getConfiguredApiEndpoint(globalName, apiPath) {
+    const configured = String(window[globalName] || '').trim();
+    if (configured) return configured;
+    const base = getBackendApiBaseUrl();
+    return base ? `${base}${apiPath}` : apiPath;
+}
+
+function appendQueryParams(endpoint, params) {
+    const separator = endpoint.includes('?') ? '&' : '?';
+    return `${endpoint}${separator}${params}`;
+}
+
 // When the user provides a gene symbol in a five‑token genomic variant input
 // (e.g. "7 140453122 BRAF TCCATCGAGATTTCA TCT"), we temporarily store that
 // gene here during normalisation so that it can be used later when
@@ -265,7 +288,7 @@ function isTp53Gene(geneNames) {
 }
 
 async function fetchTp53MutationDatabase(payload) {
-    const endpoint = String(window.TP53_API_ENDPOINT || '').trim();
+    const endpoint = getConfiguredApiEndpoint('TP53_API_ENDPOINT', '/api/tp53');
     if (!endpoint) return null;
     const response = await fetchWithTimeout(endpoint, {
         method: 'POST',
@@ -662,12 +685,37 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
             germline: rec.germline_classification?.description || '',
             review: rec.germline_classification?.review_status || '',
             variationId: rec.variation_set?.[0]?.variation_xrefs?.find?.((x) => String(x.db || '').toLowerCase() === 'dbsnp')?.id || rec.variation_set?.[0]?.variation_name || '',
+            variationName: rec.variation_set?.[0]?.variation_name || '',
+            molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
             pos: varPos !== null ? Number(varPos) : null
         };
     });
 }
+function getClinvarVariantText(variant) {
+    return [
+        variant?.title,
+        variant?.molecularConsequence,
+        variant?.variationName
+    ].filter(Boolean).join(' ');
+}
+
+function isSynonymousClinvarVariant(variant) {
+    const text = getClinvarVariantText(variant).toLowerCase();
+    return /\bsynonymous\b/.test(text) || /\bp\.\s*\(?=\)?/.test(text) || /\bp\.\s*[a-z]{1,3}\d+=/i.test(text);
+}
+
+function isTruncatingClinvarVariant(variant) {
+    const text = getClinvarVariantText(variant).toLowerCase();
+    return /\b(?:nonsense|frameshift|frame[- ]shift|stop[- ]gained|stop gained|stop_gained|protein truncating|truncating)\b/.test(text)
+        || /\bp\.\s*\(?[a-z]{1,3}\d+(?:ter|\*|x)\)?/i.test(text)
+        || /\bp\.\s*\(?[a-z]{1,3}\d+[a-z]{1,3}fs/i.test(text)
+        || /\b(?:fs|ter|\*)\d*\b/i.test(text);
+}
+
 // Returns a color hex string for a ClinVar/CIViC pathogenicity classification.
-function getPathogenicityColor(classification) {
+function getPathogenicityColor(classification, variant = null) {
+    if (variant && isTruncatingClinvarVariant(variant)) return '#111827';
+    if (variant && isSynonymousClinvarVariant(variant)) return '#9ca3af';
     const c = String(classification || '').toLowerCase();
     if (c === 'pathogenic') return '#dc2626';
     if (c.includes('likely pathogenic')) return '#ef4444';
@@ -734,8 +782,8 @@ function buildLollipopPlot(variants, queryPos) {
     svg.appendChild(dia);
 
     // Legend
-    [['#dc2626', 'Pathogenic/LP'], ['#16a34a', 'Benign/LB'], ['#f59e0b', 'VUS/Other']].forEach(([col, lbl], i) => {
-        const lx = 5 + i * 91;
+    [['#111827', 'Truncating'], ['#dc2626', 'Pathogenic/LP'], ['#16a34a', 'Benign/LB'], ['#f59e0b', 'VUS/Other'], ['#9ca3af', 'Synonymous']].forEach(([col, lbl], i) => {
+        const lx = 5 + i * 54;
         const lc = document.createElementNS(NS, 'circle');
         lc.setAttribute('cx', String(lx)); lc.setAttribute('cy', '7');
         lc.setAttribute('r', '4'); lc.setAttribute('fill', col);
@@ -753,7 +801,7 @@ function buildLollipopPlot(variants, queryPos) {
         if (v.pos === null || v.pos === undefined || !Number.isFinite(Number(v.pos))) return;
         const x = posToX(Number(v.pos));
         if (x < ML - 8 || x > W - MR + 8) return; // out of range
-        const color = getPathogenicityColor(v.germline);
+        const color = getPathogenicityColor(v.germline, v);
         const sh = stackHeight(x);
         const cy = AY - 16 - sh;
         const stemY = Math.max(cy + 5, 18);
@@ -771,7 +819,8 @@ function buildLollipopPlot(variants, queryPos) {
         circ.setAttribute('opacity', '0.88');
         circ.setAttribute('style', 'cursor:pointer');
         const tip = document.createElementNS(NS, 'title');
-        tip.textContent = `${v.germline || 'Unknown'} (pos ${v.pos}): ${v.title || v.id}`;
+        const consequenceLabel = isTruncatingClinvarVariant(v) ? 'Truncating; ' : (isSynonymousClinvarVariant(v) ? 'Synonymous; ' : '');
+        tip.textContent = `${consequenceLabel}${v.germline || 'Unknown'} (pos ${v.pos}): ${v.title || v.id}`;
         circ.appendChild(tip);
         svg.appendChild(circ);
         plotted++;
@@ -799,7 +848,8 @@ async function fetchCivicApiData(geneName, proteinChange) {
     try {
         const params = new URLSearchParams({ gene: safeGene });
         if (proteinChange) params.set('protein', String(proteinChange).replace(/^p\./i, ''));
-        const res = await fetchWithTimeout(`/api/civic?${params}`, {}, API_TIMEOUT_MS.civic);
+        const endpoint = getConfiguredApiEndpoint('CIVIC_API_ENDPOINT', '/api/civic');
+        const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.civic);
         if (!res.ok) return null;
         const data = await res.json();
         if (data?.error) return null;
@@ -816,7 +866,8 @@ async function fetchPubmedArticles(searchTerm, limit = 5) {
     if (!searchTerm) return { total: 0, articles: [] };
     try {
         const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
-        const res = await fetchWithTimeout(`/api/pubmed?${params}`, {}, API_TIMEOUT_MS.pubmed);
+        const endpoint = getConfiguredApiEndpoint('PUBMED_API_ENDPOINT', '/api/pubmed');
+        const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.pubmed);
         if (!res.ok) return { total: 0, articles: [] };
         const data = await res.json();
         if (data?.error) return { total: 0, articles: [] };
@@ -3258,18 +3309,18 @@ document.addEventListener('DOMContentLoaded', () => {
                     try {
                         const nearby = await fetchClinvarRegionVariants(chr, posNum, 10);
                         if (nearby.length > 0) {
-                            const detailsEl = document.createElement('details');
-                            const summaryEl = document.createElement('summary');
-                            summaryEl.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}`;
-                            detailsEl.appendChild(summaryEl);
+                            const nearbyTitle = document.createElement('div');
+                            nearbyTitle.style.cssText = 'font-size:0.86rem;font-weight:600;margin-top:0.5rem;';
+                            nearbyTitle.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}`;
+                            content.appendChild(nearbyTitle);
 
-                            // Lollipop plot
+                            // Always show the lollipop plot; keep only the full variant list collapsed.
                             const plotWrap = document.createElement('div');
                             plotWrap.style.cssText = 'margin:6px 0 4px;';
                             plotWrap.appendChild(buildLollipopPlot(nearby, posNum));
-                            detailsEl.appendChild(plotWrap);
+                            content.appendChild(plotWrap);
 
-                            // Condensed variant list (nested details)
+                            // Condensed variant list (collapsed by default)
                             const listDet = document.createElement('details');
                             listDet.style.marginTop = '4px';
                             const listSum = document.createElement('summary');
@@ -3280,7 +3331,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             ul.style.cssText = 'margin-top:0.4rem;font-size:0.8rem;padding-left:1.2rem;line-height:1.5;';
                             nearby.forEach((v) => {
                                 const li = document.createElement('li');
-                                const color = getPathogenicityColor(v.germline);
+                                const color = getPathogenicityColor(v.germline, v);
                                 const sigSpan = `<span style="color:${color};font-weight:600">${v.germline || 'Unknown'}</span>`;
                                 const posInfo = v.pos ? ` · pos ${v.pos}` : '';
                                 const cvLink = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${v.id}</a>`;
@@ -3288,8 +3339,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ul.appendChild(li);
                             });
                             listDet.appendChild(ul);
-                            detailsEl.appendChild(listDet);
-                            content.appendChild(detailsEl);
+                            content.appendChild(listDet);
                         }
                     } catch (e) {
                         console.warn('ClinVar regional query failed', e);
