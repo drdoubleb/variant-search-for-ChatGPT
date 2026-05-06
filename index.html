@@ -86,15 +86,23 @@
         if (typeof window.COSMIC_META_URL === 'undefined' || window.COSMIC_META_URL === null) {
             window.COSMIC_META_URL = 'https://molecular3.onrender.com/cosmic_meta.json';
         }
-        // TP53 mutation database endpoint.
-        // Defaults to the absolute Vercel deployment URL so the API works from
+        // Backend API endpoints.
+        // Defaults to the absolute Vercel deployment URL so API calls work from
         // any hosting environment (Hostinger, GitHub Pages, etc.) without
-        // needing to deploy the /api/tp53 serverless function locally.
-        // CORS is open (*) on the Vercel function so cross-origin calls succeed.
-        // Override this if you deploy your own instance of the backend:
-        // window.TP53_API_ENDPOINT = "https://your-domain.example/api/tp53";
+        // needing to deploy the /api serverless functions locally.
+        // Override these if you deploy your own backend instance:
+        // window.BACKEND_API_BASE_URL = "https://your-domain.example";
+        if (typeof window.BACKEND_API_BASE_URL === 'undefined') {
+            window.BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
+        }
         if (typeof window.TP53_API_ENDPOINT === 'undefined') {
-            window.TP53_API_ENDPOINT = 'https://variant-search-for-chat-gpt.vercel.app/api/tp53';
+            window.TP53_API_ENDPOINT = `${window.BACKEND_API_BASE_URL}/api/tp53`;
+        }
+        if (typeof window.CIVIC_API_ENDPOINT === 'undefined') {
+            window.CIVIC_API_ENDPOINT = `${window.BACKEND_API_BASE_URL}/api/civic`;
+        }
+        if (typeof window.PUBMED_API_ENDPOINT === 'undefined') {
+            window.PUBMED_API_ENDPOINT = `${window.BACKEND_API_BASE_URL}/api/pubmed`;
         }
     </script>
     <!-- Cache-busting query parameter to ensure browsers fetch the latest script.
@@ -111,6 +119,6 @@
     <!-- Bump version to bust cache after fixing gene extraction and g.-variant selection for intronic variants -->
     <!-- Bump version to bust cache after adding Ensembl output and improved cDNA candidate matching -->
     <!-- Bump version to ensure browsers load the latest script when delins handling is updated -->
-    <script src="script.js?v=20260505"></script>
+    <script src="script.js?v=20260506-2"></script>
 </body>
 </html>
