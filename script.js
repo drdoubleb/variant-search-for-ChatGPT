@@ -730,17 +730,37 @@ function getPathogenicityColor(classification, variant = null) {
 // variants: [{id, title, germline, pos}], queryPos: integer position
 function buildLollipopPlot(variants, queryPos) {
     const NS = 'http://www.w3.org/2000/svg';
-    const W = 280, H = 95, ML = 18, MR = 18, AY = 72, PW = W - ML - MR;
+    const W = 280, ML = 18, MR = 18, PW = W - ML - MR;
     const RANGE = 10;
+    const STACK_SPACING = 13;
+    const LOLLIPOP_OFFSET = 16;
+    const MIN_AXIS_Y = 72;
+    const TOP_PADDING = 20;
+    const BOTTOM_PADDING = 23;
     const posToX = (p) => ML + ((p - queryPos + RANGE) / (2 * RANGE)) * PW;
+    const bucketForX = (x) => Math.round(x / 4) * 4;
 
-    // Track column heights to stack overlapping lollipops
+    const plottableVariants = variants
+        .map((v) => ({ ...v, x: Number.isFinite(Number(v.pos)) ? posToX(Number(v.pos)) : null }))
+        .filter((v) => v.x !== null && v.x >= ML - 8 && v.x <= W - MR + 8);
+    const bucketCounts = plottableVariants.reduce((counts, v) => {
+        const bucket = bucketForX(v.x);
+        counts[bucket] = (counts[bucket] || 0) + 1;
+        return counts;
+    }, {});
+    const maxStack = Math.max(1, ...Object.values(bucketCounts));
+    const AY = Math.max(MIN_AXIS_Y, TOP_PADDING + LOLLIPOP_OFFSET + ((maxStack - 1) * STACK_SPACING));
+    const H = AY + BOTTOM_PADDING;
+
+    // Track column heights to stack overlapping lollipops. The SVG height is
+    // computed from maxStack above so every alteration at a position remains
+    // visible rather than being clipped after a few overlapping variants.
     const buckets = {};
     const stackHeight = (x) => {
-        const b = Math.round(x / 4) * 4;
+        const b = bucketForX(x);
         if (!buckets[b]) buckets[b] = 0;
         const h = buckets[b];
-        buckets[b] += 13;
+        buckets[b] += STACK_SPACING;
         return h;
     };
 
@@ -797,13 +817,11 @@ function buildLollipopPlot(variants, queryPos) {
 
     // Plot each variant with known position
     let plotted = 0;
-    variants.forEach((v) => {
-        if (v.pos === null || v.pos === undefined || !Number.isFinite(Number(v.pos))) return;
-        const x = posToX(Number(v.pos));
-        if (x < ML - 8 || x > W - MR + 8) return; // out of range
+    plottableVariants.forEach((v) => {
+        const x = v.x;
         const color = getPathogenicityColor(v.germline, v);
         const sh = stackHeight(x);
-        const cy = AY - 16 - sh;
+        const cy = AY - LOLLIPOP_OFFSET - sh;
         const stemY = Math.max(cy + 5, 18);
 
         const stem = document.createElementNS(NS, 'line');
