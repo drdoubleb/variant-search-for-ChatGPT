@@ -728,7 +728,8 @@ function getPathogenicityColor(classification, variant = null) {
 
 // Build an SVG lollipop plot for nearby ClinVar variants.
 // variants: [{id, title, germline, pos}], queryPos: integer position
-function buildLollipopPlot(variants, queryPos) {
+// minusStrand: if true, x-axis is oriented 3'→5' genomically (i.e. c./p. increases left-to-right)
+function buildLollipopPlot(variants, queryPos, minusStrand = false) {
     const NS = 'http://www.w3.org/2000/svg';
     const W = 280, ML = 18, MR = 18, PW = W - ML - MR;
     const RANGE = 10;
@@ -737,7 +738,9 @@ function buildLollipopPlot(variants, queryPos) {
     const MIN_AXIS_Y = 72;
     const TOP_PADDING = 20;
     const BOTTOM_PADDING = 23;
-    const posToX = (p) => ML + ((p - queryPos + RANGE) / (2 * RANGE)) * PW;
+    const posToX = minusStrand
+        ? (p) => ML + ((queryPos + RANGE - p) / (2 * RANGE)) * PW
+        : (p) => ML + ((p - queryPos + RANGE) / (2 * RANGE)) * PW;
     const bucketForX = (x) => Math.round(x / 4) * 4;
 
     const plottableVariants = variants
@@ -778,9 +781,9 @@ function buildLollipopPlot(variants, queryPos) {
     axis.setAttribute('stroke', '#cbd5e1'); axis.setAttribute('stroke-width', '1');
     svg.appendChild(axis);
 
-    // Ticks and labels at -10, -5, 0, +5, +10
+    // Ticks and labels at -10, -5, 0, +5, +10 in c. direction
     [-10, -5, 0, 5, 10].forEach((o) => {
-        const x = posToX(queryPos + o);
+        const x = posToX(queryPos + (minusStrand ? -o : o));
         const tick = document.createElementNS(NS, 'line');
         tick.setAttribute('x1', String(x)); tick.setAttribute('y1', String(AY));
         tick.setAttribute('x2', String(x)); tick.setAttribute('y2', String(AY + 4));
@@ -3332,10 +3335,16 @@ document.addEventListener('DOMContentLoaded', () => {
                             nearbyTitle.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}`;
                             content.appendChild(nearbyTitle);
 
+                            // Detect gene strand from snpEff annotation to orient plot 5'→3'.
+                            const snpEffAnns = annotation?.snpeff?.ann
+                                ? (Array.isArray(annotation.snpeff.ann) ? annotation.snpeff.ann : [annotation.snpeff.ann])
+                                : [];
+                            const plotMinusStrand = snpEffAnns.some(a => a.strand === '-' || a.strand === -1);
+
                             // Always show the lollipop plot; keep only the full variant list collapsed.
                             const plotWrap = document.createElement('div');
                             plotWrap.style.cssText = 'margin:6px 0 4px;';
-                            plotWrap.appendChild(buildLollipopPlot(nearby, posNum));
+                            plotWrap.appendChild(buildLollipopPlot(nearby, posNum, plotMinusStrand));
                             content.appendChild(plotWrap);
 
                             // Condensed variant list (collapsed by default)
