@@ -134,18 +134,22 @@ function buildSpliceAiLookupTuple(rawInput, gVariant) {
 
 // Build a gnomAD variant-browser URL from either raw token input (preferred) or
 // a simple genomic substitution HGVS string.
-function buildGnomadVariantUrl(rawInput, gVariant, annotationId) {
+// vcfData: optional annotation.vcf object {ref, alt, position} from myvariant.info —
+// used to recover REF for MNVs where the delins gVariant notation drops the reference.
+function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData) {
     // Raw token input (e.g. "10 89692913 PTEN G GG") is preferred because it
     // preserves REF/ALT for indels even when gVariant is normalised to ins/delins.
     const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
     if (tuple) {
         const chrom = tuple.chrom.replace(/^chr/i, '');
-        if (tuple.ref) {
-            return `https://gnomad.broadinstitute.org/variant/${chrom}-${tuple.pos}-${tuple.ref}-${tuple.alt}?dataset=gnomad_r2_1`;
+        const ref = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
+        const alt = tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
+        if (ref && alt) {
+            return `https://gnomad.broadinstitute.org/variant/${chrom}-${tuple.pos}-${ref}-${alt}?dataset=gnomad_r2_1`;
         }
-        // MNV/delins: ref unknown, open a region view centred on the variant position.
+        // No REF available even from vcfData — fall back to a region view so the button still appears.
         const posNum = Number(tuple.pos);
-        const altLen = tuple.alt ? tuple.alt.length : 1;
+        const altLen = (alt || '').length || 1;
         return `https://gnomad.broadinstitute.org/region/${chrom}-${posNum}-${posNum + altLen - 1}?dataset=gnomad_r2_1`;
     }
     // Fallback: use annotation/gVariant only for simple substitutions.
@@ -1520,7 +1524,7 @@ function buildDetailsData(annotation, rawInput, gVariant) {
         addGnomadFields(annotation.gnomad, 'gnomAD');
         // Build link to gnomAD browser. Prefer raw token input so indels
         // still link to a useful region/variant view even without MyVariant hits.
-        const url = buildGnomadVariantUrl(rawInput, gVariant, annotation._id);
+        const url = buildGnomadVariantUrl(rawInput, gVariant, annotation._id, annotation.vcf);
         if (url) {
             gnomad['gnomAD Link'] = { html: `<a href="${url}" target="_blank" rel="noopener noreferrer">View on gnomAD</a>` };
         }
@@ -3818,7 +3822,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const genomeStats = getGnomadStats(gnomadGenome);
                 // Build gnomAD link. Prefer raw token input so indels can
                 // still open a meaningful gnomAD variant/region page.
-                const gnomadLink = buildGnomadVariantUrl(rawInput, gVariant, annotation && annotation._id);
+                const gnomadLink = buildGnomadVariantUrl(rawInput, gVariant, annotation && annotation._id, annotation && annotation.vcf);
                 const card = document.createElement('div');
                 card.className = 'card';
                 const title = document.createElement('h3');
