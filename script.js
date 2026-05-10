@@ -678,6 +678,17 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
     if (data?.error) throw new Error(data.error);
     return data.variants || [];
 }
+
+async function fetchClinvarVariant(variationId) {
+    if (!variationId || !/^\d+$/.test(String(variationId))) return null;
+    const endpoint = getConfiguredApiEndpoint('CLINVAR_VARIANT_API_ENDPOINT', '/api/clinvar-variant');
+    const params = new URLSearchParams({ id: String(variationId) });
+    const res = await fetchWithTimeout(`${endpoint}?${params}`, {}, API_TIMEOUT_MS.clinvar);
+    if (!res.ok) throw new Error(`ClinVar variant proxy error: ${res.status}`);
+    const data = await res.json();
+    if (data?.error) throw new Error(data.error);
+    return data;
+}
 function getClinvarVariantText(variant) {
     return [
         variant?.title,
@@ -3307,6 +3318,49 @@ document.addEventListener('DOMContentLoaded', () => {
                     const displayConds = conditionsList.slice(0, 3).join(', ');
                     spanCond.innerHTML = `<strong>Conditions:</strong> ${displayConds}${conditionsList.length > 3 ? '…' : ''}`;
                     content.appendChild(spanCond);
+                }
+                // Somatic / oncogenicity data fetched directly from ClinVar esummary.
+                if (variantId && /^\d+$/.test(variantId)) {
+                    try {
+                        const cvData = await fetchClinvarVariant(variantId);
+                        if (cvData) {
+                            if (cvData.somatic && cvData.somatic.description) {
+                                const somaticDiv = document.createElement('div');
+                                somaticDiv.style.marginTop = '0.25rem';
+                                const lastEval = cvData.somatic.last_evaluated ? ` (${cvData.somatic.last_evaluated})` : '';
+                                somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${cvData.somatic.description}${lastEval}`;
+                                content.appendChild(somaticDiv);
+                            }
+                            if (cvData.oncogenicity && cvData.oncogenicity.description) {
+                                const oncDiv = document.createElement('div');
+                                const lastEval = cvData.oncogenicity.last_evaluated ? ` (${cvData.oncogenicity.last_evaluated})` : '';
+                                oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${cvData.oncogenicity.description}${lastEval}`;
+                                content.appendChild(oncDiv);
+                            }
+                            if (cvData.somaticConditions && cvData.somaticConditions.length > 0) {
+                                const scDet = document.createElement('details');
+                                const scSum = document.createElement('summary');
+                                scSum.textContent = `Somatic conditions (${cvData.somaticConditions.length})`;
+                                scDet.appendChild(scSum);
+                                const scUl = document.createElement('ul');
+                                scUl.style.cssText = 'margin-top:0.4rem;font-size:0.82rem;padding-left:1.2rem;line-height:1.6;';
+                                cvData.somaticConditions.forEach((sc) => {
+                                    const li = document.createElement('li');
+                                    const parts = [];
+                                    if (sc.condition) parts.push(`<strong>${sc.condition}</strong>`);
+                                    if (sc.impact) parts.push(sc.impact);
+                                    if (sc.submitter) parts.push(sc.submitter);
+                                    if (sc.lastEvaluated) parts.push(sc.lastEvaluated);
+                                    li.innerHTML = parts.join(' — ');
+                                    scUl.appendChild(li);
+                                });
+                                scDet.appendChild(scUl);
+                                content.appendChild(scDet);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('ClinVar variant fetch failed', e);
+                    }
                 }
                 // Link to ClinVar
                 const linkEl = document.createElement('a');
