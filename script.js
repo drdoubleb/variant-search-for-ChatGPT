@@ -4740,8 +4740,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             thead.appendChild(headerRow);
                             table.appendChild(thead);
 
-                            const tbody = document.createElement('tbody');
-                            records.forEach((rec, i) => {
+                            const FDA_PREVIEW_ROWS = 5;
+                            const buildRow = (rec, i) => {
                                 const tr = document.createElement('tr');
                                 tr.style.background = i % 2 === 0 ? '#fff' : '#fff7f7';
                                 const cellStyle = 'padding:4px 6px;vertical-align:top;border-bottom:1px solid #fee2e2;';
@@ -4765,10 +4765,30 @@ document.addEventListener('DOMContentLoaded', () => {
                                 tr.appendChild(tdDrug);
                                 tr.appendChild(tdDisease);
                                 tr.appendChild(tdDetail);
-                                tbody.appendChild(tr);
-                            });
+                                return tr;
+                            };
+
+                            const tbody = document.createElement('tbody');
+                            records.slice(0, FDA_PREVIEW_ROWS).forEach((rec, i) => tbody.appendChild(buildRow(rec, i)));
                             table.appendChild(tbody);
                             fdaResultsDiv.appendChild(table);
+
+                            if (records.length > FDA_PREVIEW_ROWS) {
+                                const details = document.createElement('details');
+                                details.style.cssText = 'margin-top:2px;';
+                                const summary = document.createElement('summary');
+                                summary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
+                                summary.textContent = `Show ${records.length - FDA_PREVIEW_ROWS} more…`;
+                                details.appendChild(summary);
+
+                                const extraTable = document.createElement('table');
+                                extraTable.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem;';
+                                const extraTbody = document.createElement('tbody');
+                                records.slice(FDA_PREVIEW_ROWS).forEach((rec, i) => extraTbody.appendChild(buildRow(rec, FDA_PREVIEW_ROWS + i)));
+                                extraTable.appendChild(extraTbody);
+                                details.appendChild(extraTable);
+                                fdaResultsDiv.appendChild(details);
+                            }
 
                             const note = document.createElement('div');
                             note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
