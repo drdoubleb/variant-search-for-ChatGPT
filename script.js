@@ -4586,7 +4586,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
                 const clinicalUrl = `https://www.google.com/search?q=${clinicalQuery}`;
                 const spliceTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
-                const spliceVariantText = (spliceTuple && spliceTuple.ref) ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceTuple.ref} ${spliceTuple.alt}` : '';
+                // Recover REF from annotation.vcf for MNVs where delins notation drops the reference.
+                const spliceRef = (spliceTuple && spliceTuple.ref) || (annotation && annotation.vcf && String(annotation.vcf.ref || '').toUpperCase()) || null;
+                const spliceAlt = (spliceTuple && spliceTuple.alt) || (annotation && annotation.vcf && String(annotation.vcf.alt || '').toUpperCase()) || null;
+                const spliceVariantText = (spliceTuple && spliceRef && spliceAlt) ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceRef} ${spliceAlt}` : '';
                 // SpliceAI lookup defaults to hg38 when hg is omitted. Most MyVariant coordinates
                 // we surface in this app are hg19/GRCh37, so explicitly request hg=37.
                 const spliceAiUrl = spliceVariantText
