@@ -122,7 +122,14 @@ function buildSpliceAiLookupTuple(rawInput, gVariant) {
         if (!m) return null;
         return { chrom: `chr${m[1].toUpperCase()}`, pos: m[2], ref: m[3].toUpperCase(), alt: m[4].toUpperCase() };
     };
-    return parseTokenInput(rawInput) || parseSimpleGenomic(gVariant) || null;
+    // Parses delins notation (MNVs/complex indels) to extract position; ref is unavailable.
+    const parseDelins = (gv) => {
+        if (!gv) return null;
+        const m = String(gv).match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?delins([A-Za-z]+)$/i);
+        if (!m) return null;
+        return { chrom: `chr${m[1].toUpperCase()}`, pos: m[2], ref: null, alt: m[4].toUpperCase() };
+    };
+    return parseTokenInput(rawInput) || parseSimpleGenomic(gVariant) || parseDelins(gVariant) || null;
 }
 
 // Build a gnomAD variant-browser URL from either raw token input (preferred) or
@@ -133,7 +140,13 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId) {
     const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
     if (tuple) {
         const chrom = tuple.chrom.replace(/^chr/i, '');
-        return `https://gnomad.broadinstitute.org/variant/${chrom}-${tuple.pos}-${tuple.ref}-${tuple.alt}?dataset=gnomad_r2_1`;
+        if (tuple.ref) {
+            return `https://gnomad.broadinstitute.org/variant/${chrom}-${tuple.pos}-${tuple.ref}-${tuple.alt}?dataset=gnomad_r2_1`;
+        }
+        // MNV/delins: ref unknown, open a region view centred on the variant position.
+        const posNum = Number(tuple.pos);
+        const altLen = tuple.alt ? tuple.alt.length : 1;
+        return `https://gnomad.broadinstitute.org/region/${chrom}-${posNum}-${posNum + altLen - 1}?dataset=gnomad_r2_1`;
     }
     // Fallback: use annotation/gVariant only for simple substitutions.
     const source = annotationId || gVariant || '';
@@ -4517,7 +4530,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
                 const clinicalUrl = `https://www.google.com/search?q=${clinicalQuery}`;
                 const spliceTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
-                const spliceVariantText = spliceTuple ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceTuple.ref} ${spliceTuple.alt}` : '';
+                const spliceVariantText = (spliceTuple && spliceTuple.ref) ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceTuple.ref} ${spliceTuple.alt}` : '';
                 // SpliceAI lookup defaults to hg38 when hg is omitted. Most MyVariant coordinates
                 // we surface in this app are hg19/GRCh37, so explicitly request hg=37.
                 const spliceAiUrl = spliceVariantText
