@@ -266,19 +266,26 @@ export default async function handler(req, res) {
     }
 
     let matchedVariant = null;
-    const normInput = String(protein || '')
+
+    // Convert three-letter amino acid codes to single-letter so "Gly12Cys" matches CIViC's "G12C"
+    const AA3TO1 = {
+        ala:'a',arg:'r',asn:'n',asp:'d',cys:'c',gln:'q',glu:'e',gly:'g',
+        his:'h',ile:'i',leu:'l',lys:'k',met:'m',phe:'f',pro:'p',ser:'s',
+        thr:'t',trp:'w',tyr:'y',val:'v',ter:'*'
+    };
+    const normProtein = (s) => String(s || '')
         .replace(/^p\./i, '')
+        .replace(/[A-Za-z]{3}/g, m => AA3TO1[m.toLowerCase()] || m.toLowerCase())
         .toLowerCase()
         .replace(/[^a-z0-9*_]/g, '');
+
+    const normInput = normProtein(protein);
 
     const variantNodes = apiGene.variants?.nodes || [];
 
     if (normInput && variantNodes.length > 0) {
         for (const v of variantNodes) {
-            const vn = String(v.name || '')
-                .toLowerCase()
-                .replace(/[^a-z0-9*_]/g, '');
-
+            const vn = normProtein(v.name);
             if (vn && (vn === normInput || normInput.includes(vn) || vn.includes(normInput))) {
                 matchedVariant = v;
                 break;
