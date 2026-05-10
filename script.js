@@ -657,40 +657,13 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
     const c = String(chrom || '').replace(/^chr/i, '').toUpperCase();
     const p = Number(pos);
     if (!c || !Number.isFinite(p)) return [];
-    const start = Math.max(1, p - windowSize);
-    const end = p + windowSize;
-    const term = `${c}[Chromosome] AND ${start}:${end}[Base Position for Assembly GRCh37]`;
-    const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&retmode=json&retmax=50&term=${encodeURIComponent(term)}`;
-    const searchRes = await fetchWithTimeout(searchUrl, {}, API_TIMEOUT_MS.clinvar);
-    if (!searchRes.ok) return [];
-    const searchData = await searchRes.json();
-    const ids = searchData?.esearchresult?.idlist || [];
-    if (!Array.isArray(ids) || ids.length === 0) return [];
-
-    const sumUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&retmode=json&id=${ids.join(',')}`;
-    const sumRes = await fetchWithTimeout(sumUrl, {}, API_TIMEOUT_MS.clinvar);
-    if (!sumRes.ok) return [];
-    const sumData = await sumRes.json();
-
-    return ids.map((id) => {
-        const rec = sumData?.result?.[id] || {};
-        const varLoc = rec.variation_set?.[0]?.variation_loc?.find?.((l) => String(l.assembly_name || '').toLowerCase().includes('grch37'))
-            || rec.location?.find?.((l) => String(l.assembly || '').toLowerCase().includes('grch37'))
-            || rec.variation_set?.[0]?.variation_loc?.[0]
-            || rec.location?.[0]
-            || null;
-        const varPos = varLoc ? (varLoc.display_start || varLoc.start || varLoc.chr_start || null) : null;
-        return {
-            id,
-            title: rec.title || '',
-            germline: rec.germline_classification?.description || '',
-            review: rec.germline_classification?.review_status || '',
-            variationId: rec.variation_set?.[0]?.variation_xrefs?.find?.((x) => String(x.db || '').toLowerCase() === 'dbsnp')?.id || rec.variation_set?.[0]?.variation_name || '',
-            variationName: rec.variation_set?.[0]?.variation_name || '',
-            molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
-            pos: varPos !== null ? Number(varPos) : null
-        };
-    });
+    const endpoint = getConfiguredApiEndpoint('CLINVAR_REGION_API_ENDPOINT', '/api/clinvar-region');
+    const params = new URLSearchParams({ chrom: c, pos: String(p), window: String(windowSize) });
+    const res = await fetchWithTimeout(`${endpoint}?${params}`, {}, API_TIMEOUT_MS.clinvar);
+    if (!res.ok) throw new Error(`ClinVar region proxy error: ${res.status}`);
+    const data = await res.json();
+    if (data?.error) throw new Error(data.error);
+    return data.variants || [];
 }
 function getClinvarVariantText(variant) {
     return [
