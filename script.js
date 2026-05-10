@@ -59,7 +59,8 @@ const API_TIMEOUT_MS = {
     tp53: 15000,
     clinvar: 7000,
     civic: 8000,
-    pubmed: 7000
+    pubmed: 7000,
+    fda: 8000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -883,6 +884,59 @@ async function fetchCivicApiData(geneName, proteinChange) {
 
 // Query PubMed via NCBI E-utilities for articles about a variant.
 // Query PubMed via the /api/pubmed serverless proxy (avoids browser CORS on NCBI eutils).
+/**
+ * Query the openFDA drug label API for drugs whose indications_and_usage mention
+ * the given gene. Returns an array of { brandName, genericName, indicationSnippet, labelUrl }.
+ */
+async function fetchFdaDrugsByGene(gene) {
+    if (!gene) return [];
+    const encoded = encodeURIComponent(`"${gene}"`);
+    const url = `https://api.fda.gov/drug/label.json?search=indications_and_usage:${encoded}&limit=20`;
+    let resp;
+    try {
+        resp = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.fda);
+    } catch (e) {
+        console.warn('openFDA fetch failed', e);
+        return [];
+    }
+    if (resp.status === 404) return [];
+    if (!resp.ok) throw new Error(`openFDA returned ${resp.status}`);
+    const data = await resp.json();
+    if (!data.results || data.results.length === 0) return [];
+
+    const seen = new Set();
+    const drugs = [];
+    const geneEscaped = gene.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const geneRegex = new RegExp(geneEscaped, 'i');
+
+    for (const item of data.results) {
+        const brandName = (item.openfda?.brand_name?.[0] || '').split(' ')[0];
+        const genericName = item.openfda?.generic_name?.[0] || '';
+        const key = (genericName || brandName).toLowerCase();
+        if (key && seen.has(key)) continue;
+        if (key) seen.add(key);
+
+        const indicationText = item.indications_and_usage?.[0] || '';
+        const matchIdx = indicationText.search(geneRegex);
+        let snippet;
+        if (matchIdx >= 0) {
+            const start = Math.max(0, matchIdx - 60);
+            const end = Math.min(indicationText.length, matchIdx + gene.length + 180);
+            snippet = (start > 0 ? '…' : '') + indicationText.slice(start, end).trim() + (end < indicationText.length ? '…' : '');
+        } else {
+            snippet = indicationText.slice(0, 220).trim() + (indicationText.length > 220 ? '…' : '');
+        }
+
+        const setId = item.set_id;
+        const labelUrl = setId
+            ? `https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid=${setId}`
+            : 'https://www.accessdata.fda.gov/scripts/cder/daf/';
+
+        drugs.push({ brandName, genericName, indicationSnippet: snippet, labelUrl });
+    }
+    return drugs;
+}
+
 async function fetchPubmedArticles(searchTerm, limit = 5) {
     if (!searchTerm) return { total: 0, articles: [] };
     try {
@@ -4649,6 +4703,110 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
                         }).catch(() => {
                             pmResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">PubMed unavailable.</div>';
+                        });
+                    }
+                }
+
+                // Card: FDA-Approved Drugs (by gene)
+                {
+                    const fdaCard = document.createElement('div');
+                    fdaCard.className = 'card';
+                    const fdaTitle = document.createElement('h3');
+                    fdaTitle.textContent = 'FDA-Approved Drugs (by gene)';
+                    applyCardTheme(fdaCard, 'FDA-Approved Drugs (by gene)');
+                    fdaCard.appendChild(fdaTitle);
+                    const fdaContent = document.createElement('div');
+                    fdaContent.className = 'card-content';
+
+                    if (!firstGene) {
+                        const noGeneEl = document.createElement('div');
+                        noGeneEl.style.cssText = 'font-size:0.85rem;color:#6b7280;';
+                        noGeneEl.textContent = 'No gene identified for FDA drug lookup.';
+                        fdaContent.appendChild(noGeneEl);
+                        fdaCard.appendChild(fdaContent);
+                        cardsContainer.appendChild(fdaCard);
+                    } else {
+                        const fdaCompDxUrl = 'https://www.fda.gov/patients/precision-medicine/list-cleared-or-approved-companion-diagnostic-devices-vitro-and-imaging-tools';
+                        const fdaLinkEl = document.createElement('a');
+                        fdaLinkEl.href = fdaCompDxUrl;
+                        fdaLinkEl.target = '_blank';
+                        fdaLinkEl.rel = 'noopener noreferrer';
+                        fdaLinkEl.textContent = 'FDA companion diagnostics list ↗';
+                        fdaContent.appendChild(fdaLinkEl);
+
+                        const fdaQueryLabel = document.createElement('div');
+                        fdaQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+                        fdaQueryLabel.textContent = `Gene: ${firstGene}`;
+                        fdaContent.appendChild(fdaQueryLabel);
+
+                        const fdaResultsDiv = document.createElement('div');
+                        const fdaSpinner = document.createElement('div');
+                        fdaSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+                        fdaSpinner.textContent = 'Loading FDA drug data…';
+                        fdaResultsDiv.appendChild(fdaSpinner);
+                        fdaContent.appendChild(fdaResultsDiv);
+                        fdaCard.appendChild(fdaContent);
+                        cardsContainer.appendChild(fdaCard);
+
+                        fetchFdaDrugsByGene(firstGene).then((drugs) => {
+                            fdaResultsDiv.innerHTML = '';
+                            if (!drugs || drugs.length === 0) {
+                                const noResults = document.createElement('div');
+                                noResults.style.cssText = 'font-size:0.85rem;color:#6b7280;';
+                                noResults.textContent = `No drug label indications found for ${firstGene} via openFDA.`;
+                                fdaResultsDiv.appendChild(noResults);
+                                return;
+                            }
+                            const countEl = document.createElement('div');
+                            countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
+                            countEl.textContent = `${drugs.length} drug label${drugs.length !== 1 ? 's' : ''} found`;
+                            fdaResultsDiv.appendChild(countEl);
+
+                            const table = document.createElement('table');
+                            table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem;';
+                            const thead = document.createElement('thead');
+                            const headerRow = document.createElement('tr');
+                            ['Drug', 'Indication snippet'].forEach((col) => {
+                                const th = document.createElement('th');
+                                th.style.cssText = 'text-align:left;padding:4px 6px;border-bottom:2px solid #fca5a5;background:#fff7f7;color:#7f1d1d;font-weight:600;';
+                                th.textContent = col;
+                                headerRow.appendChild(th);
+                            });
+                            thead.appendChild(headerRow);
+                            table.appendChild(thead);
+
+                            const tbody = document.createElement('tbody');
+                            drugs.forEach((d, i) => {
+                                const tr = document.createElement('tr');
+                                tr.style.background = i % 2 === 0 ? '#fff' : '#fff7f7';
+
+                                const tdDrug = document.createElement('td');
+                                tdDrug.style.cssText = 'padding:4px 6px;vertical-align:top;border-bottom:1px solid #fee2e2;font-weight:600;white-space:nowrap;';
+                                const drugLink = document.createElement('a');
+                                drugLink.href = d.labelUrl;
+                                drugLink.target = '_blank';
+                                drugLink.rel = 'noopener noreferrer';
+                                drugLink.textContent = d.brandName || d.genericName || 'Unknown';
+                                tdDrug.appendChild(drugLink);
+                                if (d.genericName && d.brandName && d.genericName.toLowerCase() !== d.brandName.toLowerCase()) {
+                                    const genericEl = document.createElement('div');
+                                    genericEl.style.cssText = 'font-size:0.78rem;color:#6b7280;font-weight:normal;';
+                                    genericEl.textContent = d.genericName;
+                                    tdDrug.appendChild(genericEl);
+                                }
+
+                                const tdIndication = document.createElement('td');
+                                tdIndication.style.cssText = 'padding:4px 6px;vertical-align:top;border-bottom:1px solid #fee2e2;color:#374151;';
+                                tdIndication.textContent = d.indicationSnippet;
+
+                                tr.appendChild(tdDrug);
+                                tr.appendChild(tdIndication);
+                                tbody.appendChild(tr);
+                            });
+                            table.appendChild(tbody);
+                            fdaResultsDiv.appendChild(table);
+                        }).catch(() => {
+                            fdaResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">FDA drug data unavailable.</div>';
                         });
                     }
                 }
