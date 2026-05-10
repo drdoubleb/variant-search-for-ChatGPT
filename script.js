@@ -3416,23 +3416,33 @@ document.addEventListener('DOMContentLoaded', () => {
                 const firstProtein = rawProtein.split(',')[0].trim();
                 const civicProtein = legacy?.variant?.name || (firstProtein.includes(':') ? firstProtein.split(':').slice(1).join(':').trim() : firstProtein);
 
-                // Always-visible links (use search URLs by default; API callback upgrades to feature/variant URLs when IDs are known)
+                // Variant link: use known variant ID immediately if available; otherwise hide until the API callback resolves one.
                 const encodedCivicGene = encodeURIComponent(civicGene || '');
                 const encodedCivicProtein = encodeURIComponent(civicProtein || '');
                 const linksDiv = document.createElement('div');
                 linksDiv.style.marginBottom = '0.4rem';
                 let variantLinkEl = null;
+                let variantSepNode = null;
                 let geneLinkEl = null;
+                const legacyVariantId = legacy?.variant_id;
                 if (civicGene && civicProtein) {
                     variantLinkEl = document.createElement('a');
-                    variantLinkEl.href = `https://civicdb.org/search?query=${encodedCivicGene}+${encodedCivicProtein}`;
+                    if (legacyVariantId) {
+                        variantLinkEl.href = `https://civicdb.org/variants/${legacyVariantId}/summary`;
+                    } else {
+                        variantLinkEl.href = '#';
+                        variantLinkEl.style.display = 'none';
+                    }
                     variantLinkEl.target = '_blank';
                     variantLinkEl.rel = 'noopener noreferrer';
                     variantLinkEl.textContent = 'View variant on CIViC';
                     linksDiv.appendChild(variantLinkEl);
                 }
                 if (civicGene) {
-                    if (variantLinkEl) linksDiv.appendChild(document.createTextNode(' | '));
+                    if (variantLinkEl) {
+                        variantSepNode = document.createTextNode(legacyVariantId ? ' | ' : '');
+                        linksDiv.appendChild(variantSepNode);
+                    }
                     geneLinkEl = document.createElement('a');
                     geneLinkEl.href = `https://civicdb.org/search?query=${encodedCivicGene}`;
                     geneLinkEl.target = '_blank';
@@ -3594,9 +3604,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             geneLinkEl.href = `https://civicdb.org/features/${apiGene.id}/summary`;
                         }
 
-                        // Upgrade variant link to specific variant page if we matched one
+                        // Upgrade variant link to specific variant page if we matched one, and reveal it if it was hidden
                         if (matchedVariant?.id && variantLinkEl) {
                             variantLinkEl.href = `https://civicdb.org/variants/${matchedVariant.id}/summary`;
+                            variantLinkEl.style.display = '';
+                            if (variantSepNode) variantSepNode.nodeValue = ' | ';
                             variantLinkEl.textContent = 'View variant on CIViC';
                         }
 
@@ -4672,9 +4684,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         fdaContent.appendChild(fdaLinkEl);
 
                         const fdaQueryLabel = document.createElement('div');
-                        fdaQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+                        fdaQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 2px;';
                         fdaQueryLabel.textContent = `Gene: ${firstGene}`;
                         fdaContent.appendChild(fdaQueryLabel);
+
+                        const fdaDisclaimer = document.createElement('div');
+                        fdaDisclaimer.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin:0 0 6px;font-style:italic;';
+                        fdaDisclaimer.textContent = 'Note: FDA list does not always note resistance mutations.';
+                        fdaContent.appendChild(fdaDisclaimer);
 
                         const fdaResultsDiv = document.createElement('div');
                         const fdaSpinner = document.createElement('div');
