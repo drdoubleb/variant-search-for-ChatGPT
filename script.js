@@ -4691,7 +4691,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         fdaCard.appendChild(fdaContent);
                         cardsContainer.appendChild(fdaCard);
                     } else {
-                        const fdaCompDxUrl = 'https://www.fda.gov/patients/precision-medicine/list-cleared-or-approved-companion-diagnostic-devices-vitro-and-imaging-tools';
+                        const fdaCompDxUrl = 'https://www.fda.gov/medical-devices/in-vitro-diagnostics/list-cleared-or-approved-companion-diagnostic-devices-in-vitro-and-imaging-tools';
                         const fdaLinkEl = document.createElement('a');
                         fdaLinkEl.href = fdaCompDxUrl;
                         fdaLinkEl.target = '_blank';
@@ -4748,11 +4748,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
                                 const tdDrug = document.createElement('td');
                                 tdDrug.style.cssText = cellStyle + 'font-weight:600;';
-                                tdDrug.textContent = rec.therapy?.drugs || '—';
+                                const drugsArr = Array.isArray(rec.therapy?.drugs) ? rec.therapy.drugs : [];
+                                tdDrug.textContent = drugsArr.length
+                                    ? drugsArr.map(d => d.trade_name ? `${d.trade_name} (${d.generic_name})` : d.generic_name || d.raw || '').filter(Boolean).join(', ')
+                                    : (rec.therapy?.raw || '—');
 
                                 const tdDisease = document.createElement('td');
                                 tdDisease.style.cssText = cellStyle + 'color:#374151;';
-                                tdDisease.textContent = rec.indication?.disease || '—';
+                                const rawDisease = rec.indication?.raw || rec.indication?.disease || '—';
+                                tdDisease.textContent = rawDisease.replace(/\s*[-–]\s*(Tissue|Plasma|Blood|Serum|Urine|FFPE|Fresh Frozen|Whole Blood|ctDNA)\s*$/i, '').trim() || rawDisease;
 
                                 const tdDetail = document.createElement('td');
                                 tdDetail.style.cssText = cellStyle + 'color:#374151;';
