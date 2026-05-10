@@ -3319,21 +3319,22 @@ document.addEventListener('DOMContentLoaded', () => {
                     spanCond.innerHTML = `<strong>Conditions:</strong> ${displayConds}${conditionsList.length > 3 ? '…' : ''}`;
                     content.appendChild(spanCond);
                 }
-                // Somatic / oncogenicity data fetched directly from ClinVar esummary.
+                // Somatic / oncogenicity data fetched directly from ClinVar VCV record.
                 if (variantId && /^\d+$/.test(variantId)) {
                     try {
                         const cvData = await fetchClinvarVariant(variantId);
                         if (cvData) {
+                            const fmtDate = (s) => s && s.includes('T') ? s.split('T')[0] : (s || '');
                             if (cvData.somatic && cvData.somatic.description) {
                                 const somaticDiv = document.createElement('div');
                                 somaticDiv.style.marginTop = '0.25rem';
-                                const lastEval = cvData.somatic.last_evaluated ? ` (${cvData.somatic.last_evaluated})` : '';
+                                const lastEval = cvData.somatic.lastEvaluated ? ` (${fmtDate(cvData.somatic.lastEvaluated)})` : '';
                                 somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${cvData.somatic.description}${lastEval}`;
                                 content.appendChild(somaticDiv);
                             }
                             if (cvData.oncogenicity && cvData.oncogenicity.description) {
                                 const oncDiv = document.createElement('div');
-                                const lastEval = cvData.oncogenicity.last_evaluated ? ` (${cvData.oncogenicity.last_evaluated})` : '';
+                                const lastEval = cvData.oncogenicity.lastEvaluated ? ` (${fmtDate(cvData.oncogenicity.lastEvaluated)})` : '';
                                 oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${cvData.oncogenicity.description}${lastEval}`;
                                 content.appendChild(oncDiv);
                             }
@@ -3348,10 +3349,11 @@ document.addEventListener('DOMContentLoaded', () => {
                                     const li = document.createElement('li');
                                     const parts = [];
                                     if (sc.condition) parts.push(`<strong>${sc.condition}</strong>`);
-                                    if (sc.impact) parts.push(sc.impact);
-                                    if (sc.submitter) parts.push(sc.submitter);
-                                    if (sc.lastEvaluated) parts.push(sc.lastEvaluated);
-                                    li.innerHTML = parts.join(' — ');
+                                    // Combine tier + assertion type + clinical significance into one readable string.
+                                    const impactParts = [sc.tier, sc.assertionType, sc.clinSig].filter(Boolean);
+                                    if (impactParts.length) parts.push(impactParts.join(' — '));
+                                    if (sc.lastEvaluated) parts.push(fmtDate(sc.lastEvaluated));
+                                    li.innerHTML = parts.join(': ');
                                     scUl.appendChild(li);
                                 });
                                 scDet.appendChild(scUl);
