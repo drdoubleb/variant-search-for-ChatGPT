@@ -57,9 +57,9 @@ const API_TIMEOUT_MS = {
     cosmic: 2500,
     cosmicMeta: 1500,
     tp53: 15000,
-    clinvar: 7000,
+    clinvar: 15000,
     civic: 8000,
-    pubmed: 7000,
+    pubmed: 25000,
     fda: 8000
 };
 
