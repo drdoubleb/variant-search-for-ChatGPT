@@ -284,13 +284,19 @@ export default async function handler(req, res) {
     const variantNodes = apiGene.variants?.nodes || [];
 
     if (normInput && variantNodes.length > 0) {
+        // Prefer exact match; among substring matches take the longest vn (most specific variant).
+        let bestSubstring = null;
         for (const v of variantNodes) {
             const vn = normProtein(v.name);
-            if (vn && (vn === normInput || normInput.includes(vn) || vn.includes(normInput))) {
-                matchedVariant = v;
-                break;
+            if (!vn) continue;
+            if (vn === normInput) { matchedVariant = v; break; }
+            if (normInput.includes(vn) || vn.includes(normInput)) {
+                if (!bestSubstring || vn.length > normProtein(bestSubstring.name).length) {
+                    bestSubstring = v;
+                }
             }
         }
+        if (!matchedVariant) matchedVariant = bestSubstring;
     }
 
     return res.status(200).json({ gene: apiGene, matchedVariant, assertions });
