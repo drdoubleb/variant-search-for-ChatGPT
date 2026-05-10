@@ -60,7 +60,8 @@ const API_TIMEOUT_MS = {
     clinvar: 15000,
     civic: 8000,
     pubmed: 25000,
-    fda: 8000
+    fda: 8000,
+    gnomadV4: 10000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -669,6 +670,55 @@ async function liftoverHg38ToHg19(variant) {
 }
 
 
+
+// Liftover a position from hg19/GRCh37 to GRCh38 using Ensembl REST API.
+// Returns null if conversion fails.
+async function liftoverHg19ToHg38(chrom, pos) {
+    const c = String(chrom).replace(/^chr/i, '');
+    const p = parseInt(pos, 10);
+    if (!c || !Number.isFinite(p)) return null;
+    const url = `https://rest.ensembl.org/map/human/GRCh37/${c}:${p}..${p}:1/GRCh38?content-type=application/json`;
+    try {
+        const res = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.liftover);
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data && data.mappings && data.mappings.length > 0) {
+            const mapped = data.mappings[0].mapped;
+            if (mapped && mapped.start) return mapped.start;
+        }
+    } catch (err) {
+        // liftover failed
+    }
+    return null;
+}
+
+// Fetch gnomAD v4.1 (GRCh38) data for a variant.
+// chrom: chromosome without 'chr' prefix, pos37: GRCh37 position (will be lifted over),
+// ref/alt: alleles. Returns an object with genome/exome data or null on failure.
+async function fetchGnomadV4(chrom, pos37, ref, alt) {
+    const c = String(chrom).replace(/^chr/i, '');
+    if (!c || !pos37 || !ref || !alt) return null;
+
+    let pos38 = await liftoverHg19ToHg38(c, pos37);
+    if (!pos38) return null;
+
+    const variantId = `${c}-${pos38}-${ref.toUpperCase()}-${alt.toUpperCase()}`;
+    const endpoint = getConfiguredApiEndpoint('GNOMAD_V4_API_ENDPOINT', '/api/gnomad-v4');
+    const url = `${endpoint}?variantId=${encodeURIComponent(variantId)}`;
+    try {
+        const res = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.gnomadV4);
+        if (!res.ok) return null;
+        const body = await res.json();
+        if (body.error && !body.data) return null;
+        const variant = body.data && body.data.variant;
+        if (!variant) return null;
+        // Attach the GRCh38 variant ID so the card can build a v4 link
+        variant._grch38VariantId = variantId;
+        return variant;
+    } catch (err) {
+        return null;
+    }
+}
 
 async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
     const c = String(chrom || '').replace(/^chr/i, '').toUpperCase();
@@ -3831,6 +3881,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.appendChild(title);
                 const content = document.createElement('div');
                 content.className = 'card-content';
+
+                // ── v2.1.1 section (GRCh37, via myvariant.info) ──────────────────────
+                const v2Header = document.createElement('div');
+                v2Header.style.cssText = 'font-size:0.78rem;font-weight:600;color:#6b7280;margin-bottom:0.2rem;';
+                v2Header.textContent = 'v2.1.1 · GRCh37 (via myvariant.info)';
+                content.appendChild(v2Header);
+
                 // Add overall AF and counts lines
                 if (exomeStats) {
                     const exDiv = document.createElement('div');
@@ -3848,26 +3905,30 @@ document.addEventListener('DOMContentLoaded', () => {
                     gnDiv.innerHTML = `<strong>Genome AF:</strong> ${afg} <strong>AC/AN:</strong> ${acg}/${ang}`;
                     content.appendChild(gnDiv);
                 }
-                // Link to gnomAD
+                if (!exomeStats && !genomeStats) {
+                    const noV2 = document.createElement('div');
+                    noV2.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
+                    noV2.textContent = 'No v2.1.1 data.';
+                    content.appendChild(noV2);
+                }
+                // Link to gnomAD v2
                 if (gnomadLink) {
                     const linkEl = document.createElement('a');
                     linkEl.href = gnomadLink;
                     linkEl.target = '_blank';
                     linkEl.rel = 'noopener noreferrer';
-                    linkEl.textContent = 'View on gnomAD';
+                    linkEl.textContent = 'View on gnomAD (v2.1.1)';
                     content.appendChild(linkEl);
                 }
-                // Add details for population data if available
+                // Add details for v2 population data if available
                 if ((exomeStats && exomeStats.popData && exomeStats.popData.length > 0) || (genomeStats && genomeStats.popData && genomeStats.popData.length > 0)) {
                     const detailsEl = document.createElement('details');
                     const summaryEl = document.createElement('summary');
-                    summaryEl.textContent = 'Population details';
+                    summaryEl.textContent = 'v2.1.1 population details';
                     detailsEl.appendChild(summaryEl);
-                    // Build a table for populations
                     const table = document.createElement('table');
                     table.style.width = '100%';
                     table.style.borderCollapse = 'collapse';
-                    // Table header
                     const thead = document.createElement('thead');
                     const hdrRow = document.createElement('tr');
                     ['Dataset','Population','AF','AC','AN'].forEach((text) => {
@@ -3881,57 +3942,35 @@ document.addEventListener('DOMContentLoaded', () => {
                     thead.appendChild(hdrRow);
                     table.appendChild(thead);
                     const tbody = document.createElement('tbody');
-                    // Add exome pop rows
                     if (exomeStats && exomeStats.popData) {
                         exomeStats.popData.forEach((pd) => {
                             const tr = document.createElement('tr');
-                            const datasetCell = document.createElement('td');
-                            datasetCell.textContent = 'Exome';
-                            datasetCell.style.padding = '0.25rem 0.5rem';
-                            const popCell = document.createElement('td');
-                            popCell.textContent = pd.pop;
-                            popCell.style.padding = '0.25rem 0.5rem';
-                            const afCell = document.createElement('td');
-                            afCell.textContent = (pd.af != null && !isNaN(pd.af)) ? `${(pd.af * 100).toFixed(4)}%` : '—';
-                            afCell.style.padding = '0.25rem 0.5rem';
-                            const acCell = document.createElement('td');
-                            acCell.textContent = (pd.ac != null ? pd.ac : '—');
-                            acCell.style.padding = '0.25rem 0.5rem';
-                            const anCell = document.createElement('td');
-                            anCell.textContent = (pd.an != null ? pd.an : '—');
-                            anCell.style.padding = '0.25rem 0.5rem';
-                            tr.appendChild(datasetCell);
-                            tr.appendChild(popCell);
-                            tr.appendChild(afCell);
-                            tr.appendChild(acCell);
-                            tr.appendChild(anCell);
+                            ['Exome', pd.pop,
+                                (pd.af != null && !isNaN(pd.af)) ? `${(pd.af * 100).toFixed(4)}%` : '—',
+                                pd.ac != null ? pd.ac : '—',
+                                pd.an != null ? pd.an : '—'
+                            ].forEach((val) => {
+                                const td = document.createElement('td');
+                                td.textContent = val;
+                                td.style.padding = '0.25rem 0.5rem';
+                                tr.appendChild(td);
+                            });
                             tbody.appendChild(tr);
                         });
                     }
-                    // Add genome pop rows
                     if (genomeStats && genomeStats.popData) {
                         genomeStats.popData.forEach((pd) => {
                             const tr = document.createElement('tr');
-                            const datasetCell = document.createElement('td');
-                            datasetCell.textContent = 'Genome';
-                            datasetCell.style.padding = '0.25rem 0.5rem';
-                            const popCell = document.createElement('td');
-                            popCell.textContent = pd.pop;
-                            popCell.style.padding = '0.25rem 0.5rem';
-                            const afCell = document.createElement('td');
-                            afCell.textContent = (pd.af != null && !isNaN(pd.af)) ? `${(pd.af * 100).toFixed(4)}%` : '—';
-                            afCell.style.padding = '0.25rem 0.5rem';
-                            const acCell = document.createElement('td');
-                            acCell.textContent = (pd.ac != null ? pd.ac : '—');
-                            acCell.style.padding = '0.25rem 0.5rem';
-                            const anCell = document.createElement('td');
-                            anCell.textContent = (pd.an != null ? pd.an : '—');
-                            anCell.style.padding = '0.25rem 0.5rem';
-                            tr.appendChild(datasetCell);
-                            tr.appendChild(popCell);
-                            tr.appendChild(afCell);
-                            tr.appendChild(acCell);
-                            tr.appendChild(anCell);
+                            ['Genome', pd.pop,
+                                (pd.af != null && !isNaN(pd.af)) ? `${(pd.af * 100).toFixed(4)}%` : '—',
+                                pd.ac != null ? pd.ac : '—',
+                                pd.an != null ? pd.an : '—'
+                            ].forEach((val) => {
+                                const td = document.createElement('td');
+                                td.textContent = val;
+                                td.style.padding = '0.25rem 0.5rem';
+                                tr.appendChild(td);
+                            });
                             tbody.appendChild(tr);
                         });
                     }
@@ -3939,8 +3978,133 @@ document.addEventListener('DOMContentLoaded', () => {
                     detailsEl.appendChild(table);
                     content.appendChild(detailsEl);
                 }
+
+                // ── v4.1 section (GRCh38, direct gnomAD API) ─────────────────────────
+                const divider = document.createElement('hr');
+                divider.style.cssText = 'margin:0.5rem 0;border:none;border-top:1px solid #e5e7eb;';
+                content.appendChild(divider);
+
+                const v4Header = document.createElement('div');
+                v4Header.style.cssText = 'font-size:0.78rem;font-weight:600;color:#6b7280;margin-bottom:0.2rem;';
+                v4Header.textContent = 'v4.1 · GRCh38 (gnomAD API)';
+                content.appendChild(v4Header);
+
+                const v4Section = document.createElement('div');
+                const v4Loading = document.createElement('div');
+                v4Loading.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
+                v4Loading.textContent = 'Loading gnomAD v4.1…';
+                v4Section.appendChild(v4Loading);
+                content.appendChild(v4Section);
+
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
+
+                // Async: lift over to GRCh38, query gnomAD v4 API, populate v4Section
+                (() => {
+                    const vcfData = annotation && annotation.vcf;
+                    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+                    let chrom38 = null, pos37 = null, ref38 = null, alt38 = null;
+                    if (tuple) {
+                        chrom38 = tuple.chrom.replace(/^chr/i, '');
+                        pos37 = tuple.pos;
+                        ref38 = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
+                        alt38 = tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
+                    }
+                    if (!chrom38 || !pos37 || !ref38 || !alt38) {
+                        v4Loading.textContent = 'gnomAD v4.1: insufficient coordinate data.';
+                        return;
+                    }
+                    fetchGnomadV4(chrom38, pos37, ref38, alt38).then((v4data) => {
+                        v4Section.innerHTML = '';
+                        if (!v4data) {
+                            const noData = document.createElement('div');
+                            noData.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
+                            noData.textContent = 'Not found in gnomAD v4.1.';
+                            v4Section.appendChild(noData);
+                            return;
+                        }
+                        // Summary rows for genome and exome
+                        const renderV4Summary = (label, src) => {
+                            if (!src || (src.af == null && src.ac == null)) return;
+                            const row = document.createElement('div');
+                            const af = (src.af != null && !isNaN(src.af)) ? `${(src.af * 100).toFixed(4)}%` : 'N/A';
+                            const ac = src.ac != null ? src.ac : '—';
+                            const an = src.an != null ? src.an : '—';
+                            row.innerHTML = `<strong>${label} AF:</strong> ${af} <strong>AC/AN:</strong> ${ac}/${an}`;
+                            v4Section.appendChild(row);
+                        };
+                        renderV4Summary('Exome', v4data.exome);
+                        renderV4Summary('Genome', v4data.genome);
+                        if (!v4data.exome && !v4data.genome) {
+                            const noFreq = document.createElement('div');
+                            noFreq.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
+                            noFreq.textContent = 'Variant found in gnomAD v4.1 but no frequency data available.';
+                            v4Section.appendChild(noFreq);
+                        }
+                        // v4 link
+                        if (v4data._grch38VariantId) {
+                            const v4Link = document.createElement('a');
+                            v4Link.href = `https://gnomad.broadinstitute.org/variant/${v4data._grch38VariantId}?dataset=gnomad_r4`;
+                            v4Link.target = '_blank';
+                            v4Link.rel = 'noopener noreferrer';
+                            v4Link.textContent = 'View on gnomAD (v4.1)';
+                            v4Section.appendChild(v4Link);
+                        }
+                        // Population details
+                        const v4Pops = [];
+                        const collectV4Pops = (label, src) => {
+                            if (!src || !Array.isArray(src.populations)) return;
+                            src.populations.forEach((p) => {
+                                if (p.af != null || p.ac != null) {
+                                    v4Pops.push({ dataset: label, id: (p.id || '').toUpperCase(), af: p.af, ac: p.ac, an: p.an });
+                                }
+                            });
+                        };
+                        collectV4Pops('Exome', v4data.exome);
+                        collectV4Pops('Genome', v4data.genome);
+                        if (v4Pops.length > 0) {
+                            const v4Details = document.createElement('details');
+                            const v4Summary = document.createElement('summary');
+                            v4Summary.textContent = 'v4.1 population details';
+                            v4Details.appendChild(v4Summary);
+                            const v4Table = document.createElement('table');
+                            v4Table.style.width = '100%';
+                            v4Table.style.borderCollapse = 'collapse';
+                            const v4Thead = document.createElement('thead');
+                            const v4HdrRow = document.createElement('tr');
+                            ['Dataset','Population','AF','AC','AN'].forEach((text) => {
+                                const th = document.createElement('th');
+                                th.textContent = text;
+                                th.style.textAlign = 'left';
+                                th.style.padding = '0.25rem 0.5rem';
+                                th.style.borderBottom = '1px solid #e0e0e0';
+                                v4HdrRow.appendChild(th);
+                            });
+                            v4Thead.appendChild(v4HdrRow);
+                            v4Table.appendChild(v4Thead);
+                            const v4Tbody = document.createElement('tbody');
+                            v4Pops.forEach((pd) => {
+                                const tr = document.createElement('tr');
+                                [pd.dataset, pd.id,
+                                    (pd.af != null && !isNaN(pd.af)) ? `${(pd.af * 100).toFixed(4)}%` : '—',
+                                    pd.ac != null ? pd.ac : '—',
+                                    pd.an != null ? pd.an : '—'
+                                ].forEach((val) => {
+                                    const td = document.createElement('td');
+                                    td.textContent = val;
+                                    td.style.padding = '0.25rem 0.5rem';
+                                    tr.appendChild(td);
+                                });
+                                v4Tbody.appendChild(tr);
+                            });
+                            v4Table.appendChild(v4Tbody);
+                            v4Details.appendChild(v4Table);
+                            v4Section.appendChild(v4Details);
+                        }
+                    }).catch(() => {
+                        v4Section.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">gnomAD v4.1 unavailable.</div>';
+                    });
+                })();
             }
             // Card: Predictors
             {
