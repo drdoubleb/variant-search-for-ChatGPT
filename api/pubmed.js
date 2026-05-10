@@ -11,7 +11,7 @@ const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 async function ncbiFetch(url) {
     const res = await fetch(url, {
         headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(10000)
+        signal: AbortSignal.timeout(12000)
     });
     if (!res.ok) throw new Error(`NCBI request failed: ${res.status}`);
     return res.json();
