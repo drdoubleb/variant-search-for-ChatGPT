@@ -671,50 +671,19 @@ async function liftoverHg38ToHg19(variant) {
 
 
 
-// Liftover a position from hg19/GRCh37 to GRCh38 using Ensembl REST API.
-// Returns null if conversion fails.
-async function liftoverHg19ToHg38(chrom, pos) {
-    const c = String(chrom).replace(/^chr/i, '');
-    const p = parseInt(pos, 10);
-    if (!c || !Number.isFinite(p)) return null;
-    const url = `https://rest.ensembl.org/map/human/GRCh37/${c}:${p}..${p}:1/GRCh38?content-type=application/json`;
-    try {
-        const res = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.liftover);
-        if (!res.ok) return null;
-        const data = await res.json();
-        if (data && data.mappings && data.mappings.length > 0) {
-            const mapped = data.mappings[0].mapped;
-            if (mapped && mapped.start) return mapped.start;
-        }
-    } catch (err) {
-        // liftover failed
-    }
-    return null;
-}
-
 // Fetch gnomAD v4.1 (GRCh38) data for a variant.
-// chrom: chromosome without 'chr' prefix, pos37: GRCh37 position (will be lifted over),
-// ref/alt: alleles. Returns an object with genome/exome data or null on failure.
+// Liftover GRCh37→GRCh38 is done server-side by the proxy.
+// Returns { status, data?, grch38Id?, message? } or null on hard failure.
 async function fetchGnomadV4(chrom, pos37, ref, alt) {
     const c = String(chrom).replace(/^chr/i, '');
     if (!c || !pos37 || !ref || !alt) return null;
-
-    let pos38 = await liftoverHg19ToHg38(c, pos37);
-    if (!pos38) return null;
-
-    const variantId = `${c}-${pos38}-${ref.toUpperCase()}-${alt.toUpperCase()}`;
     const endpoint = getConfiguredApiEndpoint('GNOMAD_V4_API_ENDPOINT', '/api/gnomad-v4');
-    const url = `${endpoint}?variantId=${encodeURIComponent(variantId)}`;
+    const params = new URLSearchParams({ chrom: c, pos37: String(pos37), ref: ref.toUpperCase(), alt: alt.toUpperCase() });
+    const url = `${endpoint}?${params}`;
     try {
         const res = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.gnomadV4);
         if (!res.ok) return null;
-        const body = await res.json();
-        if (body.error && !body.data) return null;
-        const variant = body.data && body.data.variant;
-        if (!variant) return null;
-        // Attach the GRCh38 variant ID so the card can build a v4 link
-        variant._grch38VariantId = variantId;
-        return variant;
+        return await res.json();
     } catch (err) {
         return null;
     }
@@ -3999,30 +3968,41 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
 
-                // Async: lift over to GRCh38, query gnomAD v4 API, populate v4Section
+                // Async: query gnomAD v4 API (liftover done server-side), populate v4Section
                 (() => {
                     const vcfData = annotation && annotation.vcf;
                     const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
-                    let chrom38 = null, pos37 = null, ref38 = null, alt38 = null;
+                    let chromCoord = null, pos37Coord = null, refCoord = null, altCoord = null;
                     if (tuple) {
-                        chrom38 = tuple.chrom.replace(/^chr/i, '');
-                        pos37 = tuple.pos;
-                        ref38 = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
-                        alt38 = tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
+                        chromCoord = tuple.chrom.replace(/^chr/i, '');
+                        pos37Coord = tuple.pos;
+                        refCoord = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
+                        altCoord = tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
                     }
-                    if (!chrom38 || !pos37 || !ref38 || !alt38) {
+                    if (!chromCoord || !pos37Coord || !refCoord || !altCoord) {
                         v4Loading.textContent = 'gnomAD v4.1: insufficient coordinate data.';
                         return;
                     }
-                    fetchGnomadV4(chrom38, pos37, ref38, alt38).then((v4data) => {
-                        v4Section.innerHTML = '';
-                        if (!v4data) {
-                            const noData = document.createElement('div');
-                            noData.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
-                            noData.textContent = 'Not found in gnomAD v4.1.';
-                            v4Section.appendChild(noData);
+                    const showV4Msg = (msg) => {
+                        v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${msg}</div>`;
+                    };
+                    fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
+                        if (!result) { showV4Msg('gnomAD v4.1 unavailable.'); return; }
+                        const { status, data: v4data, grch38Id, message } = result;
+                        if (status === 'liftover_failed') {
+                            showV4Msg(`GRCh37→GRCh38 liftover failed for ${chromCoord}:${pos37Coord}.`);
                             return;
                         }
+                        if (status === 'not_found') {
+                            showV4Msg(`Not found in gnomAD v4.1${grch38Id ? ` (queried: ${grch38Id})` : ''}.`);
+                            return;
+                        }
+                        if (status === 'api_error' || status === 'error') {
+                            showV4Msg(`gnomAD v4.1 error${grch38Id ? ` (${grch38Id})` : ''}: ${message || 'unknown'}`);
+                            return;
+                        }
+                        // status === 'found'
+                        v4Section.innerHTML = '';
                         // Summary rows for genome and exome
                         const renderV4Summary = (label, src) => {
                             if (!src || (src.af == null && src.ac == null)) return;
@@ -4038,13 +4018,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (!v4data.exome && !v4data.genome) {
                             const noFreq = document.createElement('div');
                             noFreq.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
-                            noFreq.textContent = 'Variant found in gnomAD v4.1 but no frequency data available.';
+                            noFreq.textContent = 'Variant found in gnomAD v4.1 but no frequency data.';
                             v4Section.appendChild(noFreq);
                         }
                         // v4 link
-                        if (v4data._grch38VariantId) {
+                        if (grch38Id) {
                             const v4Link = document.createElement('a');
-                            v4Link.href = `https://gnomad.broadinstitute.org/variant/${v4data._grch38VariantId}?dataset=gnomad_r4`;
+                            v4Link.href = `https://gnomad.broadinstitute.org/variant/${grch38Id}?dataset=gnomad_r4`;
                             v4Link.target = '_blank';
                             v4Link.rel = 'noopener noreferrer';
                             v4Link.textContent = 'View on gnomAD (v4.1)';
@@ -4102,7 +4082,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             v4Section.appendChild(v4Details);
                         }
                     }).catch(() => {
-                        v4Section.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">gnomAD v4.1 unavailable.</div>';
+                        showV4Msg('gnomAD v4.1 unavailable.');
                     });
                 })();
             }
