@@ -3324,18 +3324,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     try {
                         const cvData = await fetchClinvarVariant(variantId);
                         if (cvData) {
-                            const fmtDate = (s) => s && s.includes('T') ? s.split('T')[0] : (s || '');
                             if (cvData.somatic && cvData.somatic.description) {
                                 const somaticDiv = document.createElement('div');
                                 somaticDiv.style.marginTop = '0.25rem';
-                                const lastEval = cvData.somatic.lastEvaluated ? ` (${fmtDate(cvData.somatic.lastEvaluated)})` : '';
-                                somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${cvData.somatic.description}${lastEval}`;
+                                somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${cvData.somatic.description}`;
                                 content.appendChild(somaticDiv);
                             }
                             if (cvData.oncogenicity && cvData.oncogenicity.description) {
                                 const oncDiv = document.createElement('div');
-                                const lastEval = cvData.oncogenicity.lastEvaluated ? ` (${fmtDate(cvData.oncogenicity.lastEvaluated)})` : '';
-                                oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${cvData.oncogenicity.description}${lastEval}`;
+                                oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${cvData.oncogenicity.description}`;
                                 content.appendChild(oncDiv);
                             }
                             if (cvData.somaticConditions && cvData.somaticConditions.length > 0) {
@@ -3352,7 +3349,6 @@ document.addEventListener('DOMContentLoaded', () => {
                                     // Combine tier + assertion type + clinical significance into one readable string.
                                     const impactParts = [sc.tier, sc.assertionType, sc.clinSig].filter(Boolean);
                                     if (impactParts.length) parts.push(impactParts.join(' — '));
-                                    if (sc.lastEvaluated) parts.push(fmtDate(sc.lastEvaluated));
                                     li.innerHTML = parts.join(': ');
                                     scUl.appendChild(li);
                                 });
