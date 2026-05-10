@@ -904,18 +904,13 @@ async function fetchFdaCompanionDiagnostics(gene) {
 
 async function fetchPubmedArticles(searchTerm, limit = 5) {
     if (!searchTerm) return { total: 0, articles: [] };
-    try {
-        const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
-        const endpoint = getConfiguredApiEndpoint('PUBMED_API_ENDPOINT', '/api/pubmed');
-        const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.pubmed);
-        if (!res.ok) return { total: 0, articles: [] };
-        const data = await res.json();
-        if (data?.error) return { total: 0, articles: [] };
-        return { total: data.total || 0, articles: data.articles || [] };
-    } catch (e) {
-        console.warn('PubMed fetch failed', e);
-        return { total: 0, articles: [] };
-    }
+    const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
+    const endpoint = getConfiguredApiEndpoint('PUBMED_API_ENDPOINT', '/api/pubmed');
+    const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.pubmed);
+    if (!res.ok) throw new Error(`PubMed proxy error: ${res.status}`);
+    const data = await res.json();
+    if (data?.error) throw new Error(data.error);
+    return { total: data.total || 0, articles: data.articles || [] };
 }
 
 async function fetchMyVariant(variant) {
@@ -3389,6 +3384,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                     } catch (e) {
                         console.warn('ClinVar regional query failed', e);
+                        const errNote = document.createElement('div');
+                        errNote.style.cssText = 'font-size:0.82rem;color:#9ca3af;margin-top:4px;';
+                        errNote.textContent = 'Region data unavailable.';
+                        content.appendChild(errNote);
                     }
                 }
                 // Details: list RCV entries if more than one
