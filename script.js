@@ -5038,7 +5038,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const ctSearchGene = firstGene;
                     const ctBaseUrl = ctSearchGene
-                        ? `https://clinicaltrials.gov/search?term=${encodeURIComponent(ctSearchGene)}${tumorType ? `+${encodeURIComponent(tumorType)}` : ''}&recrs=b&type=Intr&phase=1&phase=2&phase=3&country=United+States`
+                        ? `https://clinicaltrials.gov/search?query=${encodeURIComponent([ctSearchGene, tumorType].filter(Boolean).join(' '))}&recrs=b&type=Intr`
                         : 'https://clinicaltrials.gov/';
 
                     const ctLinkEl = document.createElement('a');

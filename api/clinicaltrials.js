@@ -90,7 +90,7 @@ export default async function handler(req, res) {
 
     // Use only query.term + pageSize — aggFilters and filter.overallStatus cause 400s
     // with certain parameter combinations. All filtering is done server-side below.
-    const url = `${CT_API_BASE}?query.term=${encodeURIComponent(searchTerm)}&pageSize=200`;
+    const url = `${CT_API_BASE}?query.term=${encodeURIComponent(searchTerm)}&pageSize=1000`;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 14000);
