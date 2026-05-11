@@ -415,3 +415,124 @@ footer a:hover {
         grid-template-columns: 1fr;
     }
 }
+
+/* Optional AI review panel */
+.ai-review-card {
+    grid-column: 1 / -1;
+    border-color: #c7d2fe;
+    background: linear-gradient(180deg, #ffffff 0%, #f8faff 100%);
+}
+
+.ai-review-intro,
+.ai-review-summary,
+.ai-review-rationale {
+    margin: 0 0 0.75rem;
+    line-height: 1.45;
+}
+
+.ai-review-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+}
+
+.ai-review-controls label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #374151;
+}
+
+.ai-review-controls select {
+    min-width: min(100%, 320px);
+    padding: 0.45rem 0.55rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    font-size: 0.9rem;
+}
+
+.ai-review-controls button {
+    padding: 0.5rem 0.85rem;
+    border: none;
+    border-radius: 4px;
+    background: #4f46e5;
+    color: #fff;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.ai-review-controls button:disabled {
+    cursor: wait;
+    opacity: 0.7;
+}
+
+.ai-review-output {
+    margin-top: 0.75rem;
+}
+
+.ai-review-disclaimer,
+.ai-review-loading,
+.ai-review-error,
+.ai-review-empty {
+    padding: 0.55rem 0.65rem;
+    border-radius: 4px;
+    font-size: 0.82rem;
+    line-height: 1.4;
+}
+
+.ai-review-disclaimer {
+    margin-bottom: 0.75rem;
+    background: #fffbeb;
+    color: #92400e;
+    border: 1px solid #fde68a;
+}
+
+.ai-review-loading,
+.ai-review-empty {
+    background: #f8fafc;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+}
+
+.ai-review-error {
+    background: #fef2f2;
+    color: #991b1b;
+    border: 1px solid #fecaca;
+}
+
+.ai-review-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.ai-review-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.35rem 0.55rem;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3730a3;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.ai-review-output h4 {
+    margin: 0.85rem 0 0.35rem;
+    font-size: 0.95rem;
+    color: #1f2937;
+}
+
+.ai-review-list {
+    margin: 0.25rem 0 0.75rem 1.25rem;
+    padding: 0;
+}
+
+.ai-review-list li {
+    margin-bottom: 0.35rem;
+    line-height: 1.4;
+}
