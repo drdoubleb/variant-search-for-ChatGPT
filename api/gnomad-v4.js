@@ -6,9 +6,10 @@
 const GNOMAD_API = 'https://gnomad.broadinstitute.org/api';
 const ENSEMBL_REST = 'https://rest.ensembl.org';
 
+// Dataset hardcoded inline (not as a variable) to avoid DatasetId enum type issues.
 const VARIANT_QUERY = `
-query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
-  variant(variantId: $variantId, dataset: $dataset) {
+query GnomadVariant($variantId: String!) {
+  variant(variantId: $variantId, dataset: gnomad_r4) {
     variant_id
     chrom
     pos
@@ -93,11 +94,13 @@ export default async function handler(req, res) {
             headers: {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
-                'User-Agent': 'variant-search/1.0',
+                'Origin': 'https://gnomad.broadinstitute.org',
+                'Referer': 'https://gnomad.broadinstitute.org/',
+                'User-Agent': 'Mozilla/5.0 (compatible; variant-search/1.0)',
             },
             body: JSON.stringify({
                 query: VARIANT_QUERY,
-                variables: { variantId, dataset: 'gnomad_r4' },
+                variables: { variantId },
             }),
             signal: controller.signal,
         });
