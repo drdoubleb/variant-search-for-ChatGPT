@@ -55,3 +55,33 @@ Pass `debug: true` in the POST body to receive:
 - normalized protein query value used for matching
 - dataset fetch/download attempt log (`dataset_attempts`)
 - sample protein values parsed from rows
+
+## Optional OpenRouter AI review
+
+This repo includes an optional AI interpretation endpoint at `api/ai-review.js`. The webpage adds a bottom "Optional AI Review" card after a variant lookup. The card does not send data automatically; users choose a model and click **Run AI review** to send the retrieved annotation, transcript, FDA companion-diagnostic, and clinical-trial context to the backend proxy.
+
+### Endpoint
+
+- `POST /api/ai-review`
+- Requires the Vercel environment variable `OPENROUTER_API_KEY`.
+- JSON payload:
+
+```json
+{
+  "model": "openai/gpt-4.1-mini",
+  "context": {
+    "submitted_variant": "BRAF V600E",
+    "tumor_type": "melanoma",
+    "gene": "BRAF"
+  }
+}
+```
+
+The endpoint prompts OpenRouter for strict JSON containing pathogenicity, AMP tier, FDA-approved therapies, clinical trials, a short interpretation summary, and limitations. AI output is intended for research and education only and must be verified against current FDA labeling, guidelines, curated databases, and trial eligibility criteria before clinical use.
+
+The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV/nearby-variant results, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
+
+
+## SpliceAI Lookup proxy
+
+The SpliceAI card uses `api/spliceai.js` as a lightweight proxy to the Broad Institute SpliceAI Lookup API. The proxy accepts variants in `chr-pos-ref-alt` format and forwards interactive-use requests with hg, distance, mask, and Gencode (`bc`) parameters. Returned scores are displayed in the SpliceAI card and included in the AI review payload under `supplemental_card_data.spliceai_lookup`.
