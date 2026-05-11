@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Variant Search (Beta)</title>
     <!-- Append a version query parameter to force browsers to reload the updated stylesheet -->
-    <link rel="stylesheet" href="style.css?v=20260511-1" />
+    <link rel="stylesheet" href="style.css?v=20260511-2" />
     <!-- Include a simple Google font for nicer typography -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
 </head>
@@ -111,6 +111,9 @@
         if (typeof window.CLINICAL_TRIALS_API_ENDPOINT === 'undefined') {
             window.CLINICAL_TRIALS_API_ENDPOINT = `${window.BACKEND_API_BASE_URL}/api/clinicaltrials`;
         }
+        if (typeof window.AI_REVIEW_API_ENDPOINT === 'undefined') {
+            window.AI_REVIEW_API_ENDPOINT = `${window.BACKEND_API_BASE_URL}/api/ai-review`;
+        }
     </script>
     <!-- Cache-busting query parameter to ensure browsers fetch the latest script.
          Increment the version whenever script.js changes to avoid caching issues. -->
@@ -126,6 +129,6 @@
     <!-- Bump version to bust cache after fixing gene extraction and g.-variant selection for intronic variants -->
     <!-- Bump version to bust cache after adding Ensembl output and improved cDNA candidate matching -->
     <!-- Bump version to ensure browsers load the latest script when delins handling is updated -->
-    <script src="script.js?v=20260511-2"></script>
+    <script src="script.js?v=20260511-4"></script>
 </body>
 </html>
