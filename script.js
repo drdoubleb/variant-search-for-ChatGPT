@@ -61,7 +61,8 @@ const API_TIMEOUT_MS = {
     civic: 8000,
     pubmed: 25000,
     fda: 8000,
-    gnomadV4: 10000
+    gnomadV4: 10000,
+    clinicalTrials: 20000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -933,6 +934,23 @@ async function fetchPubmedArticles(searchTerm, limit = 5) {
     return { total: data.total || 0, articles: data.articles || [] };
 }
 
+async function fetchClinicalTrials(gene, tumorType) {
+    if (!gene) return { total: 0, studies: [] };
+    const params = new URLSearchParams({ gene });
+    if (tumorType) params.set('tumorType', tumorType);
+    const endpoint = getConfiguredApiEndpoint('CLINICAL_TRIALS_API_ENDPOINT', '/api/clinicaltrials');
+    try {
+        const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.clinicalTrials);
+        if (!res.ok) return { total: 0, studies: [] };
+        const data = await res.json();
+        if (data?.error) { console.warn('ClinicalTrials.gov proxy error:', data.error); return { total: 0, studies: [] }; }
+        return { total: data.total || 0, studies: data.studies || [], searchTerm: data.searchTerm || gene };
+    } catch (e) {
+        console.warn('fetchClinicalTrials failed', e);
+        return { total: 0, studies: [] };
+    }
+}
+
 async function fetchMyVariant(variant) {
     const encoded = encodeURIComponent(variant);
     const url = `https://myvariant.info/v1/variant/${encoded}`;
@@ -1742,6 +1760,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const form = document.getElementById('variantForm');
     const input = document.getElementById('variantInput');
+    const tumorTypeInput = document.getElementById('tumorTypeInput');
     const statusEl = document.getElementById('status');
     const resultSection = document.getElementById('resultSection');
     const summaryTable = document.getElementById('summaryTable');
@@ -1801,6 +1820,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // to standard HGVS-like strings. This heuristic uppercases gene symbols
         // and prepends "p." to protein variants when missing.
         const rawInput = input.value.trim();
+        const tumorType = tumorTypeInput ? tumorTypeInput.value.trim() : '';
         // Update the URL with the raw submitted value so inbound/outbound links can
         // preserve flexible user-entered formats (HGVS g./c./p., space-separated tokens, etc.).
         syncVariantInUrl(rawInput);
@@ -5000,6 +5020,126 @@ document.addEventListener('DOMContentLoaded', () => {
                             fdaResultsDiv.appendChild(note);
                         }).catch(() => {
                             fdaResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">FDA drug data unavailable.</div>';
+                        });
+                    }
+                }
+
+                // Card: Clinical Trials
+                {
+                    const CT_PREVIEW = 5;
+                    const ctCard = document.createElement('div');
+                    ctCard.className = 'card';
+                    const ctTitle = document.createElement('h3');
+                    ctTitle.textContent = 'Clinical Trials';
+                    applyCardTheme(ctCard, 'Clinical Trials');
+                    ctCard.appendChild(ctTitle);
+                    const ctContent = document.createElement('div');
+                    ctContent.className = 'card-content';
+
+                    const ctSearchGene = firstGene;
+                    const ctBaseUrl = ctSearchGene
+                        ? `https://clinicaltrials.gov/search?term=${encodeURIComponent(ctSearchGene)}${tumorType ? `+${encodeURIComponent(tumorType)}` : ''}&recrs=b&type=Intr&phase=1&phase=2&phase=3&country=United+States`
+                        : 'https://clinicaltrials.gov/';
+
+                    const ctLinkEl = document.createElement('a');
+                    ctLinkEl.href = ctBaseUrl;
+                    ctLinkEl.target = '_blank';
+                    ctLinkEl.rel = 'noopener noreferrer';
+                    ctLinkEl.textContent = 'Search ClinicalTrials.gov ↗';
+                    ctContent.appendChild(ctLinkEl);
+
+                    if (ctSearchGene) {
+                        const ctQueryLabel = document.createElement('div');
+                        ctQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+                        const queryParts = [ctSearchGene, tumorType].filter(Boolean);
+                        ctQueryLabel.textContent = `Query: "${queryParts.join(' + ')}" · Interventional · Recruiting · Phase 2+ · US`;
+                        ctContent.appendChild(ctQueryLabel);
+                    }
+
+                    const ctResultsDiv = document.createElement('div');
+                    if (ctSearchGene) {
+                        const ctSpinner = document.createElement('div');
+                        ctSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+                        ctSpinner.textContent = 'Loading clinical trials…';
+                        ctResultsDiv.appendChild(ctSpinner);
+                    }
+                    ctContent.appendChild(ctResultsDiv);
+                    ctCard.appendChild(ctContent);
+                    cardsContainer.appendChild(ctCard);
+
+                    if (ctSearchGene) {
+                        fetchClinicalTrials(ctSearchGene, tumorType).then(({ total, studies }) => {
+                            ctResultsDiv.innerHTML = '';
+                            if (total === 0 || studies.length === 0) {
+                                ctResultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No recruiting Phase 2+ interventional trials found in the US.</div>';
+                                return;
+                            }
+                            const countEl = document.createElement('div');
+                            countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
+                            countEl.textContent = `${total} recruiting trial${total !== 1 ? 's' : ''} found`;
+                            ctResultsDiv.appendChild(countEl);
+
+                            const buildTrialEl = (trial) => {
+                                const el = document.createElement('div');
+                                el.style.cssText = 'margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #ccfbf1;font-size:0.82rem;';
+
+                                const titleLine = document.createElement('div');
+                                if (trial.url) {
+                                    const link = document.createElement('a');
+                                    link.href = trial.url;
+                                    link.target = '_blank';
+                                    link.rel = 'noopener noreferrer';
+                                    link.style.fontWeight = '600';
+                                    link.textContent = trial.title || trial.nctId;
+                                    titleLine.appendChild(link);
+                                } else {
+                                    titleLine.style.fontWeight = '600';
+                                    titleLine.textContent = trial.title || trial.nctId;
+                                }
+                                el.appendChild(titleLine);
+
+                                const meta = document.createElement('div');
+                                meta.style.cssText = 'color:#6b7280;margin-top:3px;';
+                                const phaseParts = Array.isArray(trial.phases) && trial.phases.length
+                                    ? trial.phases.map(p => String(p).replace('PHASE', 'Phase ')).join('/')
+                                    : 'Phase N/A';
+                                const drugNames = (trial.interventions || [])
+                                    .filter(i => i.type === 'DRUG' || i.type === 'BIOLOGICAL' || i.type === 'COMBINATION_PRODUCT')
+                                    .map(i => i.name)
+                                    .filter(Boolean)
+                                    .slice(0, 4);
+
+                                const metaParts = [
+                                    trial.nctId,
+                                    phaseParts,
+                                    drugNames.length ? drugNames.join(', ') : null,
+                                    trial.usLocationCount ? `${trial.usLocationCount} US site${trial.usLocationCount !== 1 ? 's' : ''}` : null
+                                ].filter(Boolean);
+                                meta.textContent = metaParts.join(' · ');
+                                el.appendChild(meta);
+                                return el;
+                            };
+
+                            const previewStudies = studies.slice(0, CT_PREVIEW);
+                            previewStudies.forEach(trial => ctResultsDiv.appendChild(buildTrialEl(trial)));
+
+                            if (studies.length > CT_PREVIEW) {
+                                const moreDetails = document.createElement('details');
+                                moreDetails.style.cssText = 'margin-top:4px;';
+                                const moreSummary = document.createElement('summary');
+                                moreSummary.style.cssText = 'font-size:0.82rem;color:#0f766e;cursor:pointer;padding:4px 2px;list-style:revert;';
+                                moreSummary.textContent = `Show ${studies.length - CT_PREVIEW} more…`;
+                                moreDetails.appendChild(moreSummary);
+                                studies.slice(CT_PREVIEW).forEach(trial => moreDetails.appendChild(buildTrialEl(trial)));
+                                ctResultsDiv.appendChild(moreDetails);
+                            }
+
+                            const ctNote = document.createElement('div');
+                            ctNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+                            ctNote.textContent = 'Source: ClinicalTrials.gov. Eligibility criteria not evaluated — verify before clinical use.';
+                            ctResultsDiv.appendChild(ctNote);
+                        }).catch(() => {
+                            ctResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">Clinical trials data unavailable.</div>';
                         });
                     }
                 }

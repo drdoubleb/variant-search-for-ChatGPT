@@ -370,6 +370,40 @@ footer a:hover {
     border-bottom-color: #fca5a5;
 }
 
+.card[data-card="clinical-trials"] {
+    border-color: #2dd4bf;
+}
+.card[data-card="clinical-trials"] h3 {
+    background-color: #ccfbf1;
+    border-bottom-color: #2dd4bf;
+}
+
+/* Tumor type input row */
+.tumor-type-row {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.tumor-type-row label {
+    white-space: nowrap;
+    font-size: 0.9rem;
+    color: #4b5563;
+    font-weight: 600;
+}
+.tumor-type-row .optional-label {
+    font-weight: 400;
+    font-style: italic;
+    color: #9ca3af;
+    font-size: 0.82rem;
+}
+.tumor-type-row input[type="text"] {
+    flex: 1 1 220px;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.9rem;
+}
+
 @media (max-width: 980px) {
     .cards-container {
         grid-template-columns: repeat(2, minmax(0, 1fr));

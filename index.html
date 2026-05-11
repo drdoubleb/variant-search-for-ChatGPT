@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Variant Search (Beta)</title>
     <!-- Append a version query parameter to force browsers to reload the updated stylesheet -->
-    <link rel="stylesheet" href="style.css?v=20260308" />
+    <link rel="stylesheet" href="style.css?v=20260511-1" />
     <!-- Include a simple Google font for nicer typography -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
 </head>
@@ -19,6 +19,10 @@
         <form id="variantForm">
             <input type="text" id="variantInput" placeholder="e.g. chr7:g.140453136A>T or NM_001256849.2:c.76A>G or AGT:p.Met259Ser" />
             <button type="submit">Lookup</button>
+            <div class="tumor-type-row">
+                <label for="tumorTypeInput">Tumor type <span class="optional-label">(optional)</span></label>
+                <input type="text" id="tumorTypeInput" placeholder="e.g. melanoma, NSCLC, colorectal cancer" autocomplete="off" />
+            </div>
         </form>
         <div id="status"></div>
         <section id="resultSection" class="hidden">
@@ -104,6 +108,9 @@
         if (typeof window.PUBMED_API_ENDPOINT === 'undefined') {
             window.PUBMED_API_ENDPOINT = `${window.BACKEND_API_BASE_URL}/api/pubmed`;
         }
+        if (typeof window.CLINICAL_TRIALS_API_ENDPOINT === 'undefined') {
+            window.CLINICAL_TRIALS_API_ENDPOINT = `${window.BACKEND_API_BASE_URL}/api/clinicaltrials`;
+        }
     </script>
     <!-- Cache-busting query parameter to ensure browsers fetch the latest script.
          Increment the version whenever script.js changes to avoid caching issues. -->
@@ -119,6 +126,6 @@
     <!-- Bump version to bust cache after fixing gene extraction and g.-variant selection for intronic variants -->
     <!-- Bump version to bust cache after adding Ensembl output and improved cDNA candidate matching -->
     <!-- Bump version to ensure browsers load the latest script when delins handling is updated -->
-    <script src="script.js?v=20260506-2"></script>
+    <script src="script.js?v=20260511-1"></script>
 </body>
 </html>
