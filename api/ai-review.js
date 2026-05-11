@@ -58,7 +58,7 @@ function buildPrompt(context) {
         '- FDA therapies should be FDA-approved therapies relevant to the gene/variant/tumor context when supported; otherwise return an empty array and explain in summary/limitations.',
         '- Clinical trials should prioritize supplied recruiting Phase 2+ interventional US trials, if present, and explain relevance cautiously.',
         'Context JSON:',
-        clampString(context, 60000)
+        clampString(context, 120000)
     ].join('\n\n');
 }
 

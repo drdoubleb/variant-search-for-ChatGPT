@@ -2703,6 +2703,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Build detailed sections
             let detailsData = buildDetailsData(annotation, rawInput, gVariant);
             const detailsContainer = document.getElementById('detailsContainer');
+            const aiReviewExtras = {};
 
             // Attempt to fetch extended COSMIC data from a custom API if configured.
             const COSMIC_ENDPOINT = window.COSMIC_API_ENDPOINT || null;
@@ -2759,6 +2760,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
                             cosmicItems['Site Counts'] = { html: `<ul>${siteRows.join('')}</ul>` };
                         }
+                        aiReviewExtras.cosmic_extended = { summary: cosmicItems, raw: cosmicData, meta };
                         detailsData.push({ title: 'COSMIC (Extended)', items: cosmicItems });
                     }
                 } catch (cosmicErr) {
@@ -3489,6 +3491,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (variantId && /^\d+$/.test(variantId)) {
                     try {
                         const cvData = await fetchClinvarVariant(variantId);
+                        aiReviewExtras.clinvar_variant_record = cvData;
                         if (cvData) {
                             if (cvData.somatic && cvData.somatic.description) {
                                 const somaticDiv = document.createElement('div');
@@ -3547,6 +3550,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     content.appendChild(regionLink);
                     try {
                         const nearby = await fetchClinvarRegionVariants(chr, posNum, 10);
+                        aiReviewExtras.nearby_clinvar_variants = nearby;
                         if (nearby.length > 0) {
                             const nearbyTitle = document.createElement('div');
                             nearbyTitle.style.cssText = 'font-size:0.86rem;font-weight:600;margin-top:0.5rem;';
@@ -3815,6 +3819,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 if (civicGene) {
                     fetchCivicApiData(civicGene, civicProtein).then((civicApiData) => {
+                        aiReviewExtras.civic_api = civicApiData;
                         civicApiDiv.innerHTML = '';
                         if (!civicApiData) {
                             civicApiDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">CIViC API not accessible from browser — use the links above to search CIViC directly.</div>';
@@ -4130,6 +4135,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${msg}</div>`;
                     };
                     fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
+                        aiReviewExtras.gnomad_v4 = result;
                         if (!result) { showV4Msg('gnomAD v4.1 unavailable.'); return; }
                         const { status, data: v4data, grch38Id, message, detail } = result;
                         if (status === 'liftover_failed') {
@@ -4520,6 +4526,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         genomic: tp53Genomic || '',
                         debug: true
                     });
+                    aiReviewExtras.tp53_mutation_database = tp53Data;
                     if (tp53Data && typeof tp53Data === 'object') {
                         const best = tp53Data.matches && tp53Data.matches[0];
                         const path = tp53Data.pathogenicity || (best ? best : null);
@@ -4804,6 +4811,68 @@ document.addEventListener('DOMContentLoaded', () => {
             let aiReviewCdna = '';
             let aiReviewProtein = '';
 
+            const getAiReviewVariantCoordinates = () => {
+                const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+                const vcfData = annotation && annotation.vcf;
+                if (tuple) {
+                    return {
+                        chrom: tuple.chrom.replace(/^chr/i, ''),
+                        pos37: tuple.pos,
+                        ref: tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null,
+                        alt: tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null
+                    };
+                }
+                const hg19 = annotation?.hg19 || annotation?.dbsnp?.hg19;
+                const chrom = annotation?.chrom || annotation?.cadd?.chrom || annotation?.dbsnp?.chrom;
+                const ref = (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
+                const alt = (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
+                if (hg19?.start !== undefined && chrom) {
+                    return { chrom: String(chrom).replace(/^chr/i, ''), pos37: String(hg19.start), ref, alt };
+                }
+                return { chrom: null, pos37: null, ref, alt };
+            };
+
+            const normaliseAiReviewVariantText = (value) => {
+                if (!value) return '';
+                const raw = String(value).trim().replace(/<[^>]+>/g, '');
+                const first = raw.split(',')[0].trim();
+                return first.includes(':') ? first.split(':').slice(1).join(':').trim() : first;
+            };
+
+            const fetchAiReviewSupplementalContext = async () => {
+                const coords = getAiReviewVariantCoordinates();
+                const clinvarVariantId = annotation?.clinvar?.variant_id && /^\d+$/.test(String(annotation.clinvar.variant_id))
+                    ? String(annotation.clinvar.variant_id)
+                    : '';
+                const pubmedTerm = [aiReviewGene, aiReviewSearchVariantTerm].filter(Boolean).join(' ');
+                const supplemental = { ...aiReviewExtras };
+                const tasks = [
+                    ['clinvar_variant_record', clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)],
+                    ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 10) : Promise.resolve([])],
+                    ['civic_api', aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)],
+                    ['gnomad_v4', coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt) : Promise.resolve(null)],
+                    ['pubmed', pubmedTerm ? fetchPubmedArticles(pubmedTerm, 5) : Promise.resolve({ total: 0, articles: [] })],
+                    ['tp53_mutation_database', isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
+                        gene: 'TP53',
+                        protein: normaliseAiReviewVariantText(aiReviewProtein),
+                        cdna: normaliseAiReviewVariantText(aiReviewCdna),
+                        genomic: String(gVariant || '').trim(),
+                        debug: true
+                    }) : Promise.resolve(null)]
+                ];
+                const settled = await Promise.allSettled(tasks.map(([, promise]) => promise));
+                settled.forEach((result, idx) => {
+                    const key = tasks[idx][0];
+                    supplemental[key] = result.status === 'fulfilled'
+                        ? result.value
+                        : { error: result.reason?.message || String(result.reason || 'Unavailable') };
+                });
+                supplemental.lookup_coordinates = coords;
+                supplemental.pubmed_query = pubmedTerm;
+                supplemental.clinvar_variant_id = clinvarVariantId;
+                return supplemental;
+            };
+
             // Card: Search
             {
                 // Derive a single-letter protein code for search queries. Prefer the protein change
@@ -4980,6 +5049,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     if (pmSearchTerm) {
                         fetchPubmedArticles(pmSearchTerm, PUBMED_LIMIT).then(({ total, articles }) => {
+                            aiReviewExtras.pubmed = { query: pmSearchTerm, total, articles };
                             pmResultsDiv.innerHTML = '';
                             if (total === 0 || articles.length === 0) {
                                 pmResultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No PubMed results found.</div>';
@@ -5330,9 +5400,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     runButton.textContent = 'Running…';
                     aiOutput.innerHTML = '<div class="ai-review-loading">Gathering FDA, trial, and annotation context for AI review…</div>';
                     try {
-                        const [fdaRecords, clinicalTrialData] = await Promise.all([
+                        const [fdaRecords, clinicalTrialData, supplementalContext] = await Promise.all([
                             aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
-                            aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] })
+                            aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
+                            fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
                         ]);
                         const aiContext = {
                             submitted_variant: rawInput,
@@ -5346,10 +5417,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             summary_rows: summaryRows,
                             details: detailsData,
                             transcripts: transcriptsList,
-                            myvariant_annotation: annotation,
-                            ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null,
                             fda_companion_diagnostics_records: fdaRecords,
-                            clinical_trials: clinicalTrialData
+                            clinical_trials: clinicalTrialData,
+                            supplemental_card_data: supplementalContext,
+                            myvariant_annotation: annotation,
+                            ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
                         };
                         const data = await fetchAiReview(aiContext, modelSelect.value);
                         renderAiReview(data.review, aiOutput);
