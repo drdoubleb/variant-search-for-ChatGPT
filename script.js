@@ -63,6 +63,7 @@ const API_TIMEOUT_MS = {
     fda: 8000,
     gnomadV4: 10000,
     clinicalTrials: 20000,
+    spliceai: 25000,
     aiReview: 60000
 };
 
@@ -1072,6 +1073,71 @@ function renderAiReview(review, targetEl) {
         targetEl.appendChild(limitationsTitle);
         appendListOrEmpty(targetEl, review.limitations, '');
     }
+}
+
+
+function buildSpliceAiApiVariant(rawInput, gVariant, annotation) {
+    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+    const vcfData = annotation && annotation.vcf;
+    if (!tuple) return '';
+    const chrom = tuple.chrom.replace(/^chr/i, 'chr');
+    const ref = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
+    const alt = tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
+    if (!chrom || !tuple.pos || !ref || !alt) return '';
+    return `${chrom}-${tuple.pos}-${ref}-${alt}`;
+}
+
+async function fetchSpliceAiPrediction(variant, options = {}) {
+    if (!variant) return null;
+    const params = new URLSearchParams({
+        variant,
+        hg: String(options.hg || '37'),
+        distance: String(options.distance || 500),
+        mask: String(options.mask ?? 0),
+        bc: String(options.bc || 'basic')
+    });
+    const endpoint = getConfiguredApiEndpoint('SPLICEAI_API_ENDPOINT', '/api/spliceai');
+    const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.spliceai);
+    if (!res.ok) throw new Error(`SpliceAI proxy error: ${res.status}`);
+    const payload = await res.json();
+    if (payload?.error) throw new Error(payload.error);
+    return payload;
+}
+
+function getSpliceAiScoreSummary(payload) {
+    const scores = Array.isArray(payload?.data?.scores) ? payload.data.scores : [];
+    const deltaKeys = ['DS_AG', 'DS_AL', 'DS_DG', 'DS_DL'];
+    const positionKeys = { DS_AG: 'DP_AG', DS_AL: 'DP_AL', DS_DG: 'DP_DG', DS_DL: 'DP_DL' };
+    let best = null;
+    const transcripts = scores.map((score) => {
+        const deltas = deltaKeys.map((key) => {
+            const value = Number(score[key]);
+            return {
+                key,
+                label: key.replace('DS_', ''),
+                value: Number.isFinite(value) ? value : null,
+                position: score[positionKeys[key]] ?? null
+            };
+        });
+        const transcriptBest = deltas.reduce((acc, item) => {
+            if (item.value === null) return acc;
+            if (!acc || item.value > acc.value) return item;
+            return acc;
+        }, null);
+        const row = {
+            transcript: score.t_id || score.NAME || '',
+            gene: score.gene_name || score.g_name || score.SYMBOL || '',
+            strand: score.t_strand || score.STRAND || '',
+            priority: score.t_priority || '',
+            best: transcriptBest,
+            deltas
+        };
+        if (transcriptBest && (!best || transcriptBest.value > best.value)) {
+            best = { ...transcriptBest, transcript: row.transcript, gene: row.gene, priority: row.priority };
+        }
+        return row;
+    });
+    return { best, transcripts };
 }
 
 async function fetchMyVariant(variant) {
@@ -4845,12 +4911,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     ? String(annotation.clinvar.variant_id)
                     : '';
                 const pubmedTerm = [aiReviewGene, aiReviewSearchVariantTerm].filter(Boolean).join(' ');
+                const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation);
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
                     ['clinvar_variant_record', clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)],
                     ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 10) : Promise.resolve([])],
                     ['civic_api', aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)],
                     ['gnomad_v4', coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt) : Promise.resolve(null)],
+                    ['spliceai_lookup', spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)],
                     ['pubmed', pubmedTerm ? fetchPubmedArticles(pubmedTerm, 5) : Promise.resolve({ total: 0, articles: [] })],
                     ['tp53_mutation_database', isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
                         gene: 'TP53',
@@ -4868,6 +4936,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         : { error: result.reason?.message || String(result.reason || 'Unavailable') };
                 });
                 supplemental.lookup_coordinates = coords;
+                supplemental.spliceai_variant = spliceApiVariant;
                 supplemental.pubmed_query = pubmedTerm;
                 supplemental.clinvar_variant_id = clinvarVariantId;
                 return supplemental;
@@ -4989,6 +5058,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const spliceLinkLine = document.createElement('span');
                 spliceLinkLine.innerHTML = `<a href="${spliceAiUrl}" target="_blank" rel="noopener noreferrer">Open SpliceAI lookup 🔍</a>`;
                 spliceContent.appendChild(spliceLinkLine);
+                const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation);
                 if (spliceVariantText) {
                     const spliceHint = document.createElement('span');
                     spliceHint.style.fontSize = '0.85rem';
@@ -5002,8 +5072,84 @@ document.addEventListener('DOMContentLoaded', () => {
                     spliceHint.textContent = 'No explicit chr/pos/ref/alt tuple detected; opening SpliceAI home page.';
                     spliceContent.appendChild(spliceHint);
                 }
+                const spliceResultsDiv = document.createElement('div');
+                spliceResultsDiv.style.cssText = 'margin-top:0.45rem;';
+                if (spliceApiVariant) {
+                    const loading = document.createElement('div');
+                    loading.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+                    loading.textContent = 'Loading SpliceAI scores…';
+                    spliceResultsDiv.appendChild(loading);
+                }
+                spliceContent.appendChild(spliceResultsDiv);
                 spliceCard.appendChild(spliceContent);
                 cardsContainer.appendChild(spliceCard);
+
+                if (spliceApiVariant) {
+                    fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }).then((spliceData) => {
+                        aiReviewExtras.spliceai_lookup = spliceData;
+                        spliceResultsDiv.innerHTML = '';
+                        const data = spliceData?.data || {};
+                        if (data.error) {
+                            const errEl = document.createElement('div');
+                            errEl.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
+                            errEl.textContent = `SpliceAI: ${data.error}`;
+                            spliceResultsDiv.appendChild(errEl);
+                            return;
+                        }
+                        const summary = getSpliceAiScoreSummary(spliceData);
+                        if (!summary.transcripts.length) {
+                            spliceResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">No SpliceAI scores returned.</div>';
+                            return;
+                        }
+                        if (summary.best) {
+                            const bestEl = document.createElement('div');
+                            bestEl.style.cssText = 'font-size:0.86rem;margin-bottom:4px;';
+                            const pct = (summary.best.value * 100).toFixed(1);
+                            bestEl.innerHTML = `<strong>Max delta score:</strong> ${summary.best.value.toFixed(3)} (${pct}%) ${summary.best.label}${summary.best.position !== null ? ` at ${summary.best.position}` : ''}${summary.best.transcript ? ` · ${summary.best.transcript}` : ''}`;
+                            spliceResultsDiv.appendChild(bestEl);
+                        }
+                        const table = document.createElement('table');
+                        table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.8rem;margin-top:4px;';
+                        const thead = document.createElement('thead');
+                        const hrow = document.createElement('tr');
+                        ['Transcript', 'Gene', 'AG', 'AL', 'DG', 'DL'].forEach((h) => {
+                            const th = document.createElement('th');
+                            th.textContent = h;
+                            th.style.cssText = 'text-align:left;padding:2px 5px;border-bottom:1px solid #e5e7eb;';
+                            hrow.appendChild(th);
+                        });
+                        thead.appendChild(hrow);
+                        table.appendChild(thead);
+                        const tbody = document.createElement('tbody');
+                        summary.transcripts.slice(0, 5).forEach((row) => {
+                            const tr = document.createElement('tr');
+                            const values = [
+                                row.transcript || '—',
+                                row.gene || '—',
+                                ...['AG', 'AL', 'DG', 'DL'].map((label) => {
+                                    const d = row.deltas.find(item => item.label === label);
+                                    return d && d.value !== null ? d.value.toFixed(3) : '—';
+                                })
+                            ];
+                            values.forEach((val) => {
+                                const td = document.createElement('td');
+                                td.textContent = val;
+                                td.style.cssText = 'padding:2px 5px;border-bottom:1px solid #f3f4f6;vertical-align:top;';
+                                tr.appendChild(td);
+                            });
+                            tbody.appendChild(tr);
+                        });
+                        table.appendChild(tbody);
+                        spliceResultsDiv.appendChild(table);
+                        const note = document.createElement('div');
+                        note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:4px;';
+                        note.textContent = 'Source: Broad SpliceAI Lookup API (hg19/GRCh37, distance 500, raw scores). Scores ≥0.2 may suggest splicing impact; verify before clinical use.';
+                        spliceResultsDiv.appendChild(note);
+                    }).catch((err) => {
+                        aiReviewExtras.spliceai_lookup = { error: err.message || 'SpliceAI unavailable', variant: spliceApiVariant };
+                        spliceResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">SpliceAI scores unavailable.</div>';
+                    });
+                }
 
                 // Card: PubMed
                 {
