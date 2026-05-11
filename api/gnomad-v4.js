@@ -6,12 +6,10 @@
 const GNOMAD_API = 'https://gnomad.broadinstitute.org/api';
 const ENSEMBL_REST = 'https://rest.ensembl.org';
 
-// Only genome is queried for gnomad_r4 (v4 is genome-sequencing-based).
-// Exome data (if present) uses a separate dataset. Populations are fetched
-// alongside the main AF so the population table can be populated.
+// gnomAD v4 variant query — reference_genome is required in v4 schema.
 const VARIANT_QUERY = `
-query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
-  variant(variantId: $variantId, dataset: $dataset) {
+query GnomadVariant($variantId: String!, $dataset: DatasetId!, $referenceGenome: ReferenceGenomeId!) {
+  variant(variantId: $variantId, dataset: $dataset, reference_genome: $referenceGenome) {
     variant_id
     chrom
     pos
@@ -28,16 +26,6 @@ query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
         af
       }
     }
-  }
-}
-`;
-
-// gnomAD v4 also has joint exome+genome data under a separate dataset ID.
-// Query it separately so we can display both if available.
-const EXOME_QUERY = `
-query GnomadVariantExome($variantId: String!, $dataset: DatasetId!) {
-  variant(variantId: $variantId, dataset: $dataset) {
-    variant_id
     exome {
       ac
       an
@@ -78,7 +66,7 @@ async function liftoverHg19ToHg38(chrom, pos) {
     }
 }
 
-async function gnomadPost(query, variables) {
+async function gnomadPost(operationName, query, variables) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
@@ -89,7 +77,7 @@ async function gnomadPost(query, variables) {
                 'Accept': 'application/json',
                 'User-Agent': 'GeneScape/1.0',
             },
-            body: JSON.stringify({ query, variables }),
+            body: JSON.stringify({ operationName, query, variables }),
             signal: controller.signal,
         });
         const text = await response.text();
@@ -120,55 +108,49 @@ export default async function handler(req, res) {
     const c = String(chrom).replace(/^chr/i, '');
     const variantId = `${c}-${pos38}-${ref.toUpperCase()}-${alt.toUpperCase()}`;
 
-    // Step 2: query gnomAD v4 for genome data (primary dataset)
-    const genomeFetch = await gnomadPost(VARIANT_QUERY, { variantId, dataset: 'gnomad_r4' });
-    if (!genomeFetch.ok) {
+    // Step 2: query gnomAD v4
+    const result = await gnomadPost('GnomadVariant', VARIANT_QUERY, {
+        variantId,
+        dataset: 'gnomad_r4',
+        referenceGenome: 'GRCh38',
+    });
+
+    if (!result.ok) {
         return res.status(200).json({
             status: 'api_error',
-            message: `gnomAD API HTTP ${genomeFetch.status}`,
+            message: `gnomAD API HTTP ${result.status}`,
             grch38Id: variantId,
-            detail: genomeFetch.text.slice(0, 400),
+            detail: result.text.slice(0, 500),
         });
     }
 
-    let genomeBody;
-    try { genomeBody = JSON.parse(genomeFetch.text); } catch { genomeBody = {}; }
+    let body;
+    try { body = JSON.parse(result.text); } catch { body = {}; }
 
-    if (genomeBody.errors && genomeBody.errors.length > 0) {
+    if (body.errors && body.errors.length > 0) {
         return res.status(200).json({
             status: 'api_error',
-            message: genomeBody.errors.map(e => e.message).join('; '),
+            message: body.errors.map(e => e.message).join('; '),
             grch38Id: variantId,
         });
     }
 
-    const genomeVariant = genomeBody.data && genomeBody.data.variant;
-    if (!genomeVariant) {
+    const variant = body.data && body.data.variant;
+    if (!variant) {
         return res.status(200).json({ status: 'not_found', grch38Id: variantId });
-    }
-
-    // Step 3: optionally query exome dataset (gnomad_r4_non_ukb has exomes;
-    // gnomad_r4 genome-only will return null exome — that's fine).
-    let exomeData = null;
-    const exomeFetch = await gnomadPost(EXOME_QUERY, { variantId, dataset: 'gnomad_r4' });
-    if (exomeFetch.ok) {
-        try {
-            const exomeBody = JSON.parse(exomeFetch.text);
-            exomeData = exomeBody.data && exomeBody.data.variant && exomeBody.data.variant.exome;
-        } catch { /* ignore */ }
     }
 
     return res.status(200).json({
         status: 'found',
         grch38Id: variantId,
         data: {
-            variant_id: genomeVariant.variant_id,
-            chrom: genomeVariant.chrom,
-            pos: genomeVariant.pos,
-            ref: genomeVariant.ref,
-            alt: genomeVariant.alt,
-            genome: genomeVariant.genome || null,
-            exome: exomeData || null,
+            variant_id: variant.variant_id,
+            chrom: variant.chrom,
+            pos: variant.pos,
+            ref: variant.ref,
+            alt: variant.alt,
+            genome: variant.genome || null,
+            exome: variant.exome || null,
         },
     });
 }

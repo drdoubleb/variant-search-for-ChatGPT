@@ -3988,7 +3988,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     };
                     fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
                         if (!result) { showV4Msg('gnomAD v4.1 unavailable.'); return; }
-                        const { status, data: v4data, grch38Id, message } = result;
+                        const { status, data: v4data, grch38Id, message, detail } = result;
                         if (status === 'liftover_failed') {
                             showV4Msg(`GRCh37→GRCh38 liftover failed for ${chromCoord}:${pos37Coord}.`);
                             return;
@@ -3998,7 +3998,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             return;
                         }
                         if (status === 'api_error' || status === 'error') {
-                            showV4Msg(`gnomAD v4.1 error${grch38Id ? ` (${grch38Id})` : ''}: ${message || 'unknown'}`);
+                            const detailSuffix = detail ? ` — ${detail}` : '';
+                            showV4Msg(`gnomAD v4.1 error${grch38Id ? ` (${grch38Id})` : ''}: ${message || 'unknown'}${detailSuffix}`);
                             return;
                         }
                         // status === 'found'
