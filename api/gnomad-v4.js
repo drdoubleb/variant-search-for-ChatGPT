@@ -6,10 +6,13 @@
 const GNOMAD_API = 'https://gnomad.broadinstitute.org/api';
 const ENSEMBL_REST = 'https://rest.ensembl.org';
 
-// gnomAD v4 variant query — reference_genome is required in v4 schema.
+// gnomAD v4 variant query.
+// Notes from schema introspection:
+//   - variant() does NOT accept a reference_genome argument
+//   - VariantPopulation does NOT have an af field; compute af = ac/an client-side
 const VARIANT_QUERY = `
-query GnomadVariant($variantId: String!, $dataset: DatasetId!, $referenceGenome: ReferenceGenomeId!) {
-  variant(variantId: $variantId, dataset: $dataset, reference_genome: $referenceGenome) {
+query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
+  variant(variantId: $variantId, dataset: $dataset) {
     variant_id
     chrom
     pos
@@ -23,7 +26,6 @@ query GnomadVariant($variantId: String!, $dataset: DatasetId!, $referenceGenome:
         id
         ac
         an
-        af
       }
     }
     exome {
@@ -34,7 +36,6 @@ query GnomadVariant($variantId: String!, $dataset: DatasetId!, $referenceGenome:
         id
         ac
         an
-        af
       }
     }
   }
@@ -112,7 +113,6 @@ export default async function handler(req, res) {
     const result = await gnomadPost('GnomadVariant', VARIANT_QUERY, {
         variantId,
         dataset: 'gnomad_r4',
-        referenceGenome: 'GRCh38',
     });
 
     if (!result.ok) {
