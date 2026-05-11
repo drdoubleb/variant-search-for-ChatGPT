@@ -4037,7 +4037,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (!src || !Array.isArray(src.populations)) return;
                             src.populations.forEach((p) => {
                                 if (p.af != null || p.ac != null) {
-                                    v4Pops.push({ dataset: label, id: (p.id || '').toUpperCase(), af: p.af, ac: p.ac, an: p.an });
+                                    // VariantPopulation has no af field — compute from ac/an
+                                    const popAf = (p.ac != null && p.an > 0) ? p.ac / p.an : null;
+                                    v4Pops.push({ dataset: label, id: (p.id || '').toUpperCase(), af: popAf, ac: p.ac, an: p.an });
                                 }
                             });
                         };
