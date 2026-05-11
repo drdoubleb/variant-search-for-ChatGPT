@@ -6,10 +6,12 @@
 const GNOMAD_API = 'https://gnomad.broadinstitute.org/api';
 const ENSEMBL_REST = 'https://rest.ensembl.org';
 
-// Dataset hardcoded inline (not as a variable) to avoid DatasetId enum type issues.
+// Only genome is queried for gnomad_r4 (v4 is genome-sequencing-based).
+// Exome data (if present) uses a separate dataset. Populations are fetched
+// alongside the main AF so the population table can be populated.
 const VARIANT_QUERY = `
-query GnomadVariant($variantId: String!) {
-  variant(variantId: $variantId, dataset: gnomad_r4) {
+query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
+  variant(variantId: $variantId, dataset: $dataset) {
     variant_id
     chrom
     pos
@@ -26,6 +28,16 @@ query GnomadVariant($variantId: String!) {
         af
       }
     }
+  }
+}
+`;
+
+// gnomAD v4 also has joint exome+genome data under a separate dataset ID.
+// Query it separately so we can display both if available.
+const EXOME_QUERY = `
+query GnomadVariantExome($variantId: String!, $dataset: DatasetId!) {
+  variant(variantId: $variantId, dataset: $dataset) {
+    variant_id
     exome {
       ac
       an
@@ -66,6 +78,29 @@ async function liftoverHg19ToHg38(chrom, pos) {
     }
 }
 
+async function gnomadPost(query, variables) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+        const response = await fetch(GNOMAD_API, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'User-Agent': 'GeneScape/1.0',
+            },
+            body: JSON.stringify({ query, variables }),
+            signal: controller.signal,
+        });
+        const text = await response.text();
+        return { ok: response.ok, status: response.status, text };
+    } catch (err) {
+        return { ok: false, status: 0, text: err.message || String(err) };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -85,57 +120,55 @@ export default async function handler(req, res) {
     const c = String(chrom).replace(/^chr/i, '');
     const variantId = `${c}-${pos38}-${ref.toUpperCase()}-${alt.toUpperCase()}`;
 
-    // Step 2: query gnomAD v4 GraphQL API
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
-    try {
-        const response = await fetch(GNOMAD_API, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'Origin': 'https://gnomad.broadinstitute.org',
-                'Referer': 'https://gnomad.broadinstitute.org/',
-                'User-Agent': 'Mozilla/5.0 (compatible; variant-search/1.0)',
-            },
-            body: JSON.stringify({
-                query: VARIANT_QUERY,
-                variables: { variantId },
-            }),
-            signal: controller.signal,
-        });
-
-        const text = await response.text();
-        let body;
-        try { body = JSON.parse(text); } catch { body = {}; }
-
-        if (!response.ok) {
-            return res.status(200).json({
-                status: 'api_error',
-                message: `gnomAD API HTTP ${response.status}`,
-                grch38Id: variantId,
-                detail: text.slice(0, 300),
-            });
-        }
-        if (body.errors && body.errors.length > 0) {
-            return res.status(200).json({
-                status: 'api_error',
-                message: body.errors.map(e => e.message).join('; '),
-                grch38Id: variantId,
-            });
-        }
-        const variant = body.data && body.data.variant;
-        if (!variant) {
-            return res.status(200).json({ status: 'not_found', grch38Id: variantId });
-        }
-        return res.status(200).json({ status: 'found', grch38Id: variantId, data: variant });
-    } catch (err) {
+    // Step 2: query gnomAD v4 for genome data (primary dataset)
+    const genomeFetch = await gnomadPost(VARIANT_QUERY, { variantId, dataset: 'gnomad_r4' });
+    if (!genomeFetch.ok) {
         return res.status(200).json({
-            status: 'error',
-            message: err.message || String(err),
+            status: 'api_error',
+            message: `gnomAD API HTTP ${genomeFetch.status}`,
+            grch38Id: variantId,
+            detail: genomeFetch.text.slice(0, 400),
+        });
+    }
+
+    let genomeBody;
+    try { genomeBody = JSON.parse(genomeFetch.text); } catch { genomeBody = {}; }
+
+    if (genomeBody.errors && genomeBody.errors.length > 0) {
+        return res.status(200).json({
+            status: 'api_error',
+            message: genomeBody.errors.map(e => e.message).join('; '),
             grch38Id: variantId,
         });
-    } finally {
-        clearTimeout(timer);
     }
+
+    const genomeVariant = genomeBody.data && genomeBody.data.variant;
+    if (!genomeVariant) {
+        return res.status(200).json({ status: 'not_found', grch38Id: variantId });
+    }
+
+    // Step 3: optionally query exome dataset (gnomad_r4_non_ukb has exomes;
+    // gnomad_r4 genome-only will return null exome — that's fine).
+    let exomeData = null;
+    const exomeFetch = await gnomadPost(EXOME_QUERY, { variantId, dataset: 'gnomad_r4' });
+    if (exomeFetch.ok) {
+        try {
+            const exomeBody = JSON.parse(exomeFetch.text);
+            exomeData = exomeBody.data && exomeBody.data.variant && exomeBody.data.variant.exome;
+        } catch { /* ignore */ }
+    }
+
+    return res.status(200).json({
+        status: 'found',
+        grch38Id: variantId,
+        data: {
+            variant_id: genomeVariant.variant_id,
+            chrom: genomeVariant.chrom,
+            pos: genomeVariant.pos,
+            ref: genomeVariant.ref,
+            alt: genomeVariant.alt,
+            genome: genomeVariant.genome || null,
+            exome: exomeData || null,
+        },
+    });
 }
