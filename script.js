@@ -62,7 +62,8 @@ const API_TIMEOUT_MS = {
     pubmed: 25000,
     fda: 8000,
     gnomadV4: 10000,
-    clinicalTrials: 20000
+    clinicalTrials: 20000,
+    aiReview: 60000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -948,6 +949,128 @@ async function fetchClinicalTrials(gene, tumorType) {
     } catch (e) {
         console.warn('fetchClinicalTrials failed', e);
         return { total: 0, studies: [] };
+    }
+}
+
+const OPENROUTER_MODEL_OPTIONS = [
+    'openai/gpt-4.1-mini',
+    'openai/gpt-oss-120b',
+    'openai/gpt-4o-mini',
+    'openai/gpt-5-mini',
+    'openai/gpt-5.4-nano',
+    'openai/gpt-5-nano',
+    'google/gemini-2.5-flash-lite',
+    'google/gemini-3-flash-preview',
+    'anthropic/claude-3-haiku',
+    'deepseek/deepseek-v3.2',
+    'x-ai/grok-4.1-fast',
+    'stepfun/step-3.5-flash:free',
+    'minimax/minimax-m2.7',
+    'nvidia/nemotron-3-super-120b-a12b:free'
+];
+
+async function fetchAiReview(context, model) {
+    const endpoint = getConfiguredApiEndpoint('AI_REVIEW_API_ENDPOINT', '/api/ai-review');
+    const res = await fetchWithTimeout(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, context })
+    }, API_TIMEOUT_MS.aiReview);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.error) {
+        const detail = data?.detail ? `: ${data.detail}` : '';
+        throw new Error(`${data?.error || `AI review request failed (${res.status})`}${detail}`);
+    }
+    return data;
+}
+
+function appendListOrEmpty(parent, values, emptyText) {
+    if (!Array.isArray(values) || values.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'ai-review-empty';
+        empty.textContent = emptyText;
+        parent.appendChild(empty);
+        return;
+    }
+    const ul = document.createElement('ul');
+    ul.className = 'ai-review-list';
+    values.forEach((value) => {
+        const li = document.createElement('li');
+        if (value && typeof value === 'object') {
+            const title = value.drug || value.nct_id || value.nctId || value.title || value.intervention || 'Item';
+            const bits = [
+                value.indication,
+                value.biomarker_context,
+                value.phase,
+                value.intervention,
+                value.relevance,
+                value.evidence
+            ].filter(Boolean);
+            if (value.url) {
+                const a = document.createElement('a');
+                a.href = value.url;
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+                a.textContent = title;
+                li.appendChild(a);
+            } else {
+                const strong = document.createElement('strong');
+                strong.textContent = title;
+                li.appendChild(strong);
+            }
+            if (bits.length) li.appendChild(document.createTextNode(` — ${bits.join(' · ')}`));
+        } else {
+            li.textContent = String(value);
+        }
+        ul.appendChild(li);
+    });
+    parent.appendChild(ul);
+}
+
+function renderAiReview(review, targetEl) {
+    targetEl.innerHTML = '';
+    const disclaimer = document.createElement('div');
+    disclaimer.className = 'ai-review-disclaimer';
+    disclaimer.textContent = 'AI-generated research summary only. Verify with current FDA labeling, guidelines, curated databases, and trial eligibility criteria before any clinical use.';
+    targetEl.appendChild(disclaimer);
+
+    const badges = document.createElement('div');
+    badges.className = 'ai-review-badges';
+    [['Pathogenicity', review?.pathogenicity], ['AMP Tier', review?.amp_tier]].forEach(([label, value]) => {
+        const badge = document.createElement('span');
+        badge.className = 'ai-review-badge';
+        badge.textContent = `${label}: ${value || 'Not provided'}`;
+        badges.appendChild(badge);
+    });
+    targetEl.appendChild(badges);
+
+    const summary = document.createElement('p');
+    summary.className = 'ai-review-summary';
+    summary.textContent = review?.summary || 'No AI summary returned.';
+    targetEl.appendChild(summary);
+
+    if (review?.amp_tier_rationale) {
+        const rationale = document.createElement('p');
+        rationale.className = 'ai-review-rationale';
+        rationale.textContent = `AMP tier rationale: ${review.amp_tier_rationale}`;
+        targetEl.appendChild(rationale);
+    }
+
+    const therapiesTitle = document.createElement('h4');
+    therapiesTitle.textContent = 'FDA-approved therapies';
+    targetEl.appendChild(therapiesTitle);
+    appendListOrEmpty(targetEl, review?.fda_approved_therapies, 'No FDA-approved therapies were returned by the AI review for this context.');
+
+    const trialsTitle = document.createElement('h4');
+    trialsTitle.textContent = 'Clinical trials';
+    targetEl.appendChild(trialsTitle);
+    appendListOrEmpty(targetEl, review?.clinical_trials, 'No clinical trials were returned by the AI review for this context.');
+
+    if (Array.isArray(review?.limitations) && review.limitations.length > 0) {
+        const limitationsTitle = document.createElement('h4');
+        limitationsTitle.textContent = 'Limitations';
+        targetEl.appendChild(limitationsTitle);
+        appendListOrEmpty(targetEl, review.limitations, '');
     }
 }
 
@@ -4676,6 +4799,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 tp53Card.appendChild(tp53Content);
                 cardsContainer.appendChild(tp53Card);
             }
+            let aiReviewGene = '';
+            let aiReviewSearchVariantTerm = '';
+            let aiReviewCdna = '';
+            let aiReviewProtein = '';
+
             // Card: Search
             {
                 // Derive a single-letter protein code for search queries. Prefer the protein change
@@ -4748,6 +4876,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 if ((!firstGene || isChromosomeLikeGeneSymbol(firstGene)) && geneHintGlobal) {
                     firstGene = geneHintGlobal;
                 }
+                aiReviewGene = firstGene;
+                aiReviewSearchVariantTerm = searchVariantTerm;
+                aiReviewCdna = cdnaSearch;
+                aiReviewProtein = protSearch || protSingle || protein;
                 const pathQuery = encodeURIComponent(`pathogenicity of ${firstGene} ${searchVariantTerm}`.trim());
                 const clinicalQuery = encodeURIComponent(`clinical significance of ${firstGene} ${searchVariantTerm}`.trim());
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
@@ -5144,6 +5276,96 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
             }
+            // Optional AI review card (manual trigger; sends current annotation context to OpenRouter via backend proxy).
+            {
+                const aiCard = document.createElement('div');
+                aiCard.className = 'card ai-review-card';
+                const aiTitle = document.createElement('h3');
+                aiTitle.textContent = 'Optional AI Review';
+                applyCardTheme(aiCard, 'Optional AI Review');
+                aiCard.appendChild(aiTitle);
+
+                const aiContent = document.createElement('div');
+                aiContent.className = 'card-content ai-review-content';
+
+                const aiIntro = document.createElement('p');
+                aiIntro.className = 'ai-review-intro';
+                aiIntro.textContent = 'Send the retrieved variant data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.';
+                aiContent.appendChild(aiIntro);
+
+                const controls = document.createElement('div');
+                controls.className = 'ai-review-controls';
+
+                const modelLabel = document.createElement('label');
+                modelLabel.textContent = 'Model';
+                modelLabel.setAttribute('for', 'aiReviewModelSelect');
+                controls.appendChild(modelLabel);
+
+                const modelSelect = document.createElement('select');
+                modelSelect.id = 'aiReviewModelSelect';
+                OPENROUTER_MODEL_OPTIONS.forEach((modelName) => {
+                    const opt = document.createElement('option');
+                    opt.value = modelName;
+                    opt.textContent = modelName;
+                    modelSelect.appendChild(opt);
+                });
+                controls.appendChild(modelSelect);
+
+                const runButton = document.createElement('button');
+                runButton.type = 'button';
+                runButton.textContent = 'Run AI review';
+                controls.appendChild(runButton);
+
+                aiContent.appendChild(controls);
+
+                const aiOutput = document.createElement('div');
+                aiOutput.className = 'ai-review-output';
+                aiContent.appendChild(aiOutput);
+                aiCard.appendChild(aiContent);
+                cardsContainer.appendChild(aiCard);
+
+                runButton.addEventListener('click', async () => {
+                    runButton.disabled = true;
+                    const previousText = runButton.textContent;
+                    runButton.textContent = 'Running…';
+                    aiOutput.innerHTML = '<div class="ai-review-loading">Gathering FDA, trial, and annotation context for AI review…</div>';
+                    try {
+                        const [fdaRecords, clinicalTrialData] = await Promise.all([
+                            aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
+                            aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] })
+                        ]);
+                        const aiContext = {
+                            submitted_variant: rawInput,
+                            normalized_genomic_variant: gVariant,
+                            tumor_type: tumorType,
+                            gene: aiReviewGene,
+                            genes: geneNames,
+                            selected_variant_term: aiReviewSearchVariantTerm,
+                            cdna: aiReviewCdna,
+                            protein: aiReviewProtein,
+                            summary_rows: summaryRows,
+                            details: detailsData,
+                            transcripts: transcriptsList,
+                            myvariant_annotation: annotation,
+                            ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null,
+                            fda_companion_diagnostics_records: fdaRecords,
+                            clinical_trials: clinicalTrialData
+                        };
+                        const data = await fetchAiReview(aiContext, modelSelect.value);
+                        renderAiReview(data.review, aiOutput);
+                    } catch (err) {
+                        aiOutput.innerHTML = '';
+                        const errorEl = document.createElement('div');
+                        errorEl.className = 'ai-review-error';
+                        errorEl.textContent = `AI review unavailable: ${err.message}`;
+                        aiOutput.appendChild(errorEl);
+                    } finally {
+                        runButton.disabled = false;
+                        runButton.textContent = previousText;
+                    }
+                });
+            }
+
             // Show cards and hide legacy tables for a cleaner view
             cardsContainer.classList.remove('hidden');
             summaryTable.classList.add('hidden');
