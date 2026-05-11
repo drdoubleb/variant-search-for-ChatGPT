@@ -4799,6 +4799,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 tp53Card.appendChild(tp53Content);
                 cardsContainer.appendChild(tp53Card);
             }
+            let aiReviewGene = '';
+            let aiReviewSearchVariantTerm = '';
+            let aiReviewCdna = '';
+            let aiReviewProtein = '';
+
             // Card: Search
             {
                 // Derive a single-letter protein code for search queries. Prefer the protein change
@@ -4871,6 +4876,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 if ((!firstGene || isChromosomeLikeGeneSymbol(firstGene)) && geneHintGlobal) {
                     firstGene = geneHintGlobal;
                 }
+                aiReviewGene = firstGene;
+                aiReviewSearchVariantTerm = searchVariantTerm;
+                aiReviewCdna = cdnaSearch;
+                aiReviewProtein = protSearch || protSingle || protein;
                 const pathQuery = encodeURIComponent(`pathogenicity of ${firstGene} ${searchVariantTerm}`.trim());
                 const clinicalQuery = encodeURIComponent(`clinical significance of ${firstGene} ${searchVariantTerm}`.trim());
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
@@ -5322,18 +5331,18 @@ document.addEventListener('DOMContentLoaded', () => {
                     aiOutput.innerHTML = '<div class="ai-review-loading">Gathering FDA, trial, and annotation context for AI review…</div>';
                     try {
                         const [fdaRecords, clinicalTrialData] = await Promise.all([
-                            firstGene ? fetchFdaCompanionDiagnostics(firstGene).catch(() => []) : Promise.resolve([]),
-                            firstGene ? fetchClinicalTrials(firstGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] })
+                            aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
+                            aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] })
                         ]);
                         const aiContext = {
                             submitted_variant: rawInput,
                             normalized_genomic_variant: gVariant,
                             tumor_type: tumorType,
-                            gene: firstGene,
+                            gene: aiReviewGene,
                             genes: geneNames,
-                            selected_variant_term: searchVariantTerm,
-                            cdna: cdnaSearch,
-                            protein: protSearch || protSingle || protein,
+                            selected_variant_term: aiReviewSearchVariantTerm,
+                            cdna: aiReviewCdna,
+                            protein: aiReviewProtein,
                             summary_rows: summaryRows,
                             details: detailsData,
                             transcripts: transcriptsList,
