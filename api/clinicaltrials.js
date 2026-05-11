@@ -88,15 +88,9 @@ export default async function handler(req, res) {
 
     const searchTerm = safeTumorType ? `${safeGene} ${safeTumorType}` : safeGene;
 
-    const params = new URLSearchParams({
-        'query.term': searchTerm,
-        'filter.overallStatus': 'RECRUITING',
-        'aggFilters': 'phase:phase2,phase3,phase4,studyType:int',
-        'pageSize': '100',
-        'format': 'json',
-    });
-
-    const url = `${CT_API_BASE}?${params}`;
+    // Use only query.term + pageSize — aggFilters and filter.overallStatus cause 400s
+    // with certain parameter combinations. All filtering is done server-side below.
+    const url = `${CT_API_BASE}?query.term=${encodeURIComponent(searchTerm)}&pageSize=200`;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 14000);
@@ -116,20 +110,40 @@ export default async function handler(req, res) {
         const data = await response.json();
         const allStudies = data.studies || [];
 
-        // Filter: interventional, treatment purpose, phase 2+, has US location
+        // Word-boundary check so "BRAF" doesn't match "CRAFT" or eGFR contexts
+        const geneRegex = new RegExp(`\\b${safeGene}\\b`, 'i');
+
+        // Filter: gene present in text, interventional, treatment purpose, phase 2+, recruiting, has US location
         const filtered = allStudies.filter(study => {
             const proto = study.protocolSection || {};
             const designMod = proto.designModule || {};
             const studyType = String(designMod.studyType || '').toUpperCase();
             const primaryPurpose = String((designMod.designInfo || {}).primaryPurpose || '').toUpperCase();
             const phases = designMod.phases || [];
+            const overallStatus = String((proto.statusModule || {}).overallStatus || '').toUpperCase();
             const locations = (proto.contactsLocationsModule || {}).locations || [];
 
+            if (overallStatus !== 'RECRUITING') return false;
             if (studyType !== 'INTERVENTIONAL') return false;
             if (primaryPurpose && primaryPurpose !== 'TREATMENT') return false;
             if (!isPhase2Plus(phases)) return false;
             if (!hasUsLocation(locations)) return false;
-            return true;
+
+            // Verify gene appears in the study text (title, summary, eligibility, keywords)
+            const idMod = proto.identificationModule || {};
+            const descMod = proto.descriptionModule || {};
+            const eligMod = proto.eligibilityModule || {};
+            const condMod = proto.conditionsModule || {};
+            const haystack = [
+                idMod.briefTitle,
+                idMod.officialTitle,
+                descMod.briefSummary,
+                descMod.detailedDescription,
+                eligMod.eligibilityCriteria,
+                ...(condMod.conditions || []),
+                ...(condMod.keywords || [])
+            ].filter(Boolean).join(' ');
+            return geneRegex.test(haystack);
         });
 
         const studies = filtered.map(mapStudy);
