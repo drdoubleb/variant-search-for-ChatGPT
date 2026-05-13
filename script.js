@@ -301,6 +301,30 @@ function formatProteinDisplayWithSingleLetter(proteinHgvs) {
     return `${proteinText} (p.${single})`;
 }
 
+function normaliseProteinForCivicMatch(proteinChange) {
+    const proteinText = String(proteinChange || '').trim();
+    if (!proteinText) return '';
+    const proteinIndex = proteinText.toLowerCase().lastIndexOf('p.');
+    const proteinBody = proteinIndex === -1 ? proteinText : proteinText.slice(proteinIndex + 2);
+    const single = convertProteinBodyToSingle(proteinBody);
+    return String(single || proteinBody)
+        .replace(/^p\./i, '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9*_]/g, '');
+}
+
+function findBestCivicEntryForProtein(entries, proteinChange) {
+    if (!Array.isArray(entries) || entries.length === 0) return null;
+    const normalisedProtein = normaliseProteinForCivicMatch(proteinChange);
+    if (!normalisedProtein) return null;
+    return entries.find((entry) => {
+        const entryProtein = normaliseProteinForCivicMatch(entry?.protein_change);
+        return entryProtein && (entryProtein === normalisedProtein
+            || entryProtein.includes(normalisedProtein)
+            || normalisedProtein.includes(entryProtein));
+    }) || null;
+}
+
 function isTp53Gene(geneNames) {
     if (!geneNames) return false;
     return String(geneNames)
@@ -3715,7 +3739,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const civicGene = legacy?.gene?.name || (geneNames ? geneNames.split(',')[0].trim() : '');
                 const rawProtein = String(protein || '').replace(/<[^>]+>/g, '');
                 const firstProtein = rawProtein.split(',')[0].trim();
-                const civicProtein = legacy?.variant?.name || (firstProtein.includes(':') ? firstProtein.split(':').slice(1).join(':').trim() : firstProtein);
+                const annotationProtein = firstProtein.includes(':') ? firstProtein.split(':').slice(1).join(':').trim() : firstProtein;
+                const bestCivicEntry = findBestCivicEntryForProtein(entries, annotationProtein);
+                const civicProtein = legacy?.variant?.name || bestCivicEntry?.protein_change || annotationProtein;
 
                 // Variant link: use a known variant ID immediately if available. Otherwise, keep
                 // it hidden until the CIViC API callback resolves an exact variant page.
