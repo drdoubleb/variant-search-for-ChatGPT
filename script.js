@@ -3717,9 +3717,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 const firstProtein = rawProtein.split(',')[0].trim();
                 const civicProtein = legacy?.variant?.name || (firstProtein.includes(':') ? firstProtein.split(':').slice(1).join(':').trim() : firstProtein);
 
-                // Variant link: use known variant ID immediately if available; otherwise hide until the API callback resolves one.
+                // Variant link: use known variant ID immediately when available; otherwise fall back
+                // to a CIViC search for the gene + variant so the link remains useful even if the
+                // API callback cannot resolve a direct CIViC variant ID.
+                const civicVariantSearchTerm = legacy?.variant?.name || legacy?.name
+                    || entries.find((entry) => entry?.protein_change)?.protein_change
+                    || civicProtein;
                 const encodedCivicGene = encodeURIComponent(civicGene || '');
-                const encodedCivicProtein = encodeURIComponent(civicProtein || '');
+                const encodedCivicVariantQuery = encodeURIComponent([civicGene, civicVariantSearchTerm].filter(Boolean).join(' '));
                 const linksDiv = document.createElement('div');
                 linksDiv.style.marginBottom = '0.4rem';
                 let variantLinkEl = null;
@@ -3731,14 +3736,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (legacyVariantId) {
                         variantLinkEl.href = `https://civicdb.org/variants/${legacyVariantId}/summary`;
                     } else {
-                        variantLinkEl.href = '#';
-                        variantLinkEl.style.display = 'none';
+                        variantLinkEl.href = `https://civicdb.org/search?query=${encodedCivicVariantQuery}`;
+                        if (!civicVariantSearchTerm) variantLinkEl.style.display = 'none';
                     }
                     variantLinkEl.target = '_blank';
                     variantLinkEl.rel = 'noopener noreferrer';
                     variantLinkEl.textContent = 'View variant on CIViC';
                     linksDiv.appendChild(variantLinkEl);
-                    variantSepNode = document.createTextNode(legacyVariantId ? ' | ' : '');
+                    variantSepNode = document.createTextNode((legacyVariantId || civicVariantSearchTerm) ? ' | ' : '');
                     linksDiv.appendChild(variantSepNode);
                     geneLinkEl = document.createElement('a');
                     geneLinkEl.href = `https://civicdb.org/search?query=${encodedCivicGene}`;
@@ -3909,6 +3914,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (variantSepNode) variantSepNode.nodeValue = ' | ';
                             variantLinkEl.textContent = 'View variant on CIViC';
                         }
+
+                        const geneLevelHeading = document.createElement('div');
+                        geneLevelHeading.style.cssText = 'font-size:0.9rem;font-weight:600;margin:0.45rem 0 0.25rem;';
+                        geneLevelHeading.textContent = 'Gene-level data from CIViC:';
+                        civicApiDiv.appendChild(geneLevelHeading);
 
                         // Show top AMP assertion level prominently
                         if (assertions && assertions.length > 0) {
