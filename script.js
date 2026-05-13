@@ -3731,14 +3731,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (legacyVariantId) {
                         variantLinkEl.href = `https://civicdb.org/variants/${legacyVariantId}/summary`;
                     } else {
-                        variantLinkEl.href = '#';
-                        variantLinkEl.style.display = 'none';
+                        variantLinkEl.href = `https://civicdb.org/search?query=${encodedCivicVariantQuery}`;
+                        if (!civicVariantSearchTerm) variantLinkEl.style.display = 'none';
                     }
                     variantLinkEl.target = '_blank';
                     variantLinkEl.rel = 'noopener noreferrer';
                     variantLinkEl.textContent = 'View variant on CIViC';
                     linksDiv.appendChild(variantLinkEl);
-                    variantSepNode = document.createTextNode(legacyVariantId ? ' | ' : '');
+                    variantSepNode = document.createTextNode((legacyVariantId || civicVariantSearchTerm) ? ' | ' : '');
                     linksDiv.appendChild(variantSepNode);
                     geneLinkEl = document.createElement('a');
                     geneLinkEl.href = `https://civicdb.org/search?query=${encodedCivicGene}`;
