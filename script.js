@@ -3717,14 +3717,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const firstProtein = rawProtein.split(',')[0].trim();
                 const civicProtein = legacy?.variant?.name || (firstProtein.includes(':') ? firstProtein.split(':').slice(1).join(':').trim() : firstProtein);
 
-                // Variant link: use known variant ID immediately when available; otherwise fall back
-                // to a CIViC search for the gene + variant so the link remains useful even if the
-                // API callback cannot resolve a direct CIViC variant ID.
-                const civicVariantSearchTerm = legacy?.variant?.name || legacy?.name
-                    || entries.find((entry) => entry?.protein_change)?.protein_change
-                    || civicProtein;
+                // Variant link: use a known variant ID immediately if available. Otherwise, keep
+                // it hidden until the CIViC API callback resolves an exact variant page.
                 const encodedCivicGene = encodeURIComponent(civicGene || '');
-                const encodedCivicVariantQuery = encodeURIComponent([civicGene, civicVariantSearchTerm].filter(Boolean).join(' '));
                 const linksDiv = document.createElement('div');
                 linksDiv.style.marginBottom = '0.4rem';
                 let variantLinkEl = null;

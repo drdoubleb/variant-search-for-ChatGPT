@@ -75,13 +75,15 @@ async function lookupGeneId(safeGene) {
 
 // Step 2: fetch gene data
 async function fetchGeneById(geneId) {
+    const PAGE_SIZE = 100;
+    const MAX_VARIANTS = 500;
     const geneQuery = `
-        query CivicGeneById($id: Int!) {
+        query CivicGeneById($id: Int!, $first: Int!, $after: String) {
             gene(id: $id) {
                 id
                 name
                 description
-                variants(first: 100) {
+                variants(first: $first, after: $after) {
                     nodes {
                         id
                         name
@@ -102,17 +104,53 @@ async function fetchGeneById(geneId) {
                             }
                         }
                     }
+                    pageInfo {
+                        hasNextPage
+                        endCursor
+                    }
                     totalCount
                 }
             }
         }
     `;
 
-    const rA = await civicPost(geneQuery, { id: Number(geneId) });
+    let gene = null;
+    const variantNodes = [];
+    let after = null;
 
-    if (!rA.errors?.length) {
-        const gene = rA.data?.gene;
-        if (gene) return normaliseGene(gene);
+    while (variantNodes.length < MAX_VARIANTS) {
+        const first = Math.min(PAGE_SIZE, MAX_VARIANTS - variantNodes.length);
+        const rA = await civicPost(geneQuery, { id: Number(geneId), first, after });
+
+        if (rA.errors?.length) break;
+        const pageGene = rA.data?.gene;
+        if (!pageGene) break;
+
+        if (!gene) gene = pageGene;
+        const pageVariants = Array.isArray(pageGene.variants?.nodes) ? pageGene.variants.nodes : [];
+        variantNodes.push(...pageVariants);
+
+        const pageInfo = pageGene.variants?.pageInfo || {};
+        after = pageInfo.endCursor || null;
+        if (!pageInfo.hasNextPage || !after || pageVariants.length === 0) break;
+    }
+
+    if (gene) {
+        const seen = new Set();
+        const dedupedVariants = variantNodes.filter((variant) => {
+            const key = variant?.id || `${variant?.name || ''}:${seen.size}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        return normaliseGene({
+            ...gene,
+            variants: {
+                ...(gene.variants || {}),
+                nodes: dedupedVariants,
+                totalCount: gene.variants?.totalCount ?? dedupedVariants.length
+            }
+        });
     }
 
     const genesQuery = `
@@ -138,8 +176,8 @@ async function fetchGeneById(geneId) {
     const rB = await civicPost(genesQuery, { ids: [Number(geneId)] });
 
     if (!rB.errors?.length) {
-        const gene = rB.data?.genes?.nodes?.[0];
-        if (gene) return normaliseGene(gene);
+        const fallbackGene = rB.data?.genes?.nodes?.[0];
+        if (fallbackGene) return normaliseGene(fallbackGene);
     }
 
     return null;
