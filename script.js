@@ -3910,6 +3910,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             variantLinkEl.textContent = 'View variant on CIViC';
                         }
 
+                        const geneLevelHeading = document.createElement('div');
+                        geneLevelHeading.style.cssText = 'font-size:0.9rem;font-weight:600;margin:0.45rem 0 0.25rem;';
+                        geneLevelHeading.textContent = 'Gene-level data from CIViC:';
+                        civicApiDiv.appendChild(geneLevelHeading);
+
                         // Show top AMP assertion level prominently
                         if (assertions && assertions.length > 0) {
                             const topAssert = assertions[0];
