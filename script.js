@@ -3746,6 +3746,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Variant link: use a known variant ID immediately if available. Otherwise, keep
                 // it hidden until the CIViC API callback resolves an exact variant page.
                 const encodedCivicGene = encodeURIComponent(civicGene || '');
+                const civicVariantSearchTerm = civicProtein || '';
+                const encodedCivicVariantQuery = civicVariantSearchTerm
+                    ? `${encodedCivicGene}+${encodeURIComponent(civicVariantSearchTerm)}`
+                    : encodedCivicGene;
                 const linksDiv = document.createElement('div');
                 linksDiv.style.marginBottom = '0.4rem';
                 let variantLinkEl = null;
