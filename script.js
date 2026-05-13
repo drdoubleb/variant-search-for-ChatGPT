@@ -3717,9 +3717,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const firstProtein = rawProtein.split(',')[0].trim();
                 const civicProtein = legacy?.variant?.name || (firstProtein.includes(':') ? firstProtein.split(':').slice(1).join(':').trim() : firstProtein);
 
-                // Variant link: use known variant ID immediately if available; otherwise hide until the API callback resolves one.
+                // Variant link: use a known variant ID immediately if available. Otherwise, keep
+                // it hidden until the CIViC API callback resolves an exact variant page.
                 const encodedCivicGene = encodeURIComponent(civicGene || '');
-                const encodedCivicProtein = encodeURIComponent(civicProtein || '');
                 const linksDiv = document.createElement('div');
                 linksDiv.style.marginBottom = '0.4rem';
                 let variantLinkEl = null;
@@ -3909,6 +3909,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (variantSepNode) variantSepNode.nodeValue = ' | ';
                             variantLinkEl.textContent = 'View variant on CIViC';
                         }
+
+                        const geneLevelHeading = document.createElement('div');
+                        geneLevelHeading.style.cssText = 'font-size:0.9rem;font-weight:600;margin:0.45rem 0 0.25rem;';
+                        geneLevelHeading.textContent = 'Gene-level data from CIViC:';
+                        civicApiDiv.appendChild(geneLevelHeading);
 
                         // Show top AMP assertion level prominently
                         if (assertions && assertions.length > 0) {
