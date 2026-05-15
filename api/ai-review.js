@@ -13,10 +13,11 @@ const ALLOWED_MODELS = new Set([
     'openai/gpt-5-nano',
     'google/gemini-2.5-flash-lite',
     'google/gemini-3-flash-preview',
+    'google/gemini-3.1-flash-lite',
     'anthropic/claude-3-haiku',
-    'deepseek/deepseek-v3.2',
-    'x-ai/grok-4.1-fast',
-    'stepfun/step-3.5-flash:free',
+    'deepseek/deepseek-v4-flash',
+    'deepseek/deepseek-v4-pro',
+    'x-ai/grok-4.3',
     'minimax/minimax-m2.7',
     'nvidia/nemotron-3-super-120b-a12b:free'
 ]);
