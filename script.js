@@ -952,27 +952,46 @@ async function fetchFdaCompanionDiagnostics(gene) {
 
 async function fetchOpenFdaDrugLabels(gene) {
     if (!gene) return { total: 0, fetched: 0, excluded: 0, results: [] };
-    const url = `https://api.fda.gov/drug/label.json?search=indications_and_usage:%22${encodeURIComponent(gene)}%22&limit=100`;
-    try {
+    const LIMIT = 100;
+    const MAX_RECORDS = 1000;
+    const baseSearch = `indications_and_usage:%22${encodeURIComponent(gene)}%22`;
+
+    const fetchPage = async (skip) => {
+        const url = `https://api.fda.gov/drug/label.json?search=${baseSearch}&limit=${LIMIT}${skip ? `&skip=${skip}` : ''}`;
         const resp = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.openFda);
         if (!resp.ok) {
-            if (resp.status === 404) return { total: 0, fetched: 0, excluded: 0, results: [] };
+            if (resp.status === 404) return null;
             throw new Error(`openFDA API error: ${resp.status}`);
         }
-        const data = await resp.json();
-        const total = data?.meta?.results?.total || 0;
-        const raw = data?.results || [];
+        return resp.json();
+    };
+
+    try {
+        const firstData = await fetchPage(0);
+        if (!firstData) return { total: 0, fetched: 0, excluded: 0, results: [] };
+
+        const total = firstData?.meta?.results?.total || 0;
+        let raw = firstData?.results || [];
+
+        if (total > LIMIT) {
+            const pagesToFetch = Math.ceil(Math.min(total, MAX_RECORDS) / LIMIT);
+            for (let page = 1; page < pagesToFetch; page++) {
+                const data = await fetchPage(page * LIMIT);
+                if (data?.results) raw = raw.concat(data.results);
+            }
+        }
+
         const results = raw
             .filter(item => (item.indications_and_usage?.[0] || '').includes(gene))
             .map(item => ({
-            brand_name: item.openfda?.brand_name?.[0] || '',
-            generic_name: item.openfda?.generic_name?.[0] || '',
-            manufacturer: item.openfda?.manufacturer_name?.[0] || '',
-            route: (item.openfda?.route || []).join(', '),
-            application_number: item.openfda?.application_number?.[0] || '',
-            indications_and_usage: item.indications_and_usage?.[0] || '',
-            purpose: item.purpose?.[0] || '',
-        }));
+                brand_name: item.openfda?.brand_name?.[0] || '',
+                generic_name: item.openfda?.generic_name?.[0] || '',
+                manufacturer: item.openfda?.manufacturer_name?.[0] || '',
+                route: (item.openfda?.route || []).join(', '),
+                application_number: item.openfda?.application_number?.[0] || '',
+                indications_and_usage: item.indications_and_usage?.[0] || '',
+                purpose: item.purpose?.[0] || '',
+            }));
         return { total, fetched: raw.length, excluded: raw.length - results.length, results };
     } catch (e) {
         console.warn('openFDA fetch failed', e);
