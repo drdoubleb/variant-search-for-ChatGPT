@@ -768,7 +768,8 @@ function isBelowAxisVariant(variant) {
 }
 
 function parseProteinPos(text) {
-    const m = String(text || '').match(/\bp\.(?:[A-Za-z*?]{1,5})?(\d+)/i);
+    // Handle both p.Arg273His and p.(Arg273His) (predicted-effect parenthesised form)
+    const m = String(text || '').match(/\bp\.\(?(?:[A-Za-z*?]{1,5})?(\d+)/i);
     return m ? Number(m[1]) : null;
 }
 
