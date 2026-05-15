@@ -961,7 +961,9 @@ async function fetchOpenFdaDrugLabels(gene) {
         }
         const data = await resp.json();
         const total = data?.meta?.results?.total || 0;
-        const results = (data?.results || []).map(item => ({
+        const results = (data?.results || [])
+            .filter(item => (item.indications_and_usage?.[0] || '').includes(gene))
+            .map(item => ({
             brand_name: item.openfda?.brand_name?.[0] || '',
             generic_name: item.openfda?.generic_name?.[0] || '',
             manufacturer: item.openfda?.manufacturer_name?.[0] || '',
