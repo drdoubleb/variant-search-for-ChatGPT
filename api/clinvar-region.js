@@ -43,7 +43,7 @@ export default async function handler(req, res) {
 
     try {
         const term = `${c}[Chromosome] AND ${start}:${end}[Base Position for Assembly GRCh37]`;
-        const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=50&term=${encodeURIComponent(term)}${apiKey}`;
+        const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=500&term=${encodeURIComponent(term)}${apiKey}`;
         const searchData = await ncbiFetch(searchUrl);
         const ids = searchData?.esearchresult?.idlist || [];
 

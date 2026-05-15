@@ -956,14 +956,26 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
 
 // Build a protein-position lollipop plot from the same nearby ClinVar variants.
 // Protein positions are parsed from p. notation in each variant's title/name.
+// The axis range auto-scales to the actual spread of the data.
 // Returns null if no variants have parseable protein positions.
 function buildProteinLollipopPlot(variants, queryProteinPos) {
     const proteinVariants = variants.map(v => ({
         ...v,
         pos: parseProteinPos(getClinvarVariantText(v))
     }));
-    if (!proteinVariants.some(v => v.pos !== null)) return null;
-    return buildLollipopPlot(proteinVariants, queryProteinPos, false, { range: 30, axisLabel: 'p.' });
+    const withPos = proteinVariants.filter(v => v.pos !== null);
+    if (withPos.length === 0) return null;
+
+    // Round up to a tidy number so tick labels land on clean values.
+    const niceCeil = (n) => {
+        if (n <= 5) return 5;
+        const step = n <= 20 ? 5 : n <= 50 ? 10 : 25;
+        return Math.ceil(n / step) * step;
+    };
+    const maxDev = Math.max(...withPos.map(v => Math.abs(v.pos - queryProteinPos)));
+    const range = niceCeil(Math.max(5, maxDev + 2));
+
+    return buildLollipopPlot(proteinVariants, queryProteinPos, false, { range, axisLabel: 'p.' });
 }
 
 // Query CivicDB via the /api/civic serverless proxy (avoids browser CORS).
@@ -3760,10 +3772,10 @@ document.addEventListener('DOMContentLoaded', () => {
                                 : [];
                             const plotMinusStrand = snpEffAnns.some(a => a.strand === '-' || a.strand === -1);
 
-                            // Genomic (g.) lollipop plot
+                            // Genomic (g.) lollipop plot — display ±10 bp even though data covers ±30
                             const plotWrap = document.createElement('div');
                             plotWrap.style.cssText = 'margin:6px 0 4px;';
-                            plotWrap.appendChild(buildLollipopPlot(nearby, posNum, plotMinusStrand));
+                            plotWrap.appendChild(buildLollipopPlot(nearby, posNum, plotMinusStrand, { range: 10 }));
                             content.appendChild(plotWrap);
 
                             // Protein (p.) lollipop plot — shown when the query has a protein position
