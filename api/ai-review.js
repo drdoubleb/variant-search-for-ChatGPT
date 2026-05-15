@@ -30,16 +30,19 @@ function clampString(value, maxLength = 20000) {
 function buildPrompt(context) {
     const ampGuidelines = [
         'AMP/ASCO/CAP somatic variant tiering summary:',
-        'Tier I: variants with strong clinical significance, including FDA-approved therapy in the submitted tumor type or professional-guideline inclusion as diagnostic/prognostic/therapeutic biomarker.',
-        'Tier II: variants with potential clinical significance, including FDA-approved therapy in another tumor type, investigational therapies, clinical-trial eligibility, or smaller studies.',
-        'Tier III: variants of unknown clinical significance because evidence is limited, conflicting, or not clearly actionable.',
-        'Tier IV: benign or likely benign variants with no known clinical significance.'
+        'Tier IA: FDA-approved therapy in the submitted tumor type, or inclusion in professional guidelines as a diagnostic, prognostic, or therapeutic biomarker.',
+        'Tier IB: well-powered studies with consensus from experts in the field supporting clinical significance in the submitted tumor context.',
+        'Tier IIC: FDA-approved therapies in different tumor types, investigational therapies, or multiple small published studies with some expert consensus.',
+        'Tier IID: preclinical evidence, early clinical trials, or a few case reports without expert consensus.',
+        'Tier IIE (tentative): pathogenic/oncogenic variant with no currently established clinical relevance; this is an emerging/non-standard category and should be clearly disclaimed if used.',
+        'Tier III: variant of unknown clinical significance because evidence is limited, conflicting, or not clearly actionable.',
+        'Tier IV: benign or likely benign variant with no known clinical significance.'
     ].join('\n');
 
     const schema = {
         pathogenicity: 'Pathogenic | Likely Pathogenic | VUS | Likely Benign | Benign',
-        amp_tier: 'Tier I | Tier II | Tier III | Tier IV',
-        amp_tier_rationale: 'brief rationale with tumor-type considerations',
+        amp_tier: 'Tier IA | Tier IB | Tier IIC | Tier IID | Tier IIE (tentative) | Tier III | Tier IV',
+        amp_tier_rationale: 'brief rationale with tumor-type considerations and the evidence level supporting the selected AMP tier',
         fda_approved_therapies: [{ drug: 'string', indication: 'string', biomarker_context: 'string', evidence: 'string' }],
         clinical_trials: [{ nct_id: 'string', title: 'string', phase: 'string', intervention: 'string', relevance: 'string', url: 'string' }],
         summary: 'brief variant interpretation and clinical significance',
@@ -53,9 +56,10 @@ function buildPrompt(context) {
         JSON.stringify(schema),
         'Rules:',
         '- Pathogenicity must be exactly one of: Pathogenic, Likely Pathogenic, VUS, Likely Benign, Benign.',
-        '- AMP tier must be exactly one of: Tier I, Tier II, Tier III, Tier IV.',
+        '- AMP tier must be exactly one of: Tier IA, Tier IB, Tier IIC, Tier IID, Tier IIE (tentative), Tier III, Tier IV.',
         '- Consider tumor_type when assigning AMP tier, therapies, and clinical trials.',
-        '- If evidence is insufficient, use VUS and/or Tier III rather than over-calling.',
+        '- Use Tier IIE (tentative) only for a pathogenic/oncogenic variant with no currently established clinical relevance, and include a limitation stating that Tier IIE is tentative/emerging and should be verified against current reporting standards.',
+        '- If evidence is insufficient for pathogenicity or actionability, use VUS and/or Tier III rather than over-calling.',
         '- FDA therapies should be FDA-approved therapies relevant to the gene/variant/tumor context when supported; otherwise return an empty array and explain in summary/limitations.',
         '- Clinical trials should prioritize supplied recruiting Phase 2+ interventional US trials, if present, and explain relevance cautiously.',
         'Context JSON:',

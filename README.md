@@ -78,7 +78,7 @@ This repo includes an optional AI interpretation endpoint at `api/ai-review.js`.
 }
 ```
 
-The endpoint prompts OpenRouter for strict JSON containing pathogenicity, AMP tier, FDA-approved therapies, clinical trials, a short interpretation summary, and limitations. AI output is intended for research and education only and must be verified against current FDA labeling, guidelines, curated databases, and trial eligibility criteria before clinical use.
+The endpoint prompts OpenRouter for strict JSON containing pathogenicity, specific AMP tier/subtier, FDA-approved therapies, clinical trials, a short interpretation summary, and limitations. AI output is intended for research and education only and must be verified against current FDA labeling, guidelines, curated databases, and trial eligibility criteria before clinical use.
 
 The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV/nearby-variant results, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
 
