@@ -952,7 +952,7 @@ async function fetchFdaCompanionDiagnostics(gene) {
 
 async function fetchOpenFdaDrugLabels(gene) {
     if (!gene) return { total: 0, results: [] };
-    const url = `https://api.fda.gov/drug/label.json?search=indications_and_usage:%22${encodeURIComponent(gene)}%22&limit=10`;
+    const url = `https://api.fda.gov/drug/label.json?search=indications_and_usage:%22${encodeURIComponent(gene)}%22&limit=20`;
     try {
         const resp = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.openFda);
         if (!resp.ok) {
@@ -5536,6 +5536,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${firstGene}.</div>`;
                                 return;
                             }
+                            const OF_PREVIEW = 7;
                             const ofCountEl = document.createElement('div');
                             ofCountEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
                             ofCountEl.textContent = total > ofResults.length
@@ -5543,7 +5544,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 : `${ofResults.length} matching drug label${ofResults.length !== 1 ? 's' : ''}`;
                             ofResultsDiv.appendChild(ofCountEl);
 
-                            ofResults.forEach((item) => {
+                            const buildDrugEl = (item) => {
                                 const drugEl = document.createElement('div');
                                 drugEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#fff7f7;border:1px solid #fee2e2;border-radius:4px;font-size:0.82rem;';
 
@@ -5576,8 +5577,21 @@ document.addEventListener('DOMContentLoaded', () => {
                                     drugEl.appendChild(indDetails);
                                 }
 
-                                ofResultsDiv.appendChild(drugEl);
-                            });
+                                return drugEl;
+                            };
+
+                            ofResults.slice(0, OF_PREVIEW).forEach((item) => ofResultsDiv.appendChild(buildDrugEl(item)));
+
+                            if (ofResults.length > OF_PREVIEW) {
+                                const ofMoreDetails = document.createElement('details');
+                                ofMoreDetails.style.cssText = 'margin-top:2px;';
+                                const ofMoreSummary = document.createElement('summary');
+                                ofMoreSummary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
+                                ofMoreSummary.textContent = `Show ${ofResults.length - OF_PREVIEW} more…`;
+                                ofMoreDetails.appendChild(ofMoreSummary);
+                                ofResults.slice(OF_PREVIEW).forEach((item) => ofMoreDetails.appendChild(buildDrugEl(item)));
+                                ofResultsDiv.appendChild(ofMoreDetails);
+                            }
 
                             const ofNote = document.createElement('div');
                             ofNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
