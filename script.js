@@ -951,17 +951,18 @@ async function fetchFdaCompanionDiagnostics(gene) {
 }
 
 async function fetchOpenFdaDrugLabels(gene) {
-    if (!gene) return { total: 0, results: [] };
-    const url = `https://api.fda.gov/drug/label.json?search=indications_and_usage:%22${encodeURIComponent(gene)}%22&limit=20`;
+    if (!gene) return { total: 0, fetched: 0, excluded: 0, results: [] };
+    const url = `https://api.fda.gov/drug/label.json?search=indications_and_usage:%22${encodeURIComponent(gene)}%22&limit=100`;
     try {
         const resp = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.openFda);
         if (!resp.ok) {
-            if (resp.status === 404) return { total: 0, results: [] };
+            if (resp.status === 404) return { total: 0, fetched: 0, excluded: 0, results: [] };
             throw new Error(`openFDA API error: ${resp.status}`);
         }
         const data = await resp.json();
         const total = data?.meta?.results?.total || 0;
-        const results = (data?.results || [])
+        const raw = data?.results || [];
+        const results = raw
             .filter(item => (item.indications_and_usage?.[0] || '').includes(gene))
             .map(item => ({
             brand_name: item.openfda?.brand_name?.[0] || '',
@@ -972,7 +973,7 @@ async function fetchOpenFdaDrugLabels(gene) {
             indications_and_usage: item.indications_and_usage?.[0] || '',
             purpose: item.purpose?.[0] || '',
         }));
-        return { total, results };
+        return { total, fetched: raw.length, excluded: raw.length - results.length, results };
     } catch (e) {
         console.warn('openFDA fetch failed', e);
         throw e;
@@ -5531,8 +5532,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         ofResultsDiv.appendChild(ofSpinner);
                         openFdaPanel.appendChild(ofResultsDiv);
 
-                        fetchOpenFdaDrugLabels(firstGene).then(({ total, results: ofResults }) => {
-                            aiReviewExtras.openfda = { gene: firstGene, total, results: ofResults };
+                        fetchOpenFdaDrugLabels(firstGene).then(({ total, fetched, excluded, results: ofResults }) => {
+                            aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, results: ofResults };
                             ofResultsDiv.innerHTML = '';
                             if (!ofResults || ofResults.length === 0) {
                                 ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${firstGene}.</div>`;
@@ -5541,9 +5542,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             const OF_PREVIEW = 7;
                             const ofCountEl = document.createElement('div');
                             ofCountEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
-                            ofCountEl.textContent = total > ofResults.length
-                                ? `Showing ${ofResults.length} of ${total.toLocaleString()} matching drug labels`
-                                : `${ofResults.length} matching drug label${ofResults.length !== 1 ? 's' : ''}`;
+                            const shownOf = `${Math.min(ofResults.length, OF_PREVIEW)} of ${ofResults.length} result${ofResults.length !== 1 ? 's' : ''}`;
+                            const excludedNote = excluded > 0 ? ` (${excluded} excluded — case-insensitive match only)` : '';
+                            ofCountEl.textContent = shownOf + excludedNote;
                             ofResultsDiv.appendChild(ofCountEl);
 
                             const buildDrugEl = (item) => {
