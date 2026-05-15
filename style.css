@@ -378,6 +378,38 @@ footer a:hover {
     border-bottom-color: #2dd4bf;
 }
 
+/* Card tab bar */
+.card-tabs {
+    display: flex;
+    border-bottom: 1px solid #e5e7eb;
+    margin: 0 0 0.75rem;
+}
+.card-tab-btn {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    cursor: pointer;
+    color: #6b7280;
+    margin-bottom: -1px;
+    transition: color 0.15s, border-color 0.15s;
+}
+.card-tab-btn:hover {
+    color: #374151;
+}
+.card-tab-btn.active {
+    color: #1f2937;
+    border-bottom-color: #4b5563;
+}
+.card-tab-panel {
+    display: none;
+}
+.card-tab-panel.active {
+    display: block;
+}
+
 /* Tumor type input row */
 .tumor-type-row {
     flex-basis: 100%;
