@@ -727,7 +727,7 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
     if (!res.ok) throw new Error(`ClinVar region proxy error: ${res.status}`);
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
-    return data.variants || [];
+    return { variants: data.variants || [], total: data.total ?? (data.variants || []).length };
 }
 
 async function fetchClinvarVariant(variationId) {
@@ -761,6 +761,18 @@ function isTruncatingClinvarVariant(variant) {
         || /\b(?:fs|ter|\*)\d*\b/i.test(text);
 }
 
+function isBelowAxisVariant(variant) {
+    if (isSynonymousClinvarVariant(variant)) return true;
+    const c = String(variant?.germline || '').toLowerCase();
+    return c.includes('benign') && !c.includes('pathogenic');
+}
+
+function parseProteinPos(text) {
+    // Handle both p.Arg273His and p.(Arg273His) (predicted-effect parenthesised form)
+    const m = String(text || '').match(/\bp\.\(?(?:[A-Za-z*?]{1,5})?(\d+)/i);
+    return m ? Number(m[1]) : null;
+}
+
 // Returns a color hex string for a ClinVar/CIViC pathogenicity classification.
 function getPathogenicityColor(classification, variant = null) {
     if (variant && isTruncatingClinvarVariant(variant)) return '#111827';
@@ -778,10 +790,12 @@ function getPathogenicityColor(classification, variant = null) {
 // Build an SVG lollipop plot for nearby ClinVar variants.
 // variants: [{id, title, germline, pos}], queryPos: integer position
 // minusStrand: if true, x-axis is oriented 3'→5' genomically (i.e. c./p. increases left-to-right)
-function buildLollipopPlot(variants, queryPos, minusStrand = false) {
+// opts.range: half-width of the displayed window (default 30)
+// opts.axisLabel: coordinate label shown at left of axis ('g.' or 'p.')
+function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30, axisLabel = 'g.' } = {}) {
     const NS = 'http://www.w3.org/2000/svg';
     const W = 280, ML = 18, MR = 18, PW = W - ML - MR;
-    const RANGE = 10;
+    const RANGE = range;
     const STACK_SPACING = 13;
     const LOLLIPOP_OFFSET = 16;
     const MIN_AXIS_Y = 72;
@@ -793,27 +807,32 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false) {
     const bucketForX = (x) => Math.round(x / 4) * 4;
 
     const plottableVariants = variants
-        .map((v) => ({ ...v, x: Number.isFinite(Number(v.pos)) ? posToX(Number(v.pos)) : null }))
+        .map((v) => ({ ...v, x: Number.isFinite(Number(v.pos)) ? posToX(Number(v.pos)) : null, belowAxis: isBelowAxisVariant(v) }))
         .filter((v) => v.x !== null && v.x >= ML - 8 && v.x <= W - MR + 8);
-    const bucketCounts = plottableVariants.reduce((counts, v) => {
-        const bucket = bucketForX(v.x);
-        counts[bucket] = (counts[bucket] || 0) + 1;
-        return counts;
-    }, {});
-    const maxStack = Math.max(1, ...Object.values(bucketCounts));
-    const AY = Math.max(MIN_AXIS_Y, TOP_PADDING + LOLLIPOP_OFFSET + ((maxStack - 1) * STACK_SPACING));
-    const H = AY + BOTTOM_PADDING;
 
-    // Track column heights to stack overlapping lollipops. The SVG height is
-    // computed from maxStack above so every alteration at a position remains
-    // visible rather than being clipped after a few overlapping variants.
-    const buckets = {};
-    const stackHeight = (x) => {
+    const aboveVars = plottableVariants.filter(v => !v.belowAxis);
+    const belowVars = plottableVariants.filter(v => v.belowAxis);
+
+    const countBuckets = (vs) => vs.reduce((acc, v) => {
+        const b = bucketForX(v.x); acc[b] = (acc[b] || 0) + 1; return acc;
+    }, {});
+    const maxStackAbove = Math.max(1, ...Object.values(countBuckets(aboveVars)));
+    const maxStackBelow = Math.max(0, ...Object.values(countBuckets(belowVars)));
+
+    const AY = Math.max(MIN_AXIS_Y, TOP_PADDING + LOLLIPOP_OFFSET + (maxStackAbove - 1) * STACK_SPACING);
+    const belowH = maxStackBelow > 0 ? LOLLIPOP_OFFSET + (maxStackBelow - 1) * STACK_SPACING + 14 : 0;
+    const H = AY + Math.max(BOTTOM_PADDING, belowH);
+
+    const bucketsAbove = {}, bucketsBelow = {};
+    const stackHeightAbove = (x) => {
         const b = bucketForX(x);
-        if (!buckets[b]) buckets[b] = 0;
-        const h = buckets[b];
-        buckets[b] += STACK_SPACING;
-        return h;
+        if (!bucketsAbove[b]) bucketsAbove[b] = 0;
+        const h = bucketsAbove[b]; bucketsAbove[b] += STACK_SPACING; return h;
+    };
+    const stackHeightBelow = (x) => {
+        const b = bucketForX(x);
+        if (!bucketsBelow[b]) bucketsBelow[b] = 0;
+        const h = bucketsBelow[b]; bucketsBelow[b] += STACK_SPACING; return h;
     };
 
     const svg = document.createElementNS(NS, 'svg');
@@ -830,8 +849,27 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false) {
     axis.setAttribute('stroke', '#cbd5e1'); axis.setAttribute('stroke-width', '1');
     svg.appendChild(axis);
 
-    // Ticks and labels at -10, -5, 0, +5, +10 in c. direction
-    [-10, -5, 0, 5, 10].forEach((o) => {
+    // Axis coordinate label (g. or p.) at left of axis
+    const axisLabelEl = document.createElementNS(NS, 'text');
+    axisLabelEl.setAttribute('x', String(ML - 2)); axisLabelEl.setAttribute('y', String(AY + 4));
+    axisLabelEl.setAttribute('text-anchor', 'end'); axisLabelEl.setAttribute('font-size', '7');
+    axisLabelEl.setAttribute('fill', '#94a3b8'); axisLabelEl.textContent = axisLabel;
+    svg.appendChild(axisLabelEl);
+
+    // Subtle directional hints flanking the axis
+    const upHint = document.createElementNS(NS, 'text');
+    upHint.setAttribute('x', String(ML + 1)); upHint.setAttribute('y', String(AY - 3));
+    upHint.setAttribute('font-size', '6'); upHint.setAttribute('fill', '#e2e8f0');
+    upHint.textContent = '↑ path';
+    svg.appendChild(upHint);
+    const dnHint = document.createElementNS(NS, 'text');
+    dnHint.setAttribute('x', String(ML + 1)); dnHint.setAttribute('y', String(AY + 22));
+    dnHint.setAttribute('font-size', '6'); dnHint.setAttribute('fill', '#e2e8f0');
+    dnHint.textContent = '↓ benign';
+    svg.appendChild(dnHint);
+
+    // Ticks and labels at -range, -range/2, 0, +range/2, +range
+    [-RANGE, -RANGE / 2, 0, RANGE / 2, RANGE].forEach((o) => {
         const x = posToX(queryPos + (minusStrand ? -o : o));
         const tick = document.createElementNS(NS, 'line');
         tick.setAttribute('x1', String(x)); tick.setAttribute('y1', String(AY));
@@ -867,18 +905,26 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false) {
         svg.appendChild(lt);
     });
 
-    // Plot each variant with known position
-    let plotted = 0;
+    // Plot each variant, stacking above or below the axis by pathogenicity
     plottableVariants.forEach((v) => {
         const x = v.x;
         const color = getPathogenicityColor(v.germline, v);
-        const sh = stackHeight(x);
-        const cy = AY - LOLLIPOP_OFFSET - sh;
-        const stemY = Math.max(cy + 5, 18);
+        let cy, stemY1, stemY2;
+        if (v.belowAxis) {
+            const sh = stackHeightBelow(x);
+            cy = AY + LOLLIPOP_OFFSET + sh;
+            stemY1 = AY;
+            stemY2 = cy - 5;
+        } else {
+            const sh = stackHeightAbove(x);
+            cy = AY - LOLLIPOP_OFFSET - sh;
+            stemY1 = Math.max(cy + 5, 18);
+            stemY2 = AY;
+        }
 
         const stem = document.createElementNS(NS, 'line');
-        stem.setAttribute('x1', String(x)); stem.setAttribute('y1', String(stemY));
-        stem.setAttribute('x2', String(x)); stem.setAttribute('y2', String(AY));
+        stem.setAttribute('x1', String(x)); stem.setAttribute('y1', String(stemY1));
+        stem.setAttribute('x2', String(x)); stem.setAttribute('y2', String(stemY2));
         stem.setAttribute('stroke', color); stem.setAttribute('stroke-width', '1.5');
         stem.setAttribute('opacity', '0.65');
         svg.appendChild(stem);
@@ -893,7 +939,6 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false) {
         tip.textContent = `${consequenceLabel}${v.germline || 'Unknown'} (pos ${v.pos}): ${v.title || v.id}`;
         circ.appendChild(tip);
         svg.appendChild(circ);
-        plotted++;
     });
 
     // Note for variants without position
@@ -908,6 +953,30 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false) {
     }
 
     return svg;
+}
+
+// Build a protein-position lollipop plot from the same nearby ClinVar variants.
+// Protein positions are parsed from p. notation in each variant's title/name.
+// The axis range auto-scales to the actual spread of the data.
+// Returns null if no variants have parseable protein positions.
+function buildProteinLollipopPlot(variants, queryProteinPos) {
+    const proteinVariants = variants.map(v => ({
+        ...v,
+        pos: parseProteinPos(getClinvarVariantText(v))
+    }));
+    const withPos = proteinVariants.filter(v => v.pos !== null);
+    if (withPos.length === 0) return null;
+
+    // Round up to a tidy number so tick labels land on clean values.
+    const niceCeil = (n) => {
+        if (n <= 5) return 5;
+        const step = n <= 20 ? 5 : n <= 50 ? 10 : 25;
+        return Math.ceil(n / step) * step;
+    };
+    const maxDev = Math.max(...withPos.map(v => Math.abs(v.pos - queryProteinPos)));
+    const range = niceCeil(Math.max(5, maxDev + 2));
+
+    return buildLollipopPlot(proteinVariants, queryProteinPos, false, { range, axisLabel: 'p.' });
 }
 
 // Query CivicDB via the /api/civic serverless proxy (avoids browser CORS).
@@ -3677,25 +3746,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 linkEl.rel = 'noopener noreferrer';
                 linkEl.textContent = 'View on ClinVar';
                 content.appendChild(linkEl);
-                // Nearby ClinVar variants (+/-10bp, GRCh37).
+                // Nearby ClinVar variants (+/-30bp, GRCh37).
                 const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
                 if (tuple && tuple.chrom && tuple.pos) {
                     const chr = tuple.chrom.replace(/^chr/i, '');
                     const posNum = Number(tuple.pos);
                     const regionLink = document.createElement('a');
-                    regionLink.href = `https://www.ncbi.nlm.nih.gov/clinvar/?term=${encodeURIComponent(`${chr}[Chromosome] AND ${Math.max(1, posNum - 10)}:${posNum + 10}[Base Position for Assembly GRCh37]`)}`;
+                    regionLink.href = `https://www.ncbi.nlm.nih.gov/clinvar/?term=${encodeURIComponent(`${chr}[Chromosome] AND ${Math.max(1, posNum - 30)}:${posNum + 30}[Base Position for Assembly GRCh37]`)}`;
                     regionLink.target = '_blank';
                     regionLink.rel = 'noopener noreferrer';
                     regionLink.style.display = 'block';
                     regionLink.textContent = 'Search region in ClinVar';
                     content.appendChild(regionLink);
                     try {
-                        const nearby = await fetchClinvarRegionVariants(chr, posNum, 10);
+                        const { variants: nearby, total: nearbyTotal } = await fetchClinvarRegionVariants(chr, posNum, 30);
                         aiReviewExtras.nearby_clinvar_variants = nearby;
                         if (nearby.length > 0) {
                             const nearbyTitle = document.createElement('div');
                             nearbyTitle.style.cssText = 'font-size:0.86rem;font-weight:600;margin-top:0.5rem;';
-                            nearbyTitle.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}`;
+                            const truncated = nearbyTotal > nearby.length ? ` of ${nearbyTotal} total` : '';
+                            nearbyTitle.textContent = `Nearby ClinVar variants (±30 bp): ${nearby.length}${truncated}`;
                             content.appendChild(nearbyTitle);
 
                             // Detect gene strand from snpEff annotation to orient plot 5'→3'.
@@ -3704,11 +3774,28 @@ document.addEventListener('DOMContentLoaded', () => {
                                 : [];
                             const plotMinusStrand = snpEffAnns.some(a => a.strand === '-' || a.strand === -1);
 
-                            // Always show the lollipop plot; keep only the full variant list collapsed.
+                            // Genomic (g.) lollipop plot — display ±10 bp even though data covers ±30
                             const plotWrap = document.createElement('div');
                             plotWrap.style.cssText = 'margin:6px 0 4px;';
-                            plotWrap.appendChild(buildLollipopPlot(nearby, posNum, plotMinusStrand));
+                            plotWrap.appendChild(buildLollipopPlot(nearby, posNum, plotMinusStrand, { range: 10 }));
                             content.appendChild(plotWrap);
+
+                            // Protein (p.) lollipop plot — shown when the query has a protein position
+                            const queryHgvsP = snpEffAnns.find(a => a.hgvs_p)?.hgvs_p || '';
+                            const queryProteinPos = parseProteinPos(queryHgvsP);
+                            if (queryProteinPos !== null) {
+                                const protPlot = buildProteinLollipopPlot(nearby, queryProteinPos);
+                                if (protPlot) {
+                                    const protPlotWrap = document.createElement('div');
+                                    protPlotWrap.style.cssText = 'margin:10px 0 4px;';
+                                    const protPlotTitle = document.createElement('div');
+                                    protPlotTitle.style.cssText = 'font-size:0.82rem;font-weight:600;margin-bottom:2px;';
+                                    protPlotTitle.textContent = 'Protein position (p.)';
+                                    protPlotWrap.appendChild(protPlotTitle);
+                                    protPlotWrap.appendChild(protPlot);
+                                    content.appendChild(protPlotWrap);
+                                }
+                            }
 
                             // Condensed variant list (collapsed by default)
                             const listDet = document.createElement('details');
@@ -5002,7 +5089,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
                     ['clinvar_variant_record', clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)],
-                    ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 10) : Promise.resolve([])],
+                    ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 30).then(r => r.variants) : Promise.resolve([])],
                     ['civic_api', aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)],
                     ['gnomad_v4', coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt) : Promise.resolve(null)],
                     ['spliceai_lookup', spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)],

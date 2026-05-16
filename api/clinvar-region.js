@@ -43,19 +43,28 @@ export default async function handler(req, res) {
 
     try {
         const term = `${c}[Chromosome] AND ${start}:${end}[Base Position for Assembly GRCh37]`;
-        const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=50&term=${encodeURIComponent(term)}${apiKey}`;
+        const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=500&term=${encodeURIComponent(term)}${apiKey}`;
         const searchData = await ncbiFetch(searchUrl);
         const ids = searchData?.esearchresult?.idlist || [];
+        const totalInClinVar = Number(searchData?.esearchresult?.count || 0);
 
         if (!Array.isArray(ids) || ids.length === 0) {
-            return res.status(200).json({ variants: [] });
+            return res.status(200).json({ variants: [], total: 0 });
         }
 
-        const sumUrl = `${EUTILS_BASE}/esummary.fcgi?db=clinvar&retmode=json&id=${ids.join(',')}${apiKey}`;
-        const sumData = await ncbiFetch(sumUrl);
+        // Fetch summaries in batches of 200 to stay within URL limits and
+        // supply an explicit retmax (NCBI esummary defaults to 20 without WebEnv).
+        const BATCH = 200;
+        const resultMap = {};
+        for (let i = 0; i < ids.length; i += BATCH) {
+            const chunk = ids.slice(i, i + BATCH);
+            const sumUrl = `${EUTILS_BASE}/esummary.fcgi?db=clinvar&retmode=json&retmax=${chunk.length}&id=${chunk.join(',')}${apiKey}`;
+            const sumData = await ncbiFetch(sumUrl);
+            Object.assign(resultMap, sumData?.result || {});
+        }
 
         const variants = ids.map((id) => {
-            const rec = sumData?.result?.[id] || {};
+            const rec = resultMap[id] || {};
             const varLoc = rec.variation_set?.[0]?.variation_loc?.find?.((l) => String(l.assembly_name || '').toLowerCase().includes('grch37'))
                 || rec.location?.find?.((l) => String(l.assembly || '').toLowerCase().includes('grch37'))
                 || rec.variation_set?.[0]?.variation_loc?.[0]
@@ -74,7 +83,7 @@ export default async function handler(req, res) {
             };
         });
 
-        return res.status(200).json({ variants });
+        return res.status(200).json({ variants, total: totalInClinVar });
     } catch (err) {
         console.error('ClinVar region proxy error:', err);
         return res.status(502).json({ error: 'ClinVar region lookup failed', detail: err.message });
