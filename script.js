@@ -5314,8 +5314,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             bestEl.innerHTML = `<strong>Max delta score:</strong> ${summary.best.value.toFixed(3)} (${pct}%) ${summary.best.label}${summary.best.position !== null ? ` at ${summary.best.position}` : ''}${summary.best.transcript ? ` · ${summary.best.transcript}` : ''}`;
                             spliceResultsDiv.appendChild(bestEl);
                         }
+                        const tableWrapper = document.createElement('div');
+                        tableWrapper.style.cssText = 'overflow-x:auto;margin-top:4px;';
                         const table = document.createElement('table');
-                        table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.8rem;margin-top:4px;';
+                        table.style.cssText = 'min-width:100%;border-collapse:collapse;font-size:0.8rem;white-space:nowrap;';
                         const thead = document.createElement('thead');
                         const hrow = document.createElement('tr');
                         ['Transcript', 'Gene', 'AG', 'AL', 'DG', 'DL'].forEach((h) => {
@@ -5346,7 +5348,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             tbody.appendChild(tr);
                         });
                         table.appendChild(tbody);
-                        spliceResultsDiv.appendChild(table);
+                        tableWrapper.appendChild(table);
+                        spliceResultsDiv.appendChild(tableWrapper);
                         const note = document.createElement('div');
                         note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:4px;';
                         note.textContent = 'Source: Broad SpliceAI Lookup API (hg19/GRCh37, distance 500, raw scores). Scores ≥0.2 may suggest splicing impact; verify before clinical use.';
