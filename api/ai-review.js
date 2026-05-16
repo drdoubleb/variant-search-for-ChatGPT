@@ -34,7 +34,7 @@ function buildPrompt(context) {
         'Tier IB: well-powered studies with consensus from experts in the field supporting clinical significance in the submitted tumor context.',
         'Tier IIC: FDA-approved therapies in different tumor types, investigational therapies, or multiple small published studies with some expert consensus.',
         'Tier IID: preclinical evidence, early clinical trials, or a few case reports without expert consensus.',
-        'Tier IIE (tentative): pathogenic/oncogenic variant with no currently established clinical relevance; this is an emerging/non-standard category and should be clearly disclaimed if used.',
+        'Tier IIE (tentative): pathogenic/oncogenic variant with no currently established clinical relevance; use only as a last resort when the variant does not qualify for any Tier I or Tier II (A–D) category — meaning there are no FDA-approved therapies (even in other tumor types), no relevant clinical trials, and no other meaningful therapeutic, diagnostic, or prognostic utility. This is an emerging/non-standard category and should be clearly disclaimed if used.',
         'Tier III: variant of unknown clinical significance because evidence is limited, conflicting, or not clearly actionable.',
         'Tier IV: benign or likely benign variant with no known clinical significance.'
     ].join('\n');
@@ -58,7 +58,7 @@ function buildPrompt(context) {
         '- Pathogenicity must be exactly one of: Pathogenic, Likely Pathogenic, VUS, Likely Benign, Benign.',
         '- AMP tier must be exactly one of: Tier IA, Tier IB, Tier IIC, Tier IID, Tier IIE (tentative), Tier III, Tier IV.',
         '- Consider tumor_type when assigning AMP tier, therapies, and clinical trials.',
-        '- Use Tier IIE (tentative) only for a pathogenic/oncogenic variant with no currently established clinical relevance, and include a limitation stating that Tier IIE is tentative/emerging and should be verified against current reporting standards.',
+        '- Use Tier IIE (tentative) only as a last resort: the variant must be pathogenic/oncogenic AND must not qualify for any Tier I or Tier II (A–D) category. Specifically, there must be no FDA-approved therapies (even in other tumor types), no relevant Phase 2+ clinical trials, and no other meaningful therapeutic, diagnostic, or prognostic information. If any of those elements are present, use Tier IIC or IID instead. When Tier IIE is used, include a limitation stating it is tentative/emerging and should be verified against current reporting standards.',
         '- If evidence is insufficient for pathogenicity or actionability, use VUS and/or Tier III rather than over-calling.',
         '- FDA therapies should be FDA-approved therapies relevant to the gene/variant/tumor context when supported; otherwise return an empty array and explain in summary/limitations.',
         '- Clinical trials should prioritize supplied recruiting Phase 2+ interventional US trials, if present, and explain relevance cautiously.',
