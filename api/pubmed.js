@@ -17,6 +17,36 @@ async function ncbiFetch(url) {
     return res.json();
 }
 
+async function ncbiFetchText(url) {
+    const res = await fetch(url, {
+        headers: { 'Accept': 'text/xml,application/xml' },
+        signal: AbortSignal.timeout(12000)
+    });
+    if (!res.ok) throw new Error(`NCBI request failed: ${res.status}`);
+    return res.text();
+}
+
+function parseAbstractsFromXml(xmlText) {
+    const abstracts = {};
+    const articles = xmlText.split(/<PubmedArticle[\s>]/);
+    for (const art of articles) {
+        const pmidMatch = art.match(/<PMID[^>]*>(\d+)<\/PMID>/);
+        if (!pmidMatch) continue;
+        const pmid = pmidMatch[1];
+        const textParts = [];
+        const regex = /<AbstractText[^>]*>([\s\S]*?)<\/AbstractText>/g;
+        let m;
+        while ((m = regex.exec(art)) !== null) {
+            const text = m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+            if (text) textParts.push(text);
+        }
+        if (textParts.length > 0) {
+            abstracts[pmid] = textParts.join(' ');
+        }
+    }
+    return abstracts;
+}
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
@@ -48,6 +78,16 @@ export default async function handler(req, res) {
         const sumUrl = `${EUTILS_BASE}/esummary.fcgi?db=pubmed&retmode=json&id=${ids.join(',')}${apiKey}`;
         const sumData = await ncbiFetch(sumUrl);
 
+        // Step 3: efetch — get article abstracts (XML)
+        let abstracts = {};
+        try {
+            const fetchUrl = `${EUTILS_BASE}/efetch.fcgi?db=pubmed&rettype=xml&retmode=xml&id=${ids.join(',')}${apiKey}`;
+            const fetchXml = await ncbiFetchText(fetchUrl);
+            abstracts = parseAbstractsFromXml(fetchXml);
+        } catch (e) {
+            console.warn('PubMed abstract fetch failed:', e.message);
+        }
+
         const articles = ids.map((id) => {
             const rec = sumData?.result?.[id] || {};
             const authList = Array.isArray(rec.authors) ? rec.authors : [];
@@ -61,7 +101,8 @@ export default async function handler(req, res) {
                 title: rec.title || '',
                 authors,
                 journal: rec.source || '',
-                year
+                year,
+                abstract: abstracts[id] || ''
             };
         });
 
