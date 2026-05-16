@@ -2143,6 +2143,34 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const getTumorTypeFromUrl = () => {
+        const search = String(window.location.search || '');
+        const m = search.match(/[?&]tumorType=([^&]*)/);
+        if (!m) return '';
+        try {
+            return decodeURIComponent(m[1].replace(/\+/g, '%20'));
+        } catch {
+            return m[1];
+        }
+    };
+
+    const syncTumorTypeInUrl = (tumorTypeValue) => {
+        try {
+            const url = new URL(window.location.href);
+            const value = String(tumorTypeValue || '').trim();
+            if (value) {
+                url.searchParams.set('tumorType', value);
+            } else {
+                url.searchParams.delete('tumorType');
+            }
+            const search = url.searchParams.toString();
+            const nextUrl = `${url.pathname}${search ? `?${search}` : ''}${url.hash || ''}`;
+            window.history.replaceState({}, '', nextUrl);
+        } catch {
+            // Ignore URL update errors and continue normal search flow.
+        }
+    };
+
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
         // Reset any previous gene hint.  Without resetting, a prior search that
@@ -2158,6 +2186,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Update the URL with the raw submitted value so inbound/outbound links can
         // preserve flexible user-entered formats (HGVS g./c./p., space-separated tokens, etc.).
         syncVariantInUrl(rawInput);
+        syncTumorTypeInUrl(tumorType);
         let query = rawInput;
         const normalizeVariantInput = (raw) => {
             let s = raw.trim();
@@ -6005,9 +6034,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Auto-run lookup when the page is opened with ?variant=<value>. This allows direct
-    // linking from external tools while preserving the existing normalization/search logic.
+    // Auto-run lookup when the page is opened with ?variant=<value> and/or ?tumorType=<value>.
+    // This allows direct linking from external tools while preserving the existing normalization/search logic.
     const initialVariant = getVariantFromUrl();
+    const initialTumorType = getTumorTypeFromUrl();
+    if (initialTumorType && initialTumorType.trim() && tumorTypeInput) {
+        tumorTypeInput.value = initialTumorType.trim();
+    }
     if (initialVariant && initialVariant.trim()) {
         input.value = initialVariant.trim();
         if (typeof form.requestSubmit === 'function') {
