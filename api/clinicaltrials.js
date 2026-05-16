@@ -24,6 +24,13 @@ function extractUsLocations(locations) {
         .filter(Boolean);
 }
 
+function extractInclusionCriteria(text) {
+    if (!text) return '';
+    const inclMatch = text.match(/inclusion criteria[:\s]*([\s\S]*?)(?:\s*exclusion criteria|$)/i);
+    if (inclMatch) return inclMatch[1].trim().slice(0, 1000);
+    return text.slice(0, 1000);
+}
+
 function mapStudy(study) {
     const proto = study.protocolSection || {};
     const idMod = proto.identificationModule || {};
@@ -32,6 +39,8 @@ function mapStudy(study) {
     const descMod = proto.descriptionModule || {};
     const armsMod = proto.armsInterventionsModule || {};
     const locMod = proto.contactsLocationsModule || {};
+    const condMod = proto.conditionsModule || {};
+    const eligMod = proto.eligibilityModule || {};
 
     const nctId = idMod.nctId || '';
     const title = idMod.briefTitle || '';
@@ -48,7 +57,9 @@ function mapStudy(study) {
     const usLocations = extractUsLocations(locations);
     const usLocationCount = usLocations.length;
 
-    const briefSummary = String(descMod.briefSummary || '').trim();
+    const briefSummary = String(descMod.briefSummary || '').trim().slice(0, 1500);
+    const conditions = condMod.conditions || [];
+    const inclusionCriteria = extractInclusionCriteria(String(eligMod.eligibilityCriteria || ''));
 
     return {
         nctId,
@@ -60,7 +71,9 @@ function mapStudy(study) {
         interventions,
         usLocationCount,
         usLocationSample: usLocations.slice(0, 3),
-        briefSummary: briefSummary.slice(0, 400),
+        briefSummary,
+        conditions,
+        inclusionCriteria,
         url: nctId ? `https://clinicaltrials.gov/study/${nctId}` : ''
     };
 }

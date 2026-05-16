@@ -5396,6 +5396,19 @@ document.addEventListener('DOMContentLoaded', () => {
                                     const parts = [art.authors, art.journal, art.year].filter(Boolean);
                                     meta.textContent = parts.join(' · ') + (art.pmid ? ` · PMID ${art.pmid}` : '');
                                     artEl.appendChild(meta);
+                                    if (art.abstract) {
+                                        const abstractDetails = document.createElement('details');
+                                        abstractDetails.style.cssText = 'margin-top:4px;';
+                                        const abstractSummaryEl = document.createElement('summary');
+                                        abstractSummaryEl.style.cssText = 'font-size:0.80rem;color:#4b5563;cursor:pointer;padding:2px 0;list-style:revert;';
+                                        abstractSummaryEl.textContent = 'Abstract';
+                                        abstractDetails.appendChild(abstractSummaryEl);
+                                        const abstractText = document.createElement('div');
+                                        abstractText.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f9fafb;border-radius:4px;';
+                                        abstractText.textContent = art.abstract;
+                                        abstractDetails.appendChild(abstractText);
+                                        artEl.appendChild(abstractDetails);
+                                    }
                                     resultsDiv.appendChild(artEl);
                                 });
                                 if (total > PUBMED_LIMIT) {
@@ -5805,6 +5818,50 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ].filter(Boolean);
                                 meta.textContent = metaParts.join(' · ');
                                 el.appendChild(meta);
+
+                                const hasExpandable = trial.briefSummary || (trial.conditions && trial.conditions.length > 0) || trial.inclusionCriteria;
+                                if (hasExpandable) {
+                                    const trialDetails = document.createElement('details');
+                                    trialDetails.style.cssText = 'margin-top:5px;';
+                                    const trialDetailsSummary = document.createElement('summary');
+                                    trialDetailsSummary.style.cssText = 'font-size:0.80rem;color:#0f766e;cursor:pointer;padding:2px 0;list-style:revert;';
+                                    trialDetailsSummary.textContent = 'Summary, conditions & eligibility';
+                                    trialDetails.appendChild(trialDetailsSummary);
+                                    const expandContent = document.createElement('div');
+                                    expandContent.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f0fdfa;border-radius:4px;';
+                                    if (trial.conditions && trial.conditions.length > 0) {
+                                        const condLabel = document.createElement('div');
+                                        condLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
+                                        condLabel.textContent = 'Conditions:';
+                                        expandContent.appendChild(condLabel);
+                                        const condVal = document.createElement('div');
+                                        condVal.style.cssText = 'margin-bottom:6px;';
+                                        condVal.textContent = trial.conditions.join(', ');
+                                        expandContent.appendChild(condVal);
+                                    }
+                                    if (trial.briefSummary) {
+                                        const summLabel = document.createElement('div');
+                                        summLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
+                                        summLabel.textContent = 'Summary:';
+                                        expandContent.appendChild(summLabel);
+                                        const summVal = document.createElement('div');
+                                        summVal.style.cssText = 'margin-bottom:6px;';
+                                        summVal.textContent = trial.briefSummary;
+                                        expandContent.appendChild(summVal);
+                                    }
+                                    if (trial.inclusionCriteria) {
+                                        const inclLabel = document.createElement('div');
+                                        inclLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
+                                        inclLabel.textContent = 'Inclusion Criteria:';
+                                        expandContent.appendChild(inclLabel);
+                                        const inclVal = document.createElement('pre');
+                                        inclVal.style.cssText = 'white-space:pre-wrap;font-family:inherit;margin:0;';
+                                        inclVal.textContent = trial.inclusionCriteria;
+                                        expandContent.appendChild(inclVal);
+                                    }
+                                    trialDetails.appendChild(expandContent);
+                                    el.appendChild(trialDetails);
+                                }
                                 return el;
                             };
 
