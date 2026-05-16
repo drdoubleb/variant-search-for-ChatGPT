@@ -782,6 +782,7 @@ function getPathogenicityColor(classification, variant = null) {
     if (c.includes('likely pathogenic')) return '#ef4444';
     if (c === 'benign') return '#16a34a';
     if (c.includes('likely benign')) return '#22c55e';
+    if (c.includes('conflicting')) return '#f59e0b';
     if (c.includes('pathogenic')) return '#ef4444';
     if (c.includes('benign')) return '#22c55e';
     return '#f59e0b';
