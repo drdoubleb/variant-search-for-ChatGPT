@@ -967,11 +967,11 @@ function buildProteinLollipopPlot(variants, queryProteinPos) {
     const withPos = proteinVariants.filter(v => v.pos !== null);
     if (withPos.length === 0) return null;
 
-    // Round up to a tidy number so tick labels land on clean values.
+    // Round up to a tidy number so tick labels land on clean values, capped at ±10.
     const niceCeil = (n) => {
         if (n <= 5) return 5;
         const step = n <= 20 ? 5 : n <= 50 ? 10 : 25;
-        return Math.ceil(n / step) * step;
+        return Math.min(10, Math.ceil(n / step) * step);
     };
     const maxDev = Math.max(...withPos.map(v => Math.abs(v.pos - queryProteinPos)));
     const range = niceCeil(Math.max(5, maxDev + 2));
