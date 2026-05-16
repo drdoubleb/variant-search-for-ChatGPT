@@ -727,7 +727,7 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
     if (!res.ok) throw new Error(`ClinVar region proxy error: ${res.status}`);
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
-    return data.variants || [];
+    return { variants: data.variants || [], total: data.total ?? (data.variants || []).length };
 }
 
 async function fetchClinvarVariant(variationId) {
@@ -3759,12 +3759,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     regionLink.textContent = 'Search region in ClinVar';
                     content.appendChild(regionLink);
                     try {
-                        const nearby = await fetchClinvarRegionVariants(chr, posNum, 30);
+                        const { variants: nearby, total: nearbyTotal } = await fetchClinvarRegionVariants(chr, posNum, 30);
                         aiReviewExtras.nearby_clinvar_variants = nearby;
                         if (nearby.length > 0) {
                             const nearbyTitle = document.createElement('div');
                             nearbyTitle.style.cssText = 'font-size:0.86rem;font-weight:600;margin-top:0.5rem;';
-                            nearbyTitle.textContent = `Nearby ClinVar variants (±30 bp): ${nearby.length}`;
+                            const truncated = nearbyTotal > nearby.length ? ` of ${nearbyTotal} total` : '';
+                            nearbyTitle.textContent = `Nearby ClinVar variants (±30 bp): ${nearby.length}${truncated}`;
                             content.appendChild(nearbyTitle);
 
                             // Detect gene strand from snpEff annotation to orient plot 5'→3'.
@@ -5088,7 +5089,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
                     ['clinvar_variant_record', clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)],
-                    ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 30) : Promise.resolve([])],
+                    ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 30).then(r => r.variants) : Promise.resolve([])],
                     ['civic_api', aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)],
                     ['gnomad_v4', coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt) : Promise.resolve(null)],
                     ['spliceai_lookup', spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)],
