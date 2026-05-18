@@ -3803,20 +3803,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 linkEl.rel = 'noopener noreferrer';
                 linkEl.textContent = 'View on ClinVar';
                 content.appendChild(linkEl);
-                // Nearby ClinVar variants (±10bp genomic + gene-level protein-adjacent, GRCh37).
+                // Nearby ClinVar variants (±30 bp, GRCh37).
                 const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
                 if (tuple && tuple.chrom && tuple.pos) {
                     const chr = tuple.chrom.replace(/^chr/i, '');
                     const posNum = Number(tuple.pos);
                     const regionLink = document.createElement('a');
-                    regionLink.href = `https://www.ncbi.nlm.nih.gov/clinvar/?term=${encodeURIComponent(`${chr}[Chromosome] AND ${Math.max(1, posNum - 10)}:${posNum + 10}[Base Position for Assembly GRCh37]`)}`;
+                    regionLink.href = `https://www.ncbi.nlm.nih.gov/clinvar/?term=${encodeURIComponent(`${chr}[Chromosome] AND ${Math.max(1, posNum - 30)}:${posNum + 30}[Base Position for Assembly GRCh37]`)}`;
                     regionLink.target = '_blank';
                     regionLink.rel = 'noopener noreferrer';
                     regionLink.style.display = 'block';
                     regionLink.textContent = 'Search region in ClinVar';
                     content.appendChild(regionLink);
                     try {
-                        const { variants: nearby, total: nearbyTotal } = await fetchClinvarRegionVariants(chr, posNum, 10);
+                        const { variants: nearby, total: nearbyTotal } = await fetchClinvarRegionVariants(chr, posNum, 30);
                         aiReviewExtras.nearby_clinvar_variants = nearby;
 
                         // Detect gene strand from snpEff annotation to orient plot 5'→3'.
@@ -3832,50 +3832,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         const queryProteinPos = parseProteinPos(queryHgvsP);
                         const queryC = parseCdnaCoordinate(canonicalAnn?.hgvs_c || '');
 
-                        // Protein lollipop: combine genomic-nearby variants with a gene-level fetch so
-                        // the plot is populated even when the query sits near an exon boundary.
-                        // Both sets use the c.-based genomic-offset method for transcript-agnostic positions.
-                        let proteinPlotVariants = nearby;
-                        if (queryProteinPos !== null && queryC !== null) {
-                            const queryGene = geneNames ? String(geneNames).split(',')[0].trim() : '';
-                            if (queryGene) {
-                                try {
-                                    const geneVars = await fetchClinvarGeneVariants(queryGene, 500);
-                                    const strandFactor = plotMinusStrand ? -1 : 1;
-                                    const PROTEIN_WINDOW = 10;
-                                    // Filter to coding variants protein-adjacent to the query; exclude
-                                    // intronic c. (c.N+M / c.N-M) and those outside the protein window.
-                                    const nearbyIds = new Set(nearby.map(v => v.id));
-                                    const proteinAdjacent = geneVars.filter(v => {
-                                        if (nearbyIds.has(v.id)) return false;
-                                        const text = getClinvarVariantText(v);
-                                        if (/c\.\d+[+\-]\d+/i.test(text)) return false;
-                                        // Primary: use genomic offset (exact for same-exon variants)
-                                        if (v.pos != null) {
-                                            const cCanonical = queryC + strandFactor * (v.pos - posNum);
-                                            if (cCanonical > 0 && Math.abs(Math.ceil(cCanonical / 3) - queryProteinPos) <= PROTEIN_WINDOW) return true;
-                                        }
-                                        // Fallback: title-parsed p. for variants with no GRCh37 position or
-                                        // cross-exon variants where the genomic offset is unreliable.
-                                        // A small extra buffer (+5) absorbs common transcript-numbering offsets.
-                                        const titleP = parseProteinPos(text);
-                                        return titleP !== null && Math.abs(titleP - queryProteinPos) <= PROTEIN_WINDOW + 5;
-                                    });
-                                    proteinPlotVariants = [...nearby, ...proteinAdjacent];
-                                } catch (e) {
-                                    console.warn('ClinVar gene query failed', e);
-                                }
-                            }
-                        }
-
-                        if (nearby.length > 0 || proteinPlotVariants.length > 0) {
+                        if (nearby.length > 0) {
                             const nearbyTitle = document.createElement('div');
                             nearbyTitle.style.cssText = 'font-size:0.86rem;font-weight:600;margin-top:0.5rem;';
                             const truncated = nearbyTotal > nearby.length ? ` of ${nearbyTotal} total` : '';
-                            nearbyTitle.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}${truncated}`;
+                            nearbyTitle.textContent = `Nearby ClinVar variants (±30 bp): ${nearby.length}${truncated}`;
                             content.appendChild(nearbyTitle);
 
-                            // Genomic (g.) lollipop plot
+                            // Genomic (g.) lollipop plot — display ±10 bp even though data covers ±30
                             const plotWrap = document.createElement('div');
                             plotWrap.style.cssText = 'margin:6px 0 4px;';
                             plotWrap.appendChild(buildLollipopPlot(nearby, posNum, plotMinusStrand, { range: 10 }));
@@ -3884,7 +3848,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             // Protein (p.) lollipop plot — uses genomic-offset positions for alignment
                             if (queryProteinPos !== null && queryC !== null) {
                                 const protPlot = buildProteinLollipopPlot(
-                                    proteinPlotVariants, queryProteinPos,
+                                    nearby, queryProteinPos,
                                     { queryGenomicPos: posNum, queryC, minusStrand: plotMinusStrand }
                                 );
                                 if (protPlot) {
