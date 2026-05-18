@@ -730,6 +730,18 @@ async function fetchClinvarRegionVariants(chrom, pos, windowSize = 10) {
     return { variants: data.variants || [], total: data.total ?? (data.variants || []).length };
 }
 
+async function fetchClinvarGeneVariants(gene, retmax = 500) {
+    const safeGene = String(gene || '').replace(/[^A-Za-z0-9\-_.]/g, '');
+    if (!safeGene) return [];
+    const endpoint = getConfiguredApiEndpoint('CLINVAR_GENE_API_ENDPOINT', '/api/clinvar-gene');
+    const params = new URLSearchParams({ gene: safeGene, retmax: String(retmax) });
+    const res = await fetchWithTimeout(`${endpoint}?${params}`, {}, API_TIMEOUT_MS.clinvar);
+    if (!res.ok) throw new Error(`ClinVar gene proxy error: ${res.status}`);
+    const data = await res.json();
+    if (data?.error) throw new Error(data.error);
+    return data.variants || [];
+}
+
 async function fetchClinvarVariant(variationId) {
     if (!variationId || !/^\d+$/.test(String(variationId))) return null;
     const endpoint = getConfiguredApiEndpoint('CLINVAR_VARIANT_API_ENDPOINT', '/api/clinvar-variant');
@@ -957,14 +969,22 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
 }
 
 // Build a protein-position lollipop plot from the same nearby ClinVar variants.
-// Protein positions are parsed from p. notation in each variant's title/name.
+// Protein positions are derived from the canonical c. number + genomic offset when
+// possible (transcript-agnostic), falling back to parsing p. from the variant title.
+// queryGenomicPos / queryC / minusStrand enable the genomic-offset path.
 // The axis range auto-scales to the actual spread of the data.
 // Returns null if no variants have parseable protein positions.
-function buildProteinLollipopPlot(variants, queryProteinPos) {
-    const proteinVariants = variants.map(v => ({
-        ...v,
-        pos: parseProteinPos(getClinvarVariantText(v))
-    }));
+function buildProteinLollipopPlot(variants, queryProteinPos, { queryGenomicPos = null, queryC = null, minusStrand = false } = {}) {
+    const strandFactor = minusStrand ? -1 : 1;
+    const proteinVariants = variants.map(v => {
+        let pos = null;
+        if (v.pos != null && queryGenomicPos != null && queryC != null) {
+            const cCanonical = queryC + strandFactor * (v.pos - queryGenomicPos);
+            if (cCanonical > 0) pos = Math.ceil(cCanonical / 3);
+        }
+        if (pos === null) pos = parseProteinPos(getClinvarVariantText(v));
+        return { ...v, pos };
+    });
     const withPos = proteinVariants.filter(v => v.pos !== null);
     if (withPos.length === 0) return null;
 
@@ -3776,45 +3796,82 @@ document.addEventListener('DOMContentLoaded', () => {
                 linkEl.rel = 'noopener noreferrer';
                 linkEl.textContent = 'View on ClinVar';
                 content.appendChild(linkEl);
-                // Nearby ClinVar variants (+/-30bp, GRCh37).
+                // Nearby ClinVar variants (±10bp genomic + gene-level protein-adjacent, GRCh37).
                 const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
                 if (tuple && tuple.chrom && tuple.pos) {
                     const chr = tuple.chrom.replace(/^chr/i, '');
                     const posNum = Number(tuple.pos);
                     const regionLink = document.createElement('a');
-                    regionLink.href = `https://www.ncbi.nlm.nih.gov/clinvar/?term=${encodeURIComponent(`${chr}[Chromosome] AND ${Math.max(1, posNum - 30)}:${posNum + 30}[Base Position for Assembly GRCh37]`)}`;
+                    regionLink.href = `https://www.ncbi.nlm.nih.gov/clinvar/?term=${encodeURIComponent(`${chr}[Chromosome] AND ${Math.max(1, posNum - 10)}:${posNum + 10}[Base Position for Assembly GRCh37]`)}`;
                     regionLink.target = '_blank';
                     regionLink.rel = 'noopener noreferrer';
                     regionLink.style.display = 'block';
                     regionLink.textContent = 'Search region in ClinVar';
                     content.appendChild(regionLink);
                     try {
-                        const { variants: nearby, total: nearbyTotal } = await fetchClinvarRegionVariants(chr, posNum, 30);
+                        const { variants: nearby, total: nearbyTotal } = await fetchClinvarRegionVariants(chr, posNum, 10);
                         aiReviewExtras.nearby_clinvar_variants = nearby;
-                        if (nearby.length > 0) {
+
+                        // Detect gene strand from snpEff annotation to orient plot 5'→3'.
+                        const snpEffAnns = annotation?.snpeff?.ann
+                            ? (Array.isArray(annotation.snpeff.ann) ? annotation.snpeff.ann : [annotation.snpeff.ann])
+                            : [];
+                        const plotMinusStrand = snpEffAnns.some(a => a.strand === '-' || a.strand === -1);
+
+                        // Extract canonical c. position (e.g. c.454 → 454) from the snpEff annotation
+                        // that has a protein change; used to compute transcript-agnostic protein positions.
+                        const canonicalAnn = snpEffAnns.find(a => a.hgvs_p);
+                        const queryHgvsP = canonicalAnn?.hgvs_p || '';
+                        const queryProteinPos = parseProteinPos(queryHgvsP);
+                        const queryC = parseCdnaCoordinate(canonicalAnn?.hgvs_c || '');
+
+                        // Protein lollipop: combine genomic-nearby variants with a gene-level fetch so
+                        // the plot is populated even when the query sits near an exon boundary.
+                        // Both sets use the c.-based genomic-offset method for transcript-agnostic positions.
+                        let proteinPlotVariants = nearby;
+                        if (queryProteinPos !== null && queryC !== null) {
+                            const queryGene = geneNames ? String(geneNames).split(',')[0].trim() : '';
+                            if (queryGene) {
+                                try {
+                                    const geneVars = await fetchClinvarGeneVariants(queryGene, 500);
+                                    const strandFactor = plotMinusStrand ? -1 : 1;
+                                    const PROTEIN_WINDOW = 10;
+                                    // Filter to coding variants protein-adjacent to the query; exclude
+                                    // intronic c. (c.N+M / c.N-M) and those outside the protein window.
+                                    const nearbyIds = new Set(nearby.map(v => v.id));
+                                    const proteinAdjacent = geneVars.filter(v => {
+                                        if (nearbyIds.has(v.id) || v.pos == null) return false;
+                                        if (/c\.\d+[+\-]\d+/i.test(getClinvarVariantText(v))) return false;
+                                        const cCanonical = queryC + strandFactor * (v.pos - posNum);
+                                        if (cCanonical <= 0) return false;
+                                        return Math.abs(Math.ceil(cCanonical / 3) - queryProteinPos) <= PROTEIN_WINDOW;
+                                    });
+                                    proteinPlotVariants = [...nearby, ...proteinAdjacent];
+                                } catch (e) {
+                                    console.warn('ClinVar gene query failed', e);
+                                }
+                            }
+                        }
+
+                        if (nearby.length > 0 || proteinPlotVariants.length > 0) {
                             const nearbyTitle = document.createElement('div');
                             nearbyTitle.style.cssText = 'font-size:0.86rem;font-weight:600;margin-top:0.5rem;';
                             const truncated = nearbyTotal > nearby.length ? ` of ${nearbyTotal} total` : '';
-                            nearbyTitle.textContent = `Nearby ClinVar variants (±30 bp): ${nearby.length}${truncated}`;
+                            nearbyTitle.textContent = `Nearby ClinVar variants (±10 bp): ${nearby.length}${truncated}`;
                             content.appendChild(nearbyTitle);
 
-                            // Detect gene strand from snpEff annotation to orient plot 5'→3'.
-                            const snpEffAnns = annotation?.snpeff?.ann
-                                ? (Array.isArray(annotation.snpeff.ann) ? annotation.snpeff.ann : [annotation.snpeff.ann])
-                                : [];
-                            const plotMinusStrand = snpEffAnns.some(a => a.strand === '-' || a.strand === -1);
-
-                            // Genomic (g.) lollipop plot — display ±10 bp even though data covers ±30
+                            // Genomic (g.) lollipop plot
                             const plotWrap = document.createElement('div');
                             plotWrap.style.cssText = 'margin:6px 0 4px;';
                             plotWrap.appendChild(buildLollipopPlot(nearby, posNum, plotMinusStrand, { range: 10 }));
                             content.appendChild(plotWrap);
 
-                            // Protein (p.) lollipop plot — shown when the query has a protein position
-                            const queryHgvsP = snpEffAnns.find(a => a.hgvs_p)?.hgvs_p || '';
-                            const queryProteinPos = parseProteinPos(queryHgvsP);
-                            if (queryProteinPos !== null) {
-                                const protPlot = buildProteinLollipopPlot(nearby, queryProteinPos);
+                            // Protein (p.) lollipop plot — uses genomic-offset positions for alignment
+                            if (queryProteinPos !== null && queryC !== null) {
+                                const protPlot = buildProteinLollipopPlot(
+                                    proteinPlotVariants, queryProteinPos,
+                                    { queryGenomicPos: posNum, queryC, minusStrand: plotMinusStrand }
+                                );
                                 if (protPlot) {
                                     const protPlotWrap = document.createElement('div');
                                     protPlotWrap.style.cssText = 'margin:10px 0 4px;';
