@@ -980,7 +980,14 @@ function buildProteinLollipopPlot(variants, queryProteinPos, { queryGenomicPos =
         let pos = null;
         if (v.pos != null && queryGenomicPos != null && queryC != null) {
             const cCanonical = queryC + strandFactor * (v.pos - queryGenomicPos);
-            if (cCanonical > 0) pos = Math.ceil(cCanonical / 3);
+            if (cCanonical > 0) {
+                const p = Math.ceil(cCanonical / 3);
+                // Only trust the genomic offset when it gives a plausible same-exon result.
+                // A large deviation signals an intron or exon boundary in between; fall through
+                // to title-parsed p. instead (which, though transcript-specific, is better than
+                // placing the variant hundreds of residues off).
+                if (Math.abs(p - queryProteinPos) <= 20) pos = p;
+            }
         }
         if (pos === null) pos = parseProteinPos(getClinvarVariantText(v));
         return { ...v, pos };
@@ -3840,11 +3847,19 @@ document.addEventListener('DOMContentLoaded', () => {
                                     // intronic c. (c.N+M / c.N-M) and those outside the protein window.
                                     const nearbyIds = new Set(nearby.map(v => v.id));
                                     const proteinAdjacent = geneVars.filter(v => {
-                                        if (nearbyIds.has(v.id) || v.pos == null) return false;
-                                        if (/c\.\d+[+\-]\d+/i.test(getClinvarVariantText(v))) return false;
-                                        const cCanonical = queryC + strandFactor * (v.pos - posNum);
-                                        if (cCanonical <= 0) return false;
-                                        return Math.abs(Math.ceil(cCanonical / 3) - queryProteinPos) <= PROTEIN_WINDOW;
+                                        if (nearbyIds.has(v.id)) return false;
+                                        const text = getClinvarVariantText(v);
+                                        if (/c\.\d+[+\-]\d+/i.test(text)) return false;
+                                        // Primary: use genomic offset (exact for same-exon variants)
+                                        if (v.pos != null) {
+                                            const cCanonical = queryC + strandFactor * (v.pos - posNum);
+                                            if (cCanonical > 0 && Math.abs(Math.ceil(cCanonical / 3) - queryProteinPos) <= PROTEIN_WINDOW) return true;
+                                        }
+                                        // Fallback: title-parsed p. for variants with no GRCh37 position or
+                                        // cross-exon variants where the genomic offset is unreliable.
+                                        // A small extra buffer (+5) absorbs common transcript-numbering offsets.
+                                        const titleP = parseProteinPos(text);
+                                        return titleP !== null && Math.abs(titleP - queryProteinPos) <= PROTEIN_WINDOW + 5;
                                     });
                                     proteinPlotVariants = [...nearby, ...proteinAdjacent];
                                 } catch (e) {
