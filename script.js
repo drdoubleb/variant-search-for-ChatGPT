@@ -6040,6 +6040,41 @@ document.addEventListener('DOMContentLoaded', () => {
                         countEl.textContent = `${data.count} guideline record${data.count !== 1 ? 's' : ''} for ${gene} in ${selectedCancer}`;
                         guidelinesResults.appendChild(countEl);
 
+                        const renderKV = (obj, container, depth) => {
+                            Object.entries(obj).forEach(([key, val]) => {
+                                if (val === null || val === undefined || val === '' || (Array.isArray(val) && val.length === 0) || (typeof val === 'object' && !Array.isArray(val) && Object.keys(val).length === 0)) return;
+                                const fmtKey = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                                if (typeof val === 'object' && !Array.isArray(val)) {
+                                    const subTitle = document.createElement('div');
+                                    subTitle.style.cssText = `padding-left:${depth * 12}px;font-weight:600;color:#374151;margin-top:3px;`;
+                                    subTitle.textContent = fmtKey + ':';
+                                    container.appendChild(subTitle);
+                                    renderKV(val, container, depth + 1);
+                                } else {
+                                    const row = document.createElement('div');
+                                    row.style.cssText = `padding-left:${depth * 12}px;margin:2px 0;`;
+                                    const labelEl = document.createElement('span');
+                                    labelEl.style.cssText = 'font-weight:600;color:#374151;';
+                                    labelEl.textContent = fmtKey + ': ';
+                                    const valEl = document.createElement('span');
+                                    valEl.style.cssText = 'color:#1f2937;';
+                                    valEl.textContent = Array.isArray(val) ? val.filter(v => v !== null && v !== '').join(', ') : String(val);
+                                    row.appendChild(labelEl);
+                                    row.appendChild(valEl);
+                                    container.appendChild(row);
+                                }
+                            });
+                        };
+
+                        const renderSection = (title, obj, container) => {
+                            if (!obj || typeof obj !== 'object' || Object.keys(obj).length === 0) return;
+                            const sectionTitle = document.createElement('div');
+                            sectionTitle.style.cssText = 'font-weight:700;color:#166534;margin:6px 0 2px;font-size:0.79rem;text-transform:uppercase;letter-spacing:0.04em;border-top:1px solid #bbf7d0;padding-top:5px;';
+                            sectionTitle.textContent = title;
+                            container.appendChild(sectionTitle);
+                            renderKV(obj, container, 0);
+                        };
+
                         data.results.forEach((record, idx) => {
                             const recordEl = document.createElement('div');
                             recordEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;font-size:0.82rem;';
@@ -6079,15 +6114,39 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
 
                             const detailsEl = document.createElement('details');
-                            detailsEl.style.cssText = 'margin-top:4px;';
+                            detailsEl.style.cssText = 'margin-top:6px;';
                             const detailsSummary = document.createElement('summary');
                             detailsSummary.style.cssText = 'font-size:0.80rem;color:#15803d;cursor:pointer;padding:2px 0;list-style:revert;';
-                            detailsSummary.textContent = 'Full record';
+                            detailsSummary.textContent = 'Full record details';
                             detailsEl.appendChild(detailsSummary);
-                            const detailsPre = document.createElement('pre');
-                            detailsPre.style.cssText = 'font-size:0.75rem;white-space:pre-wrap;word-break:break-word;background:#f0fdf4;padding:6px;border-radius:4px;margin-top:4px;max-height:300px;overflow-y:auto;color:#1f2937;';
-                            detailsPre.textContent = JSON.stringify(record, null, 2);
-                            detailsEl.appendChild(detailsPre);
+
+                            const detailsBody = document.createElement('div');
+                            detailsBody.style.cssText = 'font-size:0.79rem;padding:4px 2px;margin-top:4px;max-height:350px;overflow-y:auto;line-height:1.6;';
+                            if (record.record_id) {
+                                const idRow = document.createElement('div');
+                                idRow.style.cssText = 'font-size:0.74rem;color:#9ca3af;margin-bottom:2px;';
+                                idRow.textContent = `Record ID: ${record.record_id}`;
+                                detailsBody.appendChild(idRow);
+                            }
+                            const sectionDefs = [['Tumor', record.tumor], ['Marker / Biomarker', record.marker], ['Testing', record.testing], ['Therapy', record.therapy], ['Guideline Source', record.guideline_metadata]];
+                            sectionDefs.forEach(([title, obj]) => renderSection(title, obj, detailsBody));
+                            const skipKeys = new Set(['record_id', 'tumor', 'marker', 'testing', 'therapy', 'guideline_metadata', 'dataset_file', 'dataset_record_index', 'dataset_name']);
+                            Object.keys(record).filter(k => !skipKeys.has(k)).forEach(k => {
+                                const val = record[k];
+                                if (val && typeof val === 'object') {
+                                    renderSection(k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()), val, detailsBody);
+                                } else if (val !== null && val !== undefined && val !== '') {
+                                    const row = document.createElement('div');
+                                    row.style.cssText = 'margin:2px 0;';
+                                    const labelEl = document.createElement('span');
+                                    labelEl.style.cssText = 'font-weight:600;color:#374151;';
+                                    labelEl.textContent = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) + ': ';
+                                    row.appendChild(labelEl);
+                                    row.appendChild(document.createTextNode(String(val)));
+                                    detailsBody.appendChild(row);
+                                }
+                            });
+                            detailsEl.appendChild(detailsBody);
                             recordEl.appendChild(detailsEl);
 
                             guidelinesResults.appendChild(recordEl);
@@ -6147,6 +6206,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 aiContent.appendChild(controls);
 
+                const aiContextInspector = document.createElement('details');
+                aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
+                const aiContextInspectorSummary = document.createElement('summary');
+                aiContextInspectorSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;list-style:revert;font-size:0.79rem;';
+                aiContextInspectorSummary.textContent = 'Context sent to AI (populated after run)';
+                aiContextInspector.appendChild(aiContextInspectorSummary);
+                const aiContextPre = document.createElement('pre');
+                aiContextPre.style.cssText = 'font-size:0.73rem;white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e5e7eb;padding:8px;border-radius:4px;margin-top:4px;max-height:400px;overflow-y:auto;color:#374151;';
+                aiContextPre.textContent = 'Run AI review to populate this section.';
+                aiContextInspector.appendChild(aiContextPre);
+                aiContent.appendChild(aiContextInspector);
+
                 const aiOutput = document.createElement('div');
                 aiOutput.className = 'ai-review-output';
                 aiContent.appendChild(aiOutput);
@@ -6182,6 +6253,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             myvariant_annotation: annotation,
                             ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
                         };
+                        aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
+                        aiContextInspectorSummary.textContent = 'Context sent to AI';
                         const data = await fetchAiReview(aiContext, modelSelect.value);
                         renderAiReview(data.review, aiOutput);
                     } catch (err) {
