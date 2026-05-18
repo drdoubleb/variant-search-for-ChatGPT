@@ -5922,6 +5922,189 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
             }
+            // Card: Guidelines
+            {
+                const GUIDELINES_BASE = 'https://drdoubleb.com/guidelines';
+                const guidelinesCard = document.createElement('div');
+                guidelinesCard.className = 'card';
+                const guidelinesTitle = document.createElement('h3');
+                guidelinesTitle.textContent = 'Guidelines';
+                applyCardTheme(guidelinesCard, 'Guidelines');
+                guidelinesCard.appendChild(guidelinesTitle);
+
+                const guidelinesContent = document.createElement('div');
+                guidelinesContent.className = 'card-content';
+
+                const guidelinesIntro = document.createElement('p');
+                guidelinesIntro.style.cssText = 'font-size:0.85rem;color:#6b7280;margin-bottom:8px;';
+                guidelinesIntro.textContent = 'Select a cancer type to retrieve guideline recommendations for this gene.';
+                guidelinesContent.appendChild(guidelinesIntro);
+
+                const dropdownRow = document.createElement('div');
+                dropdownRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;';
+
+                const cancerSelect = document.createElement('select');
+                cancerSelect.style.cssText = 'font-size:0.85rem;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px;flex:1;max-width:320px;';
+
+                const defaultOpt = document.createElement('option');
+                defaultOpt.value = '';
+                defaultOpt.textContent = 'Loading cancer types…';
+                defaultOpt.disabled = true;
+                defaultOpt.selected = true;
+                cancerSelect.appendChild(defaultOpt);
+                dropdownRow.appendChild(cancerSelect);
+                guidelinesContent.appendChild(dropdownRow);
+
+                const guidelinesResults = document.createElement('div');
+                guidelinesContent.appendChild(guidelinesResults);
+
+                guidelinesCard.appendChild(guidelinesContent);
+                cardsContainer.appendChild(guidelinesCard);
+
+                (async () => {
+                    try {
+                        const resp = await fetch(`${GUIDELINES_BASE}/api/cancer-types.php`);
+                        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                        const data = await resp.json();
+                        cancerSelect.innerHTML = '';
+                        const placeholder = document.createElement('option');
+                        placeholder.value = '';
+                        placeholder.textContent = `— Select cancer type (${data.count} available) —`;
+                        placeholder.disabled = true;
+                        placeholder.selected = true;
+                        cancerSelect.appendChild(placeholder);
+                        (data.cancer_types || []).forEach(ct => {
+                            const opt = document.createElement('option');
+                            opt.value = ct.name;
+                            opt.textContent = ct.name + (ct.record_count ? ` (${ct.record_count} records)` : '');
+                            cancerSelect.appendChild(opt);
+                        });
+                        if (tumorType) {
+                            const tumorLower = tumorType.toLowerCase().trim();
+                            const matched = (data.cancer_types || []).find(ct =>
+                                (ct.aliases || []).some(a => a.toLowerCase() === tumorLower) ||
+                                ct.name.toLowerCase() === tumorLower ||
+                                ct.name.toLowerCase().includes(tumorLower) ||
+                                tumorLower.includes(ct.name.toLowerCase())
+                            );
+                            if (matched) {
+                                cancerSelect.value = matched.name;
+                                cancerSelect.dispatchEvent(new Event('change'));
+                            }
+                        }
+                    } catch (err) {
+                        cancerSelect.innerHTML = '';
+                        const errOpt = document.createElement('option');
+                        errOpt.textContent = 'Failed to load cancer types';
+                        errOpt.disabled = true;
+                        errOpt.selected = true;
+                        cancerSelect.appendChild(errOpt);
+                    }
+                })();
+
+                cancerSelect.addEventListener('change', async () => {
+                    const selectedCancer = cancerSelect.value;
+                    if (!selectedCancer) return;
+                    const gene = aiReviewGene || (geneNames && geneNames[0]) || '';
+                    if (!gene) {
+                        guidelinesResults.innerHTML = '<div style="font-size:0.85rem;color:#9ca3af;">No gene available for guideline lookup.</div>';
+                        return;
+                    }
+                    guidelinesResults.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;padding:4px 0;">Loading guidelines…</div>';
+                    try {
+                        const params = new URLSearchParams({ cancer: selectedCancer, gene });
+                        const resp = await fetch(`${GUIDELINES_BASE}/api/search.php?${params}`);
+                        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                        const data = await resp.json();
+
+                        aiReviewExtras.guidelines = {
+                            cancer_type: selectedCancer,
+                            gene,
+                            query: data.query,
+                            count: data.count,
+                            results: data.results
+                        };
+
+                        guidelinesResults.innerHTML = '';
+
+                        if (!data.results || data.results.length === 0) {
+                            const noResults = document.createElement('div');
+                            noResults.style.cssText = 'font-size:0.85rem;color:#9ca3af;';
+                            noResults.textContent = `No guideline records found for ${gene} in ${selectedCancer}.`;
+                            guidelinesResults.appendChild(noResults);
+                            return;
+                        }
+
+                        const countEl = document.createElement('div');
+                        countEl.style.cssText = 'font-size:0.85rem;font-weight:600;color:#3f6212;margin-bottom:8px;';
+                        countEl.textContent = `${data.count} guideline record${data.count !== 1 ? 's' : ''} for ${gene} in ${selectedCancer}`;
+                        guidelinesResults.appendChild(countEl);
+
+                        data.results.forEach((record, idx) => {
+                            const recordEl = document.createElement('div');
+                            recordEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;font-size:0.82rem;';
+
+                            const headerEl = document.createElement('div');
+                            headerEl.style.cssText = 'font-weight:700;color:#166534;margin-bottom:4px;';
+                            const markerDisplay = (record.marker && (record.marker.display_name || record.marker.symbol)) || `Record ${idx + 1}`;
+                            const tumorDisplay = (record.tumor && (record.tumor.name || record.tumor.subtype)) || selectedCancer;
+                            headerEl.textContent = `${markerDisplay} — ${tumorDisplay}`;
+                            recordEl.appendChild(headerEl);
+
+                            const buildKVRow = (label, value) => {
+                                if (!value) return;
+                                const row = document.createElement('div');
+                                row.style.cssText = 'margin-bottom:3px;';
+                                const lbl = document.createElement('span');
+                                lbl.style.cssText = 'font-weight:600;';
+                                lbl.textContent = label + ': ';
+                                row.appendChild(lbl);
+                                row.appendChild(document.createTextNode(value));
+                                recordEl.appendChild(row);
+                            };
+
+                            if (record.therapy) {
+                                const t = record.therapy;
+                                if (t.recommended_therapies && t.recommended_therapies.length > 0) {
+                                    buildKVRow('Recommended therapy', t.recommended_therapies.join(', '));
+                                }
+                                if (t.category) buildKVRow('Category', t.category);
+                                if (t.context) buildKVRow('Therapy context', t.context);
+                            }
+                            if (record.testing) {
+                                const te = record.testing;
+                                if (te.recommended_test) buildKVRow('Recommended test', te.recommended_test);
+                                if (te.context) buildKVRow('Testing context', te.context);
+                                if (te.modality) buildKVRow('Modality', te.modality);
+                            }
+
+                            const detailsEl = document.createElement('details');
+                            detailsEl.style.cssText = 'margin-top:4px;';
+                            const detailsSummary = document.createElement('summary');
+                            detailsSummary.style.cssText = 'font-size:0.80rem;color:#15803d;cursor:pointer;padding:2px 0;list-style:revert;';
+                            detailsSummary.textContent = 'Full record';
+                            detailsEl.appendChild(detailsSummary);
+                            const detailsPre = document.createElement('pre');
+                            detailsPre.style.cssText = 'font-size:0.75rem;white-space:pre-wrap;word-break:break-word;background:#f0fdf4;padding:6px;border-radius:4px;margin-top:4px;max-height:300px;overflow-y:auto;color:#1f2937;';
+                            detailsPre.textContent = JSON.stringify(record, null, 2);
+                            detailsEl.appendChild(detailsPre);
+                            recordEl.appendChild(detailsEl);
+
+                            guidelinesResults.appendChild(recordEl);
+                        });
+
+                        const sourceNote = document.createElement('div');
+                        sourceNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+                        sourceNote.textContent = 'Source: drdoubleb.com/guidelines. For reference only — verify against current published guidelines.';
+                        guidelinesResults.appendChild(sourceNote);
+
+                    } catch (err) {
+                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${err.message}</div>`;
+                        aiReviewExtras.guidelines = { error: err.message, cancer_type: selectedCancer, gene };
+                    }
+                });
+            }
+
             // Optional AI review card (manual trigger; sends current annotation context to OpenRouter via backend proxy).
             {
                 const aiCard = document.createElement('div');

@@ -378,6 +378,14 @@ footer a:hover {
     border-bottom-color: #2dd4bf;
 }
 
+.card[data-card="guidelines"] {
+    border-color: #bef264;
+}
+.card[data-card="guidelines"] h3 {
+    background-color: #f7fee7;
+    border-bottom-color: #bef264;
+}
+
 /* Card tab bar */
 .card-tabs {
     display: flex;
