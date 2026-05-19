@@ -6086,6 +6086,22 @@ document.addEventListener('DOMContentLoaded', () => {
                                     subTitle.textContent = fmtKey + ':';
                                     container.appendChild(subTitle);
                                     renderKV(val, container, depth + 1);
+                                } else if (Array.isArray(val) && val.some(v => v !== null && typeof v === 'object')) {
+                                    // Array of objects — render each item as a nested block
+                                    const subTitle = document.createElement('div');
+                                    subTitle.style.cssText = `padding-left:${depth * 12}px;font-weight:600;color:#374151;margin-top:3px;`;
+                                    subTitle.textContent = fmtKey + ':';
+                                    container.appendChild(subTitle);
+                                    val.forEach(item => {
+                                        if (item !== null && typeof item === 'object') {
+                                            renderKV(item, container, depth + 1);
+                                        } else if (item !== null && item !== '') {
+                                            const row = document.createElement('div');
+                                            row.style.cssText = `padding-left:${(depth + 1) * 12}px;margin:2px 0;color:#1f2937;`;
+                                            row.textContent = String(item);
+                                            container.appendChild(row);
+                                        }
+                                    });
                                 } else {
                                     const row = document.createElement('div');
                                     row.style.cssText = `padding-left:${depth * 12}px;margin:2px 0;`;
