@@ -6394,6 +6394,36 @@ document.addEventListener('DOMContentLoaded', () => {
                         .slice(0, 5);
                     supplemental.spliceai_lookup = { best: spliceSummary.best, top_transcripts: topTranscripts };
                 }
+                // Drop sex-stratified (_XX/_XY) and 1000 Genomes (1KG:*) subpopulations
+                // from gnomAD v4 populations — matches the UI filter and avoids dumping
+                // ~100 redundant rows into the AI payload.
+                if (supplemental.gnomad_v4?.data) {
+                    const condenseV4Populations = (src) => {
+                        if (!src || !Array.isArray(src.populations)) return src;
+                        const populations = src.populations.filter((p) => {
+                            const id = String(p?.id || '').toUpperCase();
+                            if (!id) return false;
+                            if (/_XX$|_XY$/.test(id)) return false;
+                            if (id.startsWith('1KG:')) return false;
+                            return true;
+                        });
+                        return { ...src, populations };
+                    };
+                    supplemental.gnomad_v4 = {
+                        ...supplemental.gnomad_v4,
+                        data: {
+                            ...supplemental.gnomad_v4.data,
+                            genome: condenseV4Populations(supplemental.gnomad_v4.data.genome),
+                            exome: condenseV4Populations(supplemental.gnomad_v4.data.exome)
+                        }
+                    };
+                }
+                // Strip the `debug` field (dataset fetch attempts, sample column listings, etc.)
+                // from the TP53 mutation database response — only useful for the local Debug pane.
+                if (supplemental.tp53_mutation_database && typeof supplemental.tp53_mutation_database === 'object' && supplemental.tp53_mutation_database.debug) {
+                    const { debug: _tp53Debug, ...tp53Rest } = supplemental.tp53_mutation_database;
+                    supplemental.tp53_mutation_database = tp53Rest;
+                }
                 // Strip gene.variants.nodes from CiViC response — all variant names, not relevant for the matched variant
                 if (supplemental.civic_api?.gene?.variants?.nodes) {
                     supplemental.civic_api = {
