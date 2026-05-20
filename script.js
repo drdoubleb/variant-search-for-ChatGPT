@@ -4194,7 +4194,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
                             cosmicItems['Site Counts'] = { html: `<ul>${siteRows.join('')}</ul>` };
                         }
-                        aiReviewExtras.cosmic_extended = { summary: cosmicItems, raw: cosmicData, meta };
+                        // `cosmicItems` is already included verbatim in
+                        // details["COSMIC (Extended)"], so omit it from the AI payload.
+                        aiReviewExtras.cosmic_extended = { raw: cosmicData, meta };
                         detailsData.push({ title: 'COSMIC (Extended)', items: cosmicItems });
                     }
                 } catch (cosmicErr) {
@@ -5607,7 +5609,31 @@ document.addEventListener('DOMContentLoaded', () => {
                         v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${msg}</div>`;
                     };
                     fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
-                        aiReviewExtras.gnomad_v4 = result;
+                        // Drop sex-stratified (_XX/_XY) and 1000 Genomes (1KG:*)
+                        // subpopulations from the populations arrays — matches the UI
+                        // filter and avoids dumping ~100 redundant rows into the AI payload.
+                        const condenseV4Populations = (src) => {
+                            if (!src || !Array.isArray(src.populations)) return src;
+                            const populations = src.populations.filter((p) => {
+                                const id = String(p?.id || '').toUpperCase();
+                                if (!id) return false;
+                                if (/_XX$|_XY$/.test(id)) return false;
+                                if (id.startsWith('1KG:')) return false;
+                                return true;
+                            });
+                            return { ...src, populations };
+                        };
+                        const condensedV4 = (result && result.data)
+                            ? {
+                                ...result,
+                                data: {
+                                    ...result.data,
+                                    genome: condenseV4Populations(result.data.genome),
+                                    exome: condenseV4Populations(result.data.exome)
+                                }
+                            }
+                            : result;
+                        aiReviewExtras.gnomad_v4 = condensedV4;
                         if (!result) { showV4Msg('gnomAD v4.1 unavailable.'); return; }
                         const { status, data: v4data, grch38Id, message, detail } = result;
                         if (status === 'liftover_failed') {
@@ -6001,7 +6027,15 @@ document.addEventListener('DOMContentLoaded', () => {
                         genomic: tp53Genomic || '',
                         debug: true
                     });
-                    aiReviewExtras.tp53_mutation_database = tp53Data;
+                    // Strip the `debug` field (dataset fetch attempts, column
+                    // listings, etc.) from the AI payload — it's only useful for the
+                    // local "Debug info" pane below.
+                    if (tp53Data && typeof tp53Data === 'object') {
+                        const { debug: _tp53Debug, ...tp53DataForAi } = tp53Data;
+                        aiReviewExtras.tp53_mutation_database = tp53DataForAi;
+                    } else {
+                        aiReviewExtras.tp53_mutation_database = tp53Data;
+                    }
                     if (tp53Data && typeof tp53Data === 'object') {
                         const best = tp53Data.matches && tp53Data.matches[0];
                         const path = tp53Data.pathogenicity || (best ? best : null);
@@ -7507,7 +7541,21 @@ document.addEventListener('DOMContentLoaded', () => {
                                 if (!clinvarOk && clinvar) trimmed.clinvar = clinvar;
                                 if (!civicOk && civic) trimmed.civic = civic;
                                 if (!gnomadOk && gnomad_exome) trimmed.gnomad_exome = gnomad_exome;
-                                if (dbsnp) trimmed.dbsnp = dbsnp;
+                                if (dbsnp) {
+                                    // Drop noisy fields that don't help variant interpretation:
+                                    // - gene.rnas: ~15 transcript entries that all report the reference
+                                    //   SPDI (e.g. c.818=), not the variant itself.
+                                    // - citations: bare PMID list with no titles/abstracts.
+                                    const { citations: _dbsnpCitations, gene: dbsnpGene, ...dbsnpRest } = dbsnp;
+                                    let trimmedGene = dbsnpGene;
+                                    if (dbsnpGene && typeof dbsnpGene === 'object') {
+                                        const { rnas: _dbsnpRnas, ...geneRest } = dbsnpGene;
+                                        trimmedGene = geneRest;
+                                    }
+                                    trimmed.dbsnp = trimmedGene !== undefined
+                                        ? { ...dbsnpRest, gene: trimmedGene }
+                                        : dbsnpRest;
+                                }
                                 return Object.keys(trimmed).length > 0 ? trimmed : null;
                             })(),
                             ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
