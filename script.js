@@ -6325,7 +6325,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
                     ['clinvar_variant_record', clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)],
-                    ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 30).then(r => r.variants) : Promise.resolve([])],
+                    ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 5).then(r => ({
+                        note: 'ClinVar variants within ±5bp of the queried position. The queried variant itself may appear here if it has its own ClinVar entry. Do not use these neighboring variants\' classifications as the classification for the queried variant.',
+                        window_bp: 5,
+                        variants: r.variants
+                    })) : Promise.resolve({ note: 'ClinVar variants within ±5bp of the queried position.', window_bp: 5, variants: [] })],
                     ['civic_api', aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)],
                     ['gnomad_v4', coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt) : Promise.resolve(null)],
                     ['spliceai_lookup', spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)],
@@ -6347,6 +6351,25 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? result.value
                         : { error: result.reason?.message || String(result.reason || 'Unavailable') };
                 });
+                // Replace raw SpliceAI payload with compact summary (top 5 transcripts by delta score)
+                if (supplemental.spliceai_lookup && !supplemental.spliceai_lookup.error) {
+                    const spliceSummary = getSpliceAiScoreSummary(supplemental.spliceai_lookup);
+                    const topTranscripts = (spliceSummary.transcripts || [])
+                        .filter(t => t.best !== null)
+                        .sort((a, b) => (b.best?.value ?? 0) - (a.best?.value ?? 0))
+                        .slice(0, 5);
+                    supplemental.spliceai_lookup = { best: spliceSummary.best, top_transcripts: topTranscripts };
+                }
+                // Strip gene.variants.nodes from CiViC response — all variant names, not relevant for the matched variant
+                if (supplemental.civic_api?.gene?.variants?.nodes) {
+                    supplemental.civic_api = {
+                        ...supplemental.civic_api,
+                        gene: {
+                            ...supplemental.civic_api.gene,
+                            variants: { totalCount: supplemental.civic_api.gene.variants.totalCount }
+                        }
+                    };
+                }
                 supplemental.lookup_coordinates = coords;
                 supplemental.spliceai_variant = spliceApiVariant;
                 supplemental.pubmed_query = pubmedTerm;
@@ -7472,7 +7495,19 @@ document.addEventListener('DOMContentLoaded', () => {
                             fda_companion_diagnostics_records: fdaRecords,
                             clinical_trials: clinicalTrialData,
                             supplemental_card_data: supplementalContext,
-                            myvariant_annotation: annotation,
+                            myvariant_annotation: (() => {
+                                if (!annotation) return null;
+                                // Keep only fields not already in details/transcripts/summary_rows and
+                                // not superseded by dedicated API calls. clinvar/civic/gnomad_exome are
+                                // retained alongside their dedicated API counterparts for cross-checking.
+                                const { clinvar, civic, gnomad_exome, dbsnp } = annotation;
+                                const trimmed = {};
+                                if (clinvar) trimmed.clinvar = clinvar;
+                                if (civic) trimmed.civic = civic;
+                                if (gnomad_exome) trimmed.gnomad_exome = gnomad_exome;
+                                if (dbsnp) trimmed.dbsnp = dbsnp;
+                                return trimmed;
+                            })(),
                             ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
                         };
                         aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
