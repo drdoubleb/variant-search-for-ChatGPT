@@ -4194,6 +4194,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
                             cosmicItems['Site Counts'] = { html: `<ul>${siteRows.join('')}</ul>` };
                         }
+                        if (meta && meta.last_updated) {
+                            cosmicItems['Dataset Last Updated'] = meta.last_updated;
+                        }
                         // Pre-computed frequencies and site breakdown are kept in
                         // details["COSMIC (Extended)"]; the raw counts + meta totals
                         // that produced them are omitted from the AI payload to avoid
