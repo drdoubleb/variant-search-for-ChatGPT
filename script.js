@@ -7497,16 +7497,18 @@ document.addEventListener('DOMContentLoaded', () => {
                             supplemental_card_data: supplementalContext,
                             myvariant_annotation: (() => {
                                 if (!annotation) return null;
-                                // Keep only fields not already in details/transcripts/summary_rows and
-                                // not superseded by dedicated API calls. clinvar/civic/gnomad_exome are
-                                // retained alongside their dedicated API counterparts for cross-checking.
                                 const { clinvar, civic, gnomad_exome, dbsnp } = annotation;
+                                // Use dedicated API results when available; fall back to myvariant.info
+                                // only when the dedicated call failed or returned no data.
+                                const clinvarOk = supplementalContext?.clinvar_variant_record && !supplementalContext.clinvar_variant_record.error;
+                                const civicOk = supplementalContext?.civic_api?.gene != null;
+                                const gnomadOk = supplementalContext?.gnomad_v4?.status === 'found';
                                 const trimmed = {};
-                                if (clinvar) trimmed.clinvar = clinvar;
-                                if (civic) trimmed.civic = civic;
-                                if (gnomad_exome) trimmed.gnomad_exome = gnomad_exome;
+                                if (!clinvarOk && clinvar) trimmed.clinvar = clinvar;
+                                if (!civicOk && civic) trimmed.civic = civic;
+                                if (!gnomadOk && gnomad_exome) trimmed.gnomad_exome = gnomad_exome;
                                 if (dbsnp) trimmed.dbsnp = dbsnp;
-                                return trimmed;
+                                return Object.keys(trimmed).length > 0 ? trimmed : null;
                             })(),
                             ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
                         };
