@@ -5657,10 +5657,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         const collectV4Pops = (label, src) => {
                             if (!src || !Array.isArray(src.populations)) return;
                             src.populations.forEach((p) => {
+                                const id = (p.id || '').toUpperCase();
+                                // Skip sex-stratified subgroups (_XX/_XY) and 1000 Genomes subpopulations (1KG:*)
+                                if (/_XX$|_XY$/.test(id) || id.startsWith('1KG:')) return;
                                 if (p.af != null || p.ac != null) {
                                     // VariantPopulation has no af field — compute from ac/an
                                     const popAf = (p.ac != null && p.an > 0) ? p.ac / p.an : null;
-                                    v4Pops.push({ dataset: label, id: (p.id || '').toUpperCase(), af: popAf, ac: p.ac, an: p.an });
+                                    v4Pops.push({ dataset: label, id, af: popAf, ac: p.ac, an: p.an });
                                 }
                             });
                         };
