@@ -4194,9 +4194,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
                             cosmicItems['Site Counts'] = { html: `<ul>${siteRows.join('')}</ul>` };
                         }
-                        // `cosmicItems` is already included verbatim in
-                        // details["COSMIC (Extended)"], so omit it from the AI payload.
-                        aiReviewExtras.cosmic_extended = { raw: cosmicData, meta };
+                        // Pre-computed frequencies and site breakdown are kept in
+                        // details["COSMIC (Extended)"]; the raw counts + meta totals
+                        // that produced them are omitted from the AI payload to avoid
+                        // duplicating COSMIC data three ways.
                         detailsData.push({ title: 'COSMIC (Extended)', items: cosmicItems });
                     }
                 } catch (cosmicErr) {
