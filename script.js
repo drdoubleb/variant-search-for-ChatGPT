@@ -46,6 +46,8 @@ function appendQueryParams(endpoint, params) {
 // infer a gene symbol from the normalised genomic HGVS string, which may
 // incorrectly yield "chr7" or similar. See normalizeVariantInput() below.
 let geneHintGlobal = null;
+let alterationTypeGlobal = null;
+let isGeneOnlyMode = false;
 
 // Keep third-party API latency from blocking the UI for long periods.
 const API_TIMEOUT_MS = {
@@ -2204,6 +2206,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Reset any previous gene hint.  Without resetting, a prior search that
         // included a gene symbol could incorrectly influence the next query.
         geneHintGlobal = null;
+        alterationTypeGlobal = null;
+        isGeneOnlyMode = false;
 
         // Normalise user input to improve variant parsing. Accept inputs like
         // "BRAF V600E", "braf:p.v600e", "BRAF:V600E" etc. by converting them
@@ -2216,6 +2220,23 @@ document.addEventListener('DOMContentLoaded', () => {
         syncVariantInUrl(rawInput);
         syncTumorTypeInUrl(tumorType);
         let query = rawInput;
+
+        // Detect gene-only or gene+descriptor input before normalisation.
+        {
+            const ALTERATION_DESCRIPTORS = /^(mutation|fusion|rearrangement|loss|amplification|gain|deletion|overexpression|splice|truncation|frameshift|alteration)s?$/i;
+            const toks = rawInput.split(/[\s:]+/).filter(Boolean);
+            const looksLikeGene = (s) => /^[A-Za-z][A-Za-z0-9-]{1,9}$/.test(s) && !/^(?:chr|NM_|NP_|rs\d)/i.test(s);
+            if (toks.length === 1 && looksLikeGene(toks[0])) {
+                geneHintGlobal = toks[0].toUpperCase();
+                alterationTypeGlobal = null;
+                isGeneOnlyMode = true;
+            } else if (toks.length === 2 && looksLikeGene(toks[0]) && ALTERATION_DESCRIPTORS.test(toks[1])) {
+                geneHintGlobal = toks[0].toUpperCase();
+                alterationTypeGlobal = toks[1].toLowerCase().replace(/s$/, '');
+                isGeneOnlyMode = true;
+            }
+        }
+
         const normalizeVariantInput = (raw) => {
             let s = raw.trim();
             // If the input contains a '>' (looks like genomic substitution), attempt to parse flexible genomic formats.
