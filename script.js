@@ -3562,6 +3562,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 controls.appendChild(runButton);
                 aiContent.appendChild(controls);
 
+                const notesWrap = document.createElement('div');
+                notesWrap.className = 'ai-review-notes';
+                const notesLabel = document.createElement('label');
+                notesLabel.setAttribute('for', 'aiReviewNotesGene');
+                notesLabel.textContent = 'Any additional notes for AI review';
+                notesWrap.appendChild(notesLabel);
+                const notesInput = document.createElement('textarea');
+                notesInput.id = 'aiReviewNotesGene';
+                notesInput.rows = 3;
+                notesInput.placeholder = 'Optional — extra clinical context, prior therapies, specific questions, etc.';
+                notesWrap.appendChild(notesInput);
+                aiContent.appendChild(notesWrap);
+
                 const aiContextInspector = document.createElement('details');
                 aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
                 const aiContextInspectorSummary = document.createElement('summary');
@@ -3603,11 +3616,13 @@ document.addEventListener('DOMContentLoaded', () => {
                             pubmed: pubmedData,
                             openfda_drug_labels: openFdaData
                         };
+                        const userNotes = (notesInput.value || '').trim();
                         const aiContext = {
                             submitted_query: rawInput,
                             gene,
                             alteration_type: altType,
                             tumor_type: tumorType,
+                            user_notes: userNotes || undefined,
                             fda_companion_diagnostics_records: fdaRecords,
                             clinical_trials: clinicalTrialData,
                             supplemental_card_data: supplementalContext
@@ -7519,6 +7534,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 aiContent.appendChild(controls);
 
+                const notesWrap = document.createElement('div');
+                notesWrap.className = 'ai-review-notes';
+                const notesLabel = document.createElement('label');
+                notesLabel.setAttribute('for', 'aiReviewNotes');
+                notesLabel.textContent = 'Any additional notes for AI review';
+                notesWrap.appendChild(notesLabel);
+                const notesInput = document.createElement('textarea');
+                notesInput.id = 'aiReviewNotes';
+                notesInput.rows = 3;
+                notesInput.placeholder = 'Optional — extra clinical context, prior therapies, specific questions, etc.';
+                notesWrap.appendChild(notesInput);
+                aiContent.appendChild(notesWrap);
+
                 const aiContextInspector = document.createElement('details');
                 aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
                 const aiContextInspectorSummary = document.createElement('summary');
@@ -7548,10 +7576,12 @@ document.addEventListener('DOMContentLoaded', () => {
                             aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
                             fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
                         ]);
+                        const userNotes = (notesInput.value || '').trim();
                         const aiContext = {
                             submitted_variant: rawInput,
                             normalized_genomic_variant: gVariant,
                             tumor_type: tumorType,
+                            user_notes: userNotes || undefined,
                             gene: aiReviewGene,
                             genes: geneNames,
                             selected_variant_term: aiReviewSearchVariantTerm,
