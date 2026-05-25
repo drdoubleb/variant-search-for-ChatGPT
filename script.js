@@ -1054,22 +1054,34 @@ async function fetchFdaCompanionDiagnostics(gene) {
 // Many FDA oncology labels (esp. checkpoint inhibitors) carve out genes in
 // the *exclusion* criteria of their indication, e.g.
 //   "...with no EGFR or ALK genomic tumor aberrations"
-//   "...with no EGFR, ALK or ROS1 aberrations"
+//   "...with no sensitizing epidermal growth factor receptor (EGFR) mutation
+//      or anaplastic lymphoma kinase (ALK) genomic tumor aberrations"
+//   "...with no known EGFR mutations or ALK rearrangements"
 //   "...for BRAF wild-type melanoma"
+//   "Patients with EGFR or ALK genomic tumor aberrations should have disease
+//      progression on FDA-approved therapy for these aberrations prior to
+//      receiving X"   (sequencing carve-out used by pembrolizumab,
+//                      atezolizumab, nivolumab, ramucirumab, etc.)
 // A naive substring match treats these as positive mentions of the gene
 // and floods AI review with non-matches. findOpenFdaNegationSpans() returns
 // character ranges covering such phrases; openFdaGeneOnlyInNegativeContext()
 // excludes a record only when *every* occurrence of the queried gene falls
 // inside one of those spans, so a label that also mentions the gene
-// positively elsewhere is still kept.
+// positively elsewhere (e.g. CYRAMZA + erlotinib for EGFR exon 19) is kept.
+//
+// Spans are bounded by sentence terminators (. ; :) and short lazy windows
+// so a trigger word in one sentence can't accidentally negate a positive
+// mention several sentences later.
 //
 // KEEP IN SYNC with tests/openfda-filter.test.js — no module system in the
 // browser, so the test file re-declares the same regexes.
 const OPENFDA_GENE_TOKEN = String.raw`[A-Z][A-Z0-9]{1,7}(?:[-/][A-Z0-9]{1,7})?`;
+const OPENFDA_NOUN = String.raw`(?:[Aa]berration|[Aa]lteration|[Mm]utation|[Rr]earrangement|[Ff]usion|[Dd]river|[Aa]mplification)s?\b`;
 const OPENFDA_NEGATION_LIST_RE = new RegExp(
-    String.raw`\b(?:[Nn]o|[Ww]ithout|[Ww]hose\s+tumors?\s+(?:have\s+no|do\s+not\s+have|lack)|[Ll]acking|[Aa]bsence\s+of)\s+` +
-    `(?:${OPENFDA_GENE_TOKEN}(?:\\s*,\\s*|\\s+(?:or|and)\\s+|\\s+))*${OPENFDA_GENE_TOKEN}` +
-    String.raw`\s+(?:genomic\s+(?:tumor\s+)?)?(?:[Aa]berration|[Aa]lteration|[Mm]utation|[Rr]earrangement|[Ff]usion|[Dd]river|[Aa]mplification)s?\b`,
+    String.raw`\b(?:[Nn]o|[Ww]ithout|[Ww]hose\s+tumors?\s+(?:have\s+no|do\s+not\s+have|lack)|[Ll]acking|[Aa]bsence\s+of|[Nn]egative\s+for)\s+` +
+    String.raw`[^.;:]{0,80}?\b${OPENFDA_GENE_TOKEN}\b` +
+    String.raw`[^.;:]{0,80}?${OPENFDA_NOUN}` +
+    String.raw`(?:\s+(?:or|and)\s+[^.;:]{0,80}?\b${OPENFDA_GENE_TOKEN}\b[^.;:]{0,80}?${OPENFDA_NOUN})*`,
     'g'
 );
 const OPENFDA_WILDTYPE_TRAIL_RE = new RegExp(
@@ -1080,11 +1092,23 @@ const OPENFDA_WILDTYPE_LEAD_RE = new RegExp(
     String.raw`\bwild[- ]?type\s+${OPENFDA_GENE_TOKEN}\b`,
     'g'
 );
+const OPENFDA_PRIOR_THERAPY_RE = new RegExp(
+    String.raw`\b[Pp]atients\s+with\s+[^.;:]{0,150}?\b${OPENFDA_GENE_TOKEN}\b` +
+    String.raw`[^.;:]{0,200}?${OPENFDA_NOUN}` +
+    String.raw`[^.;:]{0,150}?should\s+have\s+(?:disease\s+)?progression\s+on\s+FDA[- ]approved\s+therapy`,
+    'g'
+);
 
 function findOpenFdaNegationSpans(text) {
     if (!text) return [];
     const spans = [];
-    for (const re of [OPENFDA_NEGATION_LIST_RE, OPENFDA_WILDTYPE_TRAIL_RE, OPENFDA_WILDTYPE_LEAD_RE]) {
+    const regexes = [
+        OPENFDA_NEGATION_LIST_RE,
+        OPENFDA_WILDTYPE_TRAIL_RE,
+        OPENFDA_WILDTYPE_LEAD_RE,
+        OPENFDA_PRIOR_THERAPY_RE,
+    ];
+    for (const re of regexes) {
         re.lastIndex = 0;
         let m;
         while ((m = re.exec(text)) !== null) {

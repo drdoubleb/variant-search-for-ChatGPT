@@ -10,10 +10,12 @@
  */
 
 const OPENFDA_GENE_TOKEN = String.raw`[A-Z][A-Z0-9]{1,7}(?:[-/][A-Z0-9]{1,7})?`;
+const OPENFDA_NOUN = String.raw`(?:[Aa]berration|[Aa]lteration|[Mm]utation|[Rr]earrangement|[Ff]usion|[Dd]river|[Aa]mplification)s?\b`;
 const OPENFDA_NEGATION_LIST_RE = new RegExp(
-    String.raw`\b(?:[Nn]o|[Ww]ithout|[Ww]hose\s+tumors?\s+(?:have\s+no|do\s+not\s+have|lack)|[Ll]acking|[Aa]bsence\s+of)\s+` +
-    `(?:${OPENFDA_GENE_TOKEN}(?:\\s*,\\s*|\\s+(?:or|and)\\s+|\\s+))*${OPENFDA_GENE_TOKEN}` +
-    String.raw`\s+(?:genomic\s+(?:tumor\s+)?)?(?:[Aa]berration|[Aa]lteration|[Mm]utation|[Rr]earrangement|[Ff]usion|[Dd]river|[Aa]mplification)s?\b`,
+    String.raw`\b(?:[Nn]o|[Ww]ithout|[Ww]hose\s+tumors?\s+(?:have\s+no|do\s+not\s+have|lack)|[Ll]acking|[Aa]bsence\s+of|[Nn]egative\s+for)\s+` +
+    String.raw`[^.;:]{0,80}?\b${OPENFDA_GENE_TOKEN}\b` +
+    String.raw`[^.;:]{0,80}?${OPENFDA_NOUN}` +
+    String.raw`(?:\s+(?:or|and)\s+[^.;:]{0,80}?\b${OPENFDA_GENE_TOKEN}\b[^.;:]{0,80}?${OPENFDA_NOUN})*`,
     'g'
 );
 const OPENFDA_WILDTYPE_TRAIL_RE = new RegExp(
@@ -24,11 +26,23 @@ const OPENFDA_WILDTYPE_LEAD_RE = new RegExp(
     String.raw`\bwild[- ]?type\s+${OPENFDA_GENE_TOKEN}\b`,
     'g'
 );
+const OPENFDA_PRIOR_THERAPY_RE = new RegExp(
+    String.raw`\b[Pp]atients\s+with\s+[^.;:]{0,150}?\b${OPENFDA_GENE_TOKEN}\b` +
+    String.raw`[^.;:]{0,200}?${OPENFDA_NOUN}` +
+    String.raw`[^.;:]{0,150}?should\s+have\s+(?:disease\s+)?progression\s+on\s+FDA[- ]approved\s+therapy`,
+    'g'
+);
 
 function findOpenFdaNegationSpans(text) {
     if (!text) return [];
     const spans = [];
-    for (const re of [OPENFDA_NEGATION_LIST_RE, OPENFDA_WILDTYPE_TRAIL_RE, OPENFDA_WILDTYPE_LEAD_RE]) {
+    const regexes = [
+        OPENFDA_NEGATION_LIST_RE,
+        OPENFDA_WILDTYPE_TRAIL_RE,
+        OPENFDA_WILDTYPE_LEAD_RE,
+        OPENFDA_PRIOR_THERAPY_RE,
+    ];
+    for (const re of regexes) {
         re.lastIndex = 0;
         let m;
         while ((m = re.exec(text)) !== null) {
@@ -58,7 +72,7 @@ function openFdaGeneOnlyInNegativeContext(text, gene) {
 // because every gene mention is in a negation; false = kept).
 
 const cases = [
-    // ── The boilerplate the user called out ──
+    // ── The boilerplate the user originally called out ──
     {
         name: 'pembrolizumab NSCLC: "no EGFR or ALK genomic tumor aberrations" — query EGFR',
         gene: 'EGFR',
@@ -81,6 +95,66 @@ const cases = [
         name: 'three-gene list — query ALK',
         gene: 'ALK',
         text: 'Indicated for patients with metastatic NSCLC with no EGFR, ALK or ROS1 aberrations and PD-L1 expression ≥1%.',
+        expectExcluded: true,
+    },
+
+    // ── Adjective intervening between "no" and gene (Round 2 fix) ──
+    {
+        name: 'IMJUDO: "no sensitizing EGFR (...) mutation or ALK (...) aberrations"',
+        gene: 'EGFR',
+        text: 'IMJUDO, in combination with durvalumab and platinum-based chemotherapy, is indicated for the treatment of adult patients with metastatic NSCLC with no sensitizing epidermal growth factor receptor (EGFR) mutations or anaplastic lymphoma kinase (ALK) genomic tumor aberrations.',
+        expectExcluded: true,
+    },
+    {
+        name: 'IMJUDO same text — query ALK',
+        gene: 'ALK',
+        text: 'IMJUDO, in combination with durvalumab and platinum-based chemotherapy, is indicated for the treatment of adult patients with metastatic NSCLC with no sensitizing epidermal growth factor receptor (EGFR) mutations or anaplastic lymphoma kinase (ALK) genomic tumor aberrations.',
+        expectExcluded: true,
+    },
+    {
+        name: 'OPDIVO: "no known EGFR mutations or ALK rearrangements"',
+        gene: 'EGFR',
+        text: 'OPDIVO, in combination with platinum-doublet chemotherapy, is indicated for the neoadjuvant treatment of adult patients with resectable NSCLC and no known EGFR mutations or ALK rearrangements, followed by single-agent OPDIVO as adjuvant treatment after surgery.',
+        expectExcluded: true,
+    },
+    {
+        name: 'IMFINZI: "no sensitizing EGFR mutations or ALK genomic tumor aberrations"',
+        gene: 'EGFR',
+        text: 'IMFINZI, in combination with tremelimumab-actl and platinum-based chemotherapy, is indicated for the treatment of adult patients with metastatic NSCLC with no sensitizing EGFR mutations or ALK genomic tumor aberrations.',
+        expectExcluded: true,
+    },
+
+    // ── Parenthetical expansion of gene name (Round 2 fix) ──
+    {
+        name: 'Pemetrexed: parenthetical expansion for both genes',
+        gene: 'EGFR',
+        text: 'Pemetrexed Injection is indicated in combination with pembrolizumab and platinum chemotherapy, for the initial treatment of patients with metastatic non-squamous non-small cell lung cancer (NSCLC), with no epidermal growth factor receptor (EGFR) or anaplastic lymphoma kinase (ALK) genomic tumor aberrations.',
+        expectExcluded: true,
+    },
+    {
+        name: 'Pemetrexed parenthetical — query ALK',
+        gene: 'ALK',
+        text: 'Pemetrexed Injection is indicated in combination with pembrolizumab and platinum chemotherapy, for the initial treatment of patients with metastatic non-squamous non-small cell lung cancer (NSCLC), with no epidermal growth factor receptor (EGFR) or anaplastic lymphoma kinase (ALK) genomic tumor aberrations.',
+        expectExcluded: true,
+    },
+
+    // ── "Patients with X aberrations should have progression on FDA-approved therapy" (Round 2 fix) ──
+    {
+        name: 'KEYTRUDA prior-therapy boilerplate — query EGFR',
+        gene: 'EGFR',
+        text: 'Patients with EGFR or ALK genomic tumor aberrations should have disease progression on FDA-approved therapy for these aberrations prior to receiving KEYTRUDA.',
+        expectExcluded: true,
+    },
+    {
+        name: 'TECENTRIQ prior-therapy boilerplate — query ALK',
+        gene: 'ALK',
+        text: 'Patients with EGFR or ALK genomic tumor aberrations should have disease progression on FDA-approved therapy for NSCLC harboring these aberrations prior to receiving TECENTRIQ.',
+        expectExcluded: true,
+    },
+    {
+        name: 'OPDIVO QVANTIG: combined "no known" + prior-therapy boilerplate',
+        gene: 'EGFR',
+        text: 'OPDIVO QVANTIG, in combination with platinum-doublet chemotherapy, is indicated for the neoadjuvant treatment of adult patients with resectable NSCLC and no known epidermal growth factor receptor (EGFR) mutations or anaplastic lymphoma kinase (ALK) rearrangements. Patients with EGFR or ALK genomic tumor aberrations should have disease progression on FDA-approved therapy for these aberrations prior to receiving OPDIVO QVANTIG.',
         expectExcluded: true,
     },
 
@@ -124,6 +198,12 @@ const cases = [
         expectExcluded: false,
     },
     {
+        name: 'CYRAMZA: erlotinib indication for EGFR-mutant NSCLC + sequencing carve-out for docetaxel arm — must KEEP',
+        gene: 'EGFR',
+        text: 'CYRAMZA, in combination with erlotinib, is indicated for the first-line treatment of adults with metastatic non-small cell lung cancer (NSCLC) whose tumors have epidermal growth factor receptor (EGFR) exon 19 deletions or exon 21 (L858R) substitution mutations. CYRAMZA, in combination with docetaxel, is indicated for the treatment of adults with metastatic non-small cell lung cancer (NSCLC) with disease progression on or after platinum-based chemotherapy. Patients with epidermal growth factor receptor (EGFR) or anaplastic lymphoma kinase (ALK) genomic tumor aberrations should have disease progression on FDA-approved therapy for these aberrations prior to receiving CYRAMZA.',
+        expectExcluded: false,
+    },
+    {
         name: 'BRAF V600E mutation indication',
         gene: 'BRAF',
         text: 'Indicated for unresectable or metastatic melanoma with BRAF V600E mutation as detected by an FDA-approved test.',
@@ -136,7 +216,11 @@ const cases = [
         expectExcluded: false,
     },
     {
-        name: '"no significant EGFR mutations" — soft negation, should NOT exclude',
+        name: '"no significant EGFR pathway activation" — soft negation, should NOT exclude',
+        // The widened trigger→gene window does let "no significant EGFR" reach
+        // the gene token, but the trailing noun ("activation") isn't in our
+        // aberration|alteration|mutation|… list, so no negation span fires and
+        // the record is correctly kept.
         gene: 'EGFR',
         text: 'Studies showed no significant EGFR pathway activation in responders.',
         expectExcluded: false,
@@ -147,17 +231,12 @@ const cases = [
         name: 'EGFRvIII positive context with separate negation list',
         gene: 'EGFR',
         text: 'Indicated for EGFRvIII-amplified glioblastoma. Not indicated for patients with no EGFR or ALK genomic tumor aberrations.',
-        // EGFR appears at EGFRvIII (positive) and inside the negation span.
-        // Not all positions are negated → keep.
         expectExcluded: false,
     },
     {
         name: 'eGFR (lowercase, kidney function) — case-sensitive substring filter would already drop this upstream',
         gene: 'EGFR',
         text: 'Adjust dose in patients with eGFR < 30 mL/min/1.73m².',
-        // This case is handled by the upstream `ind.includes(gene)` check
-        // (case-sensitive); negation filter is irrelevant. We assert that
-        // the gene literally does not appear at all.
         expectExcluded: false,
         expectGeneAbsent: true,
     },
@@ -166,6 +245,18 @@ const cases = [
         gene: 'BRAF',
         text: 'For patients with NSCLC and no EGFR, ALK, ROS1 or BRAF mutations.',
         expectExcluded: true,
+    },
+    {
+        name: 'sentence boundary: positive EGFR mention in next sentence after negation',
+        gene: 'EGFR',
+        text: 'Not indicated for patients with no EGFR or ALK genomic tumor aberrations. Separately, EGFR T790M-mutant patients should receive osimertinib.',
+        expectExcluded: false,
+    },
+    {
+        name: '"non-small cell lung cancer" must NOT trip the "no" trigger',
+        gene: 'EGFR',
+        text: 'For non-small cell lung cancer patients with EGFR exon 19 deletions.',
+        expectExcluded: false,
     },
 ];
 
