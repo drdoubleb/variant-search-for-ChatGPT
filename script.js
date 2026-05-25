@@ -2865,7 +2865,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const pmSearchTerm = altType ? `${gene} ${altType}` : gene;
                 const pmTumorSearchTerm = tumorType ? `${gene} ${tumorType}` : '';
+                const pmVariantTumorSearchTerm = (tumorType && altType) ? `${gene} ${altType} ${tumorType}` : '';
                 const hasPmTumorTab = !!(pmTumorSearchTerm && pmSearchTerm !== pmTumorSearchTerm);
+                const hasPmVariantTumorTab = !!(pmVariantTumorSearchTerm
+                    && pmVariantTumorSearchTerm !== pmSearchTerm
+                    && pmVariantTumorSearchTerm !== pmTumorSearchTerm);
 
                 const buildPmResultsPanel = (container, searchTerm, extraKey) => {
                     const queryUrl = searchTerm
@@ -2963,26 +2967,45 @@ document.addEventListener('DOMContentLoaded', () => {
                     tumorBtn.textContent = 'Gene + Tumor Type';
                     tabBar.appendChild(variantBtn);
                     tabBar.appendChild(tumorBtn);
+
+                    let variantTumorBtn = null;
+                    let variantTumorPanel = null;
+                    if (hasPmVariantTumorTab) {
+                        variantTumorBtn = document.createElement('button');
+                        variantTumorBtn.type = 'button';
+                        variantTumorBtn.className = 'card-tab-btn';
+                        variantTumorBtn.textContent = 'Gene + Alteration + Tumor Type';
+                        tabBar.appendChild(variantTumorBtn);
+                    }
                     pmContent.appendChild(tabBar);
 
                     const variantPanel = document.createElement('div');
                     variantPanel.className = 'card-tab-panel active';
                     const tumorPanel = document.createElement('div');
                     tumorPanel.className = 'card-tab-panel';
+                    if (hasPmVariantTumorTab) {
+                        variantTumorPanel = document.createElement('div');
+                        variantTumorPanel.className = 'card-tab-panel';
+                    }
 
-                    variantBtn.addEventListener('click', () => {
-                        variantBtn.classList.add('active'); tumorBtn.classList.remove('active');
-                        variantPanel.classList.add('active'); tumorPanel.classList.remove('active');
-                    });
-                    tumorBtn.addEventListener('click', () => {
-                        tumorBtn.classList.add('active'); variantBtn.classList.remove('active');
-                        tumorPanel.classList.add('active'); variantPanel.classList.remove('active');
-                    });
+                    const tabBtns = [variantBtn, tumorBtn, variantTumorBtn].filter(Boolean);
+                    const tabPanels = [variantPanel, tumorPanel, variantTumorPanel].filter(Boolean);
+                    const activateTab = (idx) => {
+                        tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+                        tabPanels.forEach((p, i) => p.classList.toggle('active', i === idx));
+                    };
+                    variantBtn.addEventListener('click', () => activateTab(0));
+                    tumorBtn.addEventListener('click', () => activateTab(1));
+                    if (variantTumorBtn) variantTumorBtn.addEventListener('click', () => activateTab(2));
 
                     buildPmResultsPanel(variantPanel, pmSearchTerm, 'pubmed');
                     buildPmResultsPanel(tumorPanel, pmTumorSearchTerm, 'pubmed_tumor_type');
                     pmContent.appendChild(variantPanel);
                     pmContent.appendChild(tumorPanel);
+                    if (variantTumorPanel) {
+                        buildPmResultsPanel(variantTumorPanel, pmVariantTumorSearchTerm, 'pubmed_variant_tumor_type');
+                        pmContent.appendChild(variantTumorPanel);
+                    }
                 } else {
                     buildPmResultsPanel(pmContent, pmSearchTerm, 'pubmed');
                 }
@@ -6484,6 +6507,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     : '';
                 const pubmedTerm = [aiReviewGene, aiReviewSearchVariantTerm].filter(Boolean).join(' ');
                 const pubmedTumorTerm = tumorType ? [aiReviewGene, tumorType].filter(Boolean).join(' ') : '';
+                const pubmedVariantTumorTerm = (tumorType && aiReviewSearchVariantTerm)
+                    ? [aiReviewGene, aiReviewSearchVariantTerm, tumorType].filter(Boolean).join(' ')
+                    : '';
                 const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation);
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
@@ -6498,6 +6524,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     ['spliceai_lookup', spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)],
                     ['pubmed', pubmedTerm ? fetchPubmedArticles(pubmedTerm, 5) : Promise.resolve({ total: 0, articles: [] })],
                     ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? fetchPubmedArticles(pubmedTumorTerm, 5) : Promise.resolve(null)],
+                    ['pubmed_variant_tumor_type', pubmedVariantTumorTerm
+                        && pubmedVariantTumorTerm !== pubmedTerm
+                        && pubmedVariantTumorTerm !== pubmedTumorTerm
+                        ? fetchPubmedArticles(pubmedVariantTumorTerm, 5)
+                        : Promise.resolve(null)],
                     ['openfda_drug_labels', aiReviewGene ? fetchOpenFdaDrugLabels(aiReviewGene).catch(() => null) : Promise.resolve(null)],
                     ['tp53_mutation_database', isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
                         gene: 'TP53',
@@ -6796,7 +6827,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const pmSearchTerm = [firstGene, searchVariantTerm].filter(Boolean).join(' ');
                     const pmTumorSearchTerm = tumorType ? [firstGene, tumorType].filter(Boolean).join(' ') : '';
+                    const pmVariantTumorSearchTerm = (tumorType && searchVariantTerm)
+                        ? [firstGene, searchVariantTerm, tumorType].filter(Boolean).join(' ')
+                        : '';
                     const hasPmTumorTab = !!(pmTumorSearchTerm && pmSearchTerm !== pmTumorSearchTerm);
+                    const hasPmVariantTumorTab = !!(pmVariantTumorSearchTerm
+                        && pmVariantTumorSearchTerm !== pmSearchTerm
+                        && pmVariantTumorSearchTerm !== pmTumorSearchTerm);
 
                     const buildPmResultsPanel = (container, searchTerm, extraKey) => {
                         const queryUrl = searchTerm
@@ -6894,26 +6931,45 @@ document.addEventListener('DOMContentLoaded', () => {
                         tumorBtn.textContent = 'Gene + Tumor Type';
                         tabBar.appendChild(variantBtn);
                         tabBar.appendChild(tumorBtn);
+
+                        let variantTumorBtn = null;
+                        let variantTumorPanel = null;
+                        if (hasPmVariantTumorTab) {
+                            variantTumorBtn = document.createElement('button');
+                            variantTumorBtn.type = 'button';
+                            variantTumorBtn.className = 'card-tab-btn';
+                            variantTumorBtn.textContent = 'Gene + Variant + Tumor Type';
+                            tabBar.appendChild(variantTumorBtn);
+                        }
                         pmContent.appendChild(tabBar);
 
                         const variantPanel = document.createElement('div');
                         variantPanel.className = 'card-tab-panel active';
                         const tumorPanel = document.createElement('div');
                         tumorPanel.className = 'card-tab-panel';
+                        if (hasPmVariantTumorTab) {
+                            variantTumorPanel = document.createElement('div');
+                            variantTumorPanel.className = 'card-tab-panel';
+                        }
 
-                        variantBtn.addEventListener('click', () => {
-                            variantBtn.classList.add('active'); tumorBtn.classList.remove('active');
-                            variantPanel.classList.add('active'); tumorPanel.classList.remove('active');
-                        });
-                        tumorBtn.addEventListener('click', () => {
-                            tumorBtn.classList.add('active'); variantBtn.classList.remove('active');
-                            tumorPanel.classList.add('active'); variantPanel.classList.remove('active');
-                        });
+                        const tabBtns = [variantBtn, tumorBtn, variantTumorBtn].filter(Boolean);
+                        const tabPanels = [variantPanel, tumorPanel, variantTumorPanel].filter(Boolean);
+                        const activateTab = (idx) => {
+                            tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+                            tabPanels.forEach((p, i) => p.classList.toggle('active', i === idx));
+                        };
+                        variantBtn.addEventListener('click', () => activateTab(0));
+                        tumorBtn.addEventListener('click', () => activateTab(1));
+                        if (variantTumorBtn) variantTumorBtn.addEventListener('click', () => activateTab(2));
 
                         buildPmResultsPanel(variantPanel, pmSearchTerm, 'pubmed');
                         buildPmResultsPanel(tumorPanel, pmTumorSearchTerm, 'pubmed_tumor_type');
                         pmContent.appendChild(variantPanel);
                         pmContent.appendChild(tumorPanel);
+                        if (variantTumorPanel) {
+                            buildPmResultsPanel(variantTumorPanel, pmVariantTumorSearchTerm, 'pubmed_variant_tumor_type');
+                            pmContent.appendChild(variantTumorPanel);
+                        }
                     } else {
                         buildPmResultsPanel(pmContent, pmSearchTerm, 'pubmed');
                     }
