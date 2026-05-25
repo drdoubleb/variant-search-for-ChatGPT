@@ -1050,8 +1050,102 @@ async function fetchFdaCompanionDiagnostics(gene) {
     return data.records || [];
 }
 
+// ── openFDA gene-negation filter ─────────────────────────────────────────
+// Many FDA oncology labels (esp. checkpoint inhibitors) carve out genes in
+// the *exclusion* criteria of their indication, e.g.
+//   "...with no EGFR or ALK genomic tumor aberrations"
+//   "...with no sensitizing epidermal growth factor receptor (EGFR) mutation
+//      or anaplastic lymphoma kinase (ALK) genomic tumor aberrations"
+//   "...with no known EGFR mutations or ALK rearrangements"
+//   "...for BRAF wild-type melanoma"
+//   "Patients with EGFR or ALK genomic tumor aberrations should have disease
+//      progression on FDA-approved therapy for these aberrations prior to
+//      receiving X"   (sequencing carve-out used by pembrolizumab,
+//                      atezolizumab, nivolumab, ramucirumab, etc.)
+// A naive substring match treats these as positive mentions of the gene
+// and floods AI review with non-matches. findOpenFdaNegationSpans() returns
+// character ranges covering such phrases; openFdaGeneOnlyInNegativeContext()
+// excludes a record only when *every* occurrence of the queried gene falls
+// inside one of those spans, so a label that also mentions the gene
+// positively elsewhere (e.g. CYRAMZA + erlotinib for EGFR exon 19) is kept.
+//
+// Spans are bounded by sentence terminators (. ; :) and short lazy windows
+// so a trigger word in one sentence can't accidentally negate a positive
+// mention several sentences later.
+//
+// KEEP IN SYNC with tests/openfda-filter.test.js — no module system in the
+// browser, so the test file re-declares the same regexes.
+const OPENFDA_GENE_TOKEN = String.raw`[A-Z][A-Z0-9]{1,7}(?:[-/][A-Z0-9]{1,7})?`;
+const OPENFDA_NOUN = String.raw`(?:[Aa]berration|[Aa]lteration|[Mm]utation|[Rr]earrangement|[Ff]usion|[Dd]river|[Aa]mplification)s?\b`;
+const OPENFDA_NEGATION_LIST_RE = new RegExp(
+    String.raw`\b(?:[Nn]o|[Ww]ithout|[Ww]hose\s+tumors?\s+(?:have\s+no|do\s+not\s+have|lack)|[Ll]acking|[Aa]bsence\s+of|[Nn]egative\s+for)\s+` +
+    String.raw`[^.;:]{0,80}?\b${OPENFDA_GENE_TOKEN}\b` +
+    String.raw`[^.;:]{0,80}?${OPENFDA_NOUN}` +
+    String.raw`(?:\s+(?:or|and)\s+[^.;:]{0,80}?\b${OPENFDA_GENE_TOKEN}\b[^.;:]{0,80}?${OPENFDA_NOUN})*`,
+    'g'
+);
+const OPENFDA_WILDTYPE_TRAIL_RE = new RegExp(
+    String.raw`\b${OPENFDA_GENE_TOKEN}[- ]wild[- ]?type\b`,
+    'g'
+);
+const OPENFDA_WILDTYPE_LEAD_RE = new RegExp(
+    String.raw`\bwild[- ]?type\s+${OPENFDA_GENE_TOKEN}\b`,
+    'g'
+);
+const OPENFDA_PRIOR_THERAPY_RE = new RegExp(
+    String.raw`\b[Pp]atients\s+with\s+[^.;:]{0,150}?\b${OPENFDA_GENE_TOKEN}\b` +
+    String.raw`[^.;:]{0,200}?${OPENFDA_NOUN}` +
+    String.raw`[^.;:]{0,150}?should\s+have\s+(?:disease\s+)?progression\s+on\s+FDA[- ]approved\s+therapy`,
+    'g'
+);
+// "anti-<GENE>" / "anti‑<GENE>" / "anti <GENE>" — almost always refers to a
+// prior therapy class (e.g. "previously treated with ... an anti-EGFR
+// therapy" in Fruzaqla, Stivarga, Lonsurf for chemo-refractory mCRC).
+// EGFR/HER2/VEGF-targeted labels themselves describe their drug as an
+// "EGFR antagonist" / "HER2-directed antibody" / etc., not "anti-X", so
+// this pattern doesn't suppress true positives. Includes regular hyphen
+// (U+002D) and non-breaking hyphen (U+2011) seen in FDA label text.
+const OPENFDA_ANTI_GENE_RE = new RegExp(
+    String.raw`\banti[\-‑ ]${OPENFDA_GENE_TOKEN}\b`,
+    'g'
+);
+
+function findOpenFdaNegationSpans(text) {
+    if (!text) return [];
+    const spans = [];
+    const regexes = [
+        OPENFDA_NEGATION_LIST_RE,
+        OPENFDA_WILDTYPE_TRAIL_RE,
+        OPENFDA_WILDTYPE_LEAD_RE,
+        OPENFDA_PRIOR_THERAPY_RE,
+        OPENFDA_ANTI_GENE_RE,
+    ];
+    for (const re of regexes) {
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            spans.push({ start: m.index, end: m.index + m[0].length });
+        }
+    }
+    return spans;
+}
+
+function openFdaGeneOnlyInNegativeContext(text, gene) {
+    if (!text || !gene) return false;
+    const positions = [];
+    let i = 0;
+    while ((i = text.indexOf(gene, i)) !== -1) {
+        positions.push(i);
+        i += gene.length;
+    }
+    if (positions.length === 0) return false;
+    const spans = findOpenFdaNegationSpans(text);
+    if (spans.length === 0) return false;
+    return positions.every(pos => spans.some(s => pos >= s.start && pos < s.end));
+}
+
 async function fetchOpenFdaDrugLabels(gene) {
-    if (!gene) return { total: 0, fetched: 0, excluded: 0, results: [] };
+    if (!gene) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedNegation: 0, results: [] };
     const LIMIT = 100;
     const MAX_RECORDS = 1000;
     const baseSearch = `indications_and_usage:%22${encodeURIComponent(gene)}%22`;
@@ -1068,7 +1162,7 @@ async function fetchOpenFdaDrugLabels(gene) {
 
     try {
         const firstData = await fetchPage(0);
-        if (!firstData) return { total: 0, fetched: 0, excluded: 0, results: [] };
+        if (!firstData) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedNegation: 0, results: [] };
 
         const total = firstData?.meta?.results?.total || 0;
         let raw = firstData?.results || [];
@@ -1081,18 +1175,31 @@ async function fetchOpenFdaDrugLabels(gene) {
             }
         }
 
-        const results = raw
-            .filter(item => (item.indications_and_usage?.[0] || '').includes(gene))
-            .map(item => ({
+        let excludedCase = 0;
+        let excludedNegation = 0;
+        const results = [];
+        for (const item of raw) {
+            const ind = item.indications_and_usage?.[0] || '';
+            if (!ind.includes(gene)) { excludedCase++; continue; }
+            if (openFdaGeneOnlyInNegativeContext(ind, gene)) { excludedNegation++; continue; }
+            results.push({
                 brand_name: item.openfda?.brand_name?.[0] || '',
                 generic_name: item.openfda?.generic_name?.[0] || '',
                 manufacturer: item.openfda?.manufacturer_name?.[0] || '',
                 route: (item.openfda?.route || []).join(', '),
                 application_number: item.openfda?.application_number?.[0] || '',
-                indications_and_usage: item.indications_and_usage?.[0] || '',
+                indications_and_usage: ind,
                 purpose: item.purpose?.[0] || '',
-            }));
-        return { total, fetched: raw.length, excluded: raw.length - results.length, results };
+            });
+        }
+        return {
+            total,
+            fetched: raw.length,
+            excluded: excludedCase + excludedNegation,
+            excludedCase,
+            excludedNegation,
+            results,
+        };
     } catch (e) {
         console.warn('openFDA fetch failed', e);
         throw e;
@@ -3055,8 +3162,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 ofResultsDiv.appendChild(ofSpinner);
                 openFdaPanel.appendChild(ofResultsDiv);
 
-                fetchOpenFdaDrugLabels(gene).then(({ total, fetched, excluded, results: ofResults }) => {
-                    geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, results: ofResults };
+                fetchOpenFdaDrugLabels(gene).then(({ total, fetched, excluded, excludedCase, excludedNegation, results: ofResults }) => {
+                    geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, excludedCase, excludedNegation, results: ofResults };
                     ofResultsDiv.innerHTML = '';
                     if (!ofResults || ofResults.length === 0) {
                         ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${gene}.</div>`;
@@ -3066,7 +3173,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     const ofCountEl = document.createElement('div');
                     ofCountEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
                     const shownOf = `${Math.min(ofResults.length, OF_PREVIEW)} of ${ofResults.length} result${ofResults.length !== 1 ? 's' : ''}`;
-                    const excludedNote = excluded > 0 ? ` (${excluded} excluded — case-insensitive match only)` : '';
+                    const excludedReasons = [];
+                    if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
+                    if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
+                    const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
                     ofCountEl.textContent = shownOf + excludedNote;
                     ofResultsDiv.appendChild(ofCountEl);
 
@@ -6996,8 +7106,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         ofResultsDiv.appendChild(ofSpinner);
                         openFdaPanel.appendChild(ofResultsDiv);
 
-                        fetchOpenFdaDrugLabels(firstGene).then(({ total, fetched, excluded, results: ofResults }) => {
-                            aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, results: ofResults };
+                        fetchOpenFdaDrugLabels(firstGene).then(({ total, fetched, excluded, excludedCase, excludedNegation, results: ofResults }) => {
+                            aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, excludedCase, excludedNegation, results: ofResults };
                             ofResultsDiv.innerHTML = '';
                             if (!ofResults || ofResults.length === 0) {
                                 ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${firstGene}.</div>`;
@@ -7007,7 +7117,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             const ofCountEl = document.createElement('div');
                             ofCountEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
                             const shownOf = `${Math.min(ofResults.length, OF_PREVIEW)} of ${ofResults.length} result${ofResults.length !== 1 ? 's' : ''}`;
-                            const excludedNote = excluded > 0 ? ` (${excluded} excluded — case-insensitive match only)` : '';
+                            const excludedReasons = [];
+                            if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
+                            if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
+                            const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
                             ofCountEl.textContent = shownOf + excludedNote;
                             ofResultsDiv.appendChild(ofCountEl);
 
