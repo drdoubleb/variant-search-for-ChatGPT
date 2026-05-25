@@ -32,6 +32,17 @@ const OPENFDA_PRIOR_THERAPY_RE = new RegExp(
     String.raw`[^.;:]{0,150}?should\s+have\s+(?:disease\s+)?progression\s+on\s+FDA[- ]approved\s+therapy`,
     'g'
 );
+// "anti-<GENE>" / "anti‑<GENE>" / "anti <GENE>" — almost always refers to a
+// prior therapy class (e.g. "previously treated with ... an anti-EGFR
+// therapy" in Fruzaqla, Stivarga, Lonsurf for chemo-refractory mCRC).
+// EGFR/HER2/VEGF-targeted labels themselves describe their drug as an
+// "EGFR antagonist" / "HER2-directed antibody" / etc., not "anti-X", so
+// this pattern doesn't suppress true positives. Includes regular hyphen
+// (U+002D) and non-breaking hyphen (U+2011) seen in FDA label text.
+const OPENFDA_ANTI_GENE_RE = new RegExp(
+    String.raw`\banti[\-‑ ]${OPENFDA_GENE_TOKEN}\b`,
+    'g'
+);
 
 function findOpenFdaNegationSpans(text) {
     if (!text) return [];
@@ -41,6 +52,7 @@ function findOpenFdaNegationSpans(text) {
         OPENFDA_WILDTYPE_TRAIL_RE,
         OPENFDA_WILDTYPE_LEAD_RE,
         OPENFDA_PRIOR_THERAPY_RE,
+        OPENFDA_ANTI_GENE_RE,
     ];
     for (const re of regexes) {
         re.lastIndex = 0;
@@ -256,6 +268,37 @@ const cases = [
         name: '"non-small cell lung cancer" must NOT trip the "no" trigger',
         gene: 'EGFR',
         text: 'For non-small cell lung cancer patients with EGFR exon 19 deletions.',
+        expectExcluded: false,
+    },
+    // ── "anti-<GENE>" prior-therapy mentions in mCRC labels ──
+    {
+        name: 'Fruzaqla mCRC: "previously treated with ... an anti-EGFR therapy" — query EGFR',
+        gene: 'EGFR',
+        text: 'FRUZAQLA is indicated for the treatment of adult patients with metastatic colorectal cancer (mCRC) who have been previously treated with fluoropyrimidine-, oxaliplatin- and irinotecan-based chemotherapy, an anti-VEGF therapy, and, if RAS wild-type and medically appropriate, an anti-EGFR therapy.',
+        expectExcluded: true,
+    },
+    {
+        name: 'Stivarga mCRC: "previously treated with ... anti-EGFR therapy" — query EGFR',
+        gene: 'EGFR',
+        text: 'STIVARGA is indicated for the treatment of patients with metastatic colorectal cancer (CRC) who have been previously treated with fluoropyrimidine-, oxaliplatin- and irinotecan-based chemotherapy, an anti-VEGF therapy, and, if RAS wild-type, an anti-EGFR therapy.',
+        expectExcluded: true,
+    },
+    {
+        name: 'Lonsurf mCRC: "previously treated with ... an anti-EGFR therapy" — query EGFR',
+        gene: 'EGFR',
+        text: 'LONSURF is indicated as a single agent or in combination with bevacizumab for the treatment of adult patients with metastatic colorectal cancer previously treated with fluoropyrimidine-, oxaliplatin- and irinotecan-based chemotherapy, an anti-VEGF biological therapy, and if RAS wild-type, an anti-EGFR therapy.',
+        expectExcluded: true,
+    },
+    {
+        name: 'non-breaking hyphen variant: "anti‑EGFR therapy" — query EGFR',
+        gene: 'EGFR',
+        text: 'Indicated for patients previously treated with an anti‑EGFR therapy.',
+        expectExcluded: true,
+    },
+    {
+        name: 'Erbitux-style true positive: "EGFR antagonist" must NOT match anti-<GENE>',
+        gene: 'EGFR',
+        text: 'ERBITUX is an epidermal growth factor receptor (EGFR) antagonist indicated for the treatment of patients with KRAS wild-type, EGFR-expressing metastatic colorectal cancer.',
         expectExcluded: false,
     },
 ];
