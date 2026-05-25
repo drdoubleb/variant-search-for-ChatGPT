@@ -3738,8 +3738,15 @@ document.addEventListener('DOMContentLoaded', () => {
                             fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }))
                         ]);
                         const pubmedTerm = altType ? `${gene} ${altType}` : gene;
+                        // Prefer the PubMed card's already-fetched data over re-fetching.
+                        // Re-fetching alongside the card increases NCBI concurrency and can
+                        // drop abstracts when efetch hits the rate limit.
+                        const cachedPubmed = geneOnlyAiExtras.pubmed;
+                        const pubmedPromise = (cachedPubmed && Array.isArray(cachedPubmed.articles) && cachedPubmed.articles.length > 0)
+                            ? Promise.resolve({ total: cachedPubmed.total ?? cachedPubmed.articles.length, articles: cachedPubmed.articles })
+                            : fetchPubmedArticles(pubmedTerm, 5).catch(() => ({ total: 0, articles: [] }));
                         const [pubmedData, civicData, openFdaData] = await Promise.all([
-                            fetchPubmedArticles(pubmedTerm, 5).catch(() => ({ total: 0, articles: [] })),
+                            pubmedPromise,
                             fetchCivicApiData(gene, '').catch(() => null),
                             fetchOpenFdaDrugLabels(gene).catch(() => null)
                         ]);
@@ -6510,6 +6517,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 const pubmedVariantTumorTerm = (tumorType && aiReviewSearchVariantTerm)
                     ? [aiReviewGene, aiReviewSearchVariantTerm, tumorType].filter(Boolean).join(' ')
                     : '';
+                // Prefer card-cached PubMed results when available. The cards fetch the same
+                // queries on render; re-fetching here adds parallel load on NCBI's eutils, and
+                // when efetch trips the rate limit the proxy returns articles with empty
+                // abstracts — making the AI payload miss abstracts the cards already have.
+                const pubmedFromCacheOrFetch = (key, term) => {
+                    const cached = aiReviewExtras[key];
+                    if (cached && Array.isArray(cached.articles) && cached.articles.length > 0) {
+                        return Promise.resolve({ total: cached.total ?? cached.articles.length, articles: cached.articles });
+                    }
+                    return term ? fetchPubmedArticles(term, 5) : Promise.resolve({ total: 0, articles: [] });
+                };
                 const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation);
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
@@ -6522,12 +6540,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     ['civic_api', aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)],
                     ['gnomad_v4', coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt) : Promise.resolve(null)],
                     ['spliceai_lookup', spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)],
-                    ['pubmed', pubmedTerm ? fetchPubmedArticles(pubmedTerm, 5) : Promise.resolve({ total: 0, articles: [] })],
-                    ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? fetchPubmedArticles(pubmedTumorTerm, 5) : Promise.resolve(null)],
+                    ['pubmed', pubmedTerm ? pubmedFromCacheOrFetch('pubmed', pubmedTerm) : Promise.resolve({ total: 0, articles: [] })],
+                    ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? pubmedFromCacheOrFetch('pubmed_tumor_type', pubmedTumorTerm) : Promise.resolve(null)],
                     ['pubmed_variant_tumor_type', pubmedVariantTumorTerm
                         && pubmedVariantTumorTerm !== pubmedTerm
                         && pubmedVariantTumorTerm !== pubmedTumorTerm
-                        ? fetchPubmedArticles(pubmedVariantTumorTerm, 5)
+                        ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm)
                         : Promise.resolve(null)],
                     ['openfda_drug_labels', aiReviewGene ? fetchOpenFdaDrugLabels(aiReviewGene).catch(() => null) : Promise.resolve(null)],
                     ['tp53_mutation_database', isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
