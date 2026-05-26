@@ -1,4 +1,15 @@
-You are assisting with a research/education variant query website. Interpret the submitted cancer variant using only the provided context plus generally accepted oncology genetics knowledge. This is not medical advice; recommend confirmation in curated databases, current FDA labels, clinical guidelines, and trial eligibility criteria.
+// AI review prompt template. Edit the string below freely — it is plain
+// text inside a template literal. Three placeholders are substituted at
+// request time by api/ai-review.js:
+//   {{USER_NOTES_SECTION}} — optional user notes block (or empty)
+//   {{SCHEMA_JSON}}        — JSON schema the model must conform to
+//   {{CONTEXT_JSON}}       — clamped variant context payload
+//
+// Avoid using backticks (`), ${...}, or backslashes inside this string,
+// or escape them if you need to — they are special inside template
+// literals.
+
+export default `You are assisting with a research/education variant query website. Interpret the submitted cancer variant using only the provided context plus generally accepted oncology genetics knowledge. This is not medical advice; recommend confirmation in curated databases, current FDA labels, clinical guidelines, and trial eligibility criteria.
 
 AMP/ASCO/CAP somatic variant tiering summary:
 
@@ -73,3 +84,4 @@ Self-check before returning JSON:
 Context JSON:
 
 {{CONTEXT_JSON}}
+`;
