@@ -1,12 +1,10 @@
 // Serverless proxy for optional OpenRouter AI variant interpretation.
 // POST /api/ai-review
 // Requires OPENROUTER_API_KEY in the Vercel environment.
-// The prompt template lives in ./ai-review-prompt.txt — edit that file
+// The prompt template lives in ./ai-review-prompt.js — edit that file
 // to tweak instructions without touching this handler.
 
-import { readFileSync } from 'node:fs';
-
-const PROMPT_TEMPLATE = readFileSync(new URL('./ai-review-prompt.txt', import.meta.url), 'utf8');
+import PROMPT_TEMPLATE from './ai-review-prompt.js';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODEL = 'openai/gpt-4.1-mini';
