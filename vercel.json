@@ -14,6 +14,9 @@
     },
     "api/gnomad-v4.js": {
       "maxDuration": 15
+    },
+    "api/ai-review.js": {
+      "includeFiles": "api/ai-review-prompt.txt"
     }
   }
 }
