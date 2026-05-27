@@ -54,6 +54,8 @@ Hard AMP tiering rules:
 
 10. Clinical trials should not override a higher FDA/guideline tier. If both FDA-approved same-tumor evidence and clinical trials are present, assign Tier IA and mention trials only as additional context.
 
+11. Tissue-agnostic / all-solid-tumor approvals count as same-tumor evidence. If a therapy is FDA-approved (or has an FDA-recognized companion diagnostic, or is recommended by a professional guideline) for the submitted biomarker across all solid tumors — i.e., a pan-solid-tumor or tumor-agnostic indication such as pembrolizumab for MSI-H/dMMR or TMB-high, larotrectinib/entrectinib for NTRK fusions, selpercatinib for RET fusions in solid tumors, dostarlimab for dMMR, or trastuzumab deruxtecan for HER2-positive solid tumors — treat that indication as applying to the submitted tumor type for tiering purposes whenever the submitted tumor is a solid tumor. Assign Tier IA, not Tier IIC, in that situation, and note the tissue-agnostic basis of the approval in the rationale.
+
 {{USER_NOTES_SECTION}}
 
 Return ONLY valid JSON matching this schema; do not wrap it in markdown:
@@ -80,6 +82,7 @@ Self-check before returning JSON:
 - If fda_approved_therapies is non-empty and at least one therapy matches the submitted tumor type and submitted biomarker, amp_tier should be Tier IA.
 - If resistance_or_lack_of_benefit is non-empty and at least one therapy is FDA-approved or guideline-supported in the submitted tumor type, amp_tier should be Tier IA.
 - If amp_tier is Tier IIC, confirm that there is no same-tumor FDA-approved therapy, same-tumor FDA-recognized CDx/therapy association, same-tumor professional guideline biomarker role, or same-tumor FDA/guideline-linked resistance role.
+- If the submitted tumor type is a solid tumor and any listed FDA-approved therapy has a tissue-agnostic / all-solid-tumor indication for the submitted biomarker, amp_tier should be Tier IA.
 
 Context JSON:
 
