@@ -116,7 +116,7 @@ export default async function handler(req, res) {
     const context = body.context || {};
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 45000);
+    const timer = setTimeout(() => controller.abort(), 55000);
 
     try {
         const response = await fetch(OPENROUTER_API_URL, {
