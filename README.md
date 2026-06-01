@@ -64,12 +64,12 @@ This repo includes an optional AI interpretation endpoint at `api/ai-review.js`.
 
 - `POST /api/ai-review`
 - Requires the Vercel environment variable `OPENROUTER_API_KEY`.
-- Available model choices are kept in sync between the frontend selector and backend allowlist: `openai/gpt-4.1-mini`, `openai/gpt-oss-120b`, `openai/gpt-4o-mini`, `openai/gpt-5-mini`, `openai/gpt-5.4-nano`, `openai/gpt-5-nano`, `google/gemini-2.5-flash-lite`, `google/gemini-3-flash-preview`, `google/gemini-3.1-flash-lite`, `anthropic/claude-3-haiku`, `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`, `x-ai/grok-4.3`, `minimax/minimax-m2.7`, and `nvidia/nemotron-3-super-120b-a12b:free`.
+- Available model choices are kept in sync between the frontend selector and backend allowlist: `openai/gpt-5-mini`, `openai/gpt-5.4-nano`, `openai/gpt-oss-120b`, `openai/gpt-4o-mini`, `openai/gpt-5-nano`, `google/gemini-2.5-flash-lite`, `google/gemini-3-flash-preview`, `google/gemini-3.1-flash-lite`, `anthropic/claude-3-haiku`, `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`, `x-ai/grok-4.3`, `minimax/minimax-m2.7`, `nvidia/nemotron-3-super-120b-a12b:free`, and `qwen/qwen3-32b`.
 - JSON payload:
 
 ```json
 {
-  "model": "openai/gpt-4.1-mini",
+  "model": "openai/gpt-5-mini",
   "context": {
     "submitted_variant": "BRAF V600E",
     "tumor_type": "melanoma",
