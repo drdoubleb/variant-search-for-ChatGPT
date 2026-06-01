@@ -1144,11 +1144,39 @@ function openFdaGeneOnlyInNegativeContext(text, gene) {
     return positions.every(pos => spans.some(s => pos >= s.start && pos < s.end));
 }
 
+// ── openFDA word-boundary filter ─────────────────────────────────────────
+// openFDA's search engine is a free-text substring match, so a query for the
+// gene "MET" also returns labels where the three letters merely sit inside a
+// larger word — e.g. the diabetes brand AVANDAMET, the drug METHOTREXATE, or
+// the homeopathic ingredient METALICUM ("Argentum metalicum"). None of those
+// are the MET oncogene. The API has no regex support, so we can't require a
+// word boundary server-side; instead we keep a record only when at least one
+// occurrence of the gene is flanked by non-letters. Punctuation/space
+// boundaries such as "(MET)", "MET exon 14" and "MET-amplified" still qualify,
+// so true targeted-therapy labels (capmatinib, amivantamab, …) are retained.
+// KEEP IN SYNC with tests/openfda-filter.test.js.
+function openFdaEscapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function openFdaGeneAppearsAsWord(text, gene) {
+    if (!text || !gene) return false;
+    return new RegExp(String.raw`(?<![A-Za-z])${openFdaEscapeRegExp(gene)}(?![A-Za-z])`).test(text);
+}
+
 async function fetchOpenFdaDrugLabels(gene) {
-    if (!gene) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedNegation: 0, results: [] };
+    if (!gene) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedBoundary: 0, excludedNegation: 0, results: [] };
     const LIMIT = 100;
     const MAX_RECORDS = 1000;
-    const baseSearch = `indications_and_usage:%22${encodeURIComponent(gene)}%22`;
+    // Restrict to prescription drugs server-side. The vast majority of false
+    // positives (homeopathic remedies, OTC monographs whose ingredient names
+    // contain the gene's letters) are HUMAN OTC DRUG / unapproved homeopathic
+    // products, so this clause removes them before they consume our paging
+    // budget — important when a gene like "MET" otherwise matches 600+ labels
+    // and real targeted therapies could fall past the MAX_RECORDS cap. All FDA
+    // targeted oncology therapies and biologics carry product_type
+    // "HUMAN PRESCRIPTION DRUG", so this does not drop labels we want.
+    const PRESCRIPTION_FILTER = '+AND+openfda.product_type:%22HUMAN+PRESCRIPTION+DRUG%22';
+    const baseSearch = `indications_and_usage:%22${encodeURIComponent(gene)}%22${PRESCRIPTION_FILTER}`;
 
     const fetchPage = async (skip) => {
         const url = `https://api.fda.gov/drug/label.json?search=${baseSearch}&limit=${LIMIT}${skip ? `&skip=${skip}` : ''}`;
@@ -1162,7 +1190,7 @@ async function fetchOpenFdaDrugLabels(gene) {
 
     try {
         const firstData = await fetchPage(0);
-        if (!firstData) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedNegation: 0, results: [] };
+        if (!firstData) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedBoundary: 0, excludedNegation: 0, results: [] };
 
         const total = firstData?.meta?.results?.total || 0;
         let raw = firstData?.results || [];
@@ -1176,11 +1204,13 @@ async function fetchOpenFdaDrugLabels(gene) {
         }
 
         let excludedCase = 0;
+        let excludedBoundary = 0;
         let excludedNegation = 0;
         const results = [];
         for (const item of raw) {
             const ind = item.indications_and_usage?.[0] || '';
             if (!ind.includes(gene)) { excludedCase++; continue; }
+            if (!openFdaGeneAppearsAsWord(ind, gene)) { excludedBoundary++; continue; }
             if (openFdaGeneOnlyInNegativeContext(ind, gene)) { excludedNegation++; continue; }
             results.push({
                 brand_name: item.openfda?.brand_name?.[0] || '',
@@ -1195,8 +1225,9 @@ async function fetchOpenFdaDrugLabels(gene) {
         return {
             total,
             fetched: raw.length,
-            excluded: excludedCase + excludedNegation,
+            excluded: excludedCase + excludedBoundary + excludedNegation,
             excludedCase,
+            excludedBoundary,
             excludedNegation,
             results,
         };
@@ -3185,8 +3216,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 ofResultsDiv.appendChild(ofSpinner);
                 openFdaPanel.appendChild(ofResultsDiv);
 
-                fetchOpenFdaDrugLabels(gene).then(({ total, fetched, excluded, excludedCase, excludedNegation, results: ofResults }) => {
-                    geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, excludedCase, excludedNegation, results: ofResults };
+                fetchOpenFdaDrugLabels(gene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedNegation, results: ofResults }) => {
+                    geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, excludedCase, excludedBoundary, excludedNegation, results: ofResults };
                     ofResultsDiv.innerHTML = '';
                     if (!ofResults || ofResults.length === 0) {
                         ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${gene}.</div>`;
@@ -3198,6 +3229,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const shownOf = `${Math.min(ofResults.length, OF_PREVIEW)} of ${ofResults.length} result${ofResults.length !== 1 ? 's' : ''}`;
                     const excludedReasons = [];
                     if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
+                    if (excludedBoundary) excludedReasons.push(`${excludedBoundary} substring of larger word`);
                     if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
                     const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
                     ofCountEl.textContent = shownOf + excludedNote;
@@ -7180,8 +7212,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         ofResultsDiv.appendChild(ofSpinner);
                         openFdaPanel.appendChild(ofResultsDiv);
 
-                        fetchOpenFdaDrugLabels(firstGene).then(({ total, fetched, excluded, excludedCase, excludedNegation, results: ofResults }) => {
-                            aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, excludedCase, excludedNegation, results: ofResults };
+                        fetchOpenFdaDrugLabels(firstGene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedNegation, results: ofResults }) => {
+                            aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, excludedCase, excludedBoundary, excludedNegation, results: ofResults };
                             ofResultsDiv.innerHTML = '';
                             if (!ofResults || ofResults.length === 0) {
                                 ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${firstGene}.</div>`;
@@ -7193,6 +7225,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             const shownOf = `${Math.min(ofResults.length, OF_PREVIEW)} of ${ofResults.length} result${ofResults.length !== 1 ? 's' : ''}`;
                             const excludedReasons = [];
                             if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
+                            if (excludedBoundary) excludedReasons.push(`${excludedBoundary} substring of larger word`);
                             if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
                             const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
                             ofCountEl.textContent = shownOf + excludedNote;

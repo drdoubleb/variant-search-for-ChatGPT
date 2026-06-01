@@ -78,6 +78,15 @@ function openFdaGeneOnlyInNegativeContext(text, gene) {
     return positions.every(pos => spans.some(s => pos >= s.start && pos < s.end));
 }
 
+// Word-boundary filter — see script.js "openFDA word-boundary filter".
+function openFdaEscapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function openFdaGeneAppearsAsWord(text, gene) {
+    if (!text || !gene) return false;
+    return new RegExp(String.raw`(?<![A-Za-z])${openFdaEscapeRegExp(gene)}(?![A-Za-z])`).test(text);
+}
+
 // ── Test cases ────────────────────────────────────────────────────────────
 // Each case lists the queried gene, an excerpt that mimics real FDA
 // indications_and_usage text, and the expected outcome (true = excluded
@@ -301,6 +310,47 @@ const cases = [
         text: 'ERBITUX is an epidermal growth factor receptor (EGFR) antagonist indicated for the treatment of patients with KRAS wild-type, EGFR-expressing metastatic colorectal cancer.',
         expectExcluded: false,
     },
+
+    // ── MET word-boundary cases (the original complaint) ──
+    // "MET" is the worst offender because three uppercase letters land inside
+    // many brand names and homeopathic ingredients. The word-boundary filter
+    // must drop those while keeping genuine MET-oncogene labels.
+    {
+        name: 'AVANDAMET brand: "MET" embedded in brand name — query MET, boundary-excluded',
+        gene: 'MET',
+        text: 'AVANDAMET is indicated as an adjunct to diet and exercise to improve glycemic control in adults with type 2 diabetes mellitus.',
+        expectBoundaryExcluded: true,
+    },
+    {
+        name: 'homeopathic ARGENTUM METALICUM — query MET, boundary-excluded',
+        gene: 'MET',
+        text: 'ARGENTUM METALICUM is indicated for the temporary relief of hoarseness and laryngitis.',
+        expectBoundaryExcluded: true,
+    },
+    {
+        name: 'METHOTREXATE: gene letters lead a larger word — query MET, boundary-excluded',
+        gene: 'MET',
+        text: 'METHOTREXATE is indicated in the treatment of patients with rheumatoid arthritis.',
+        expectBoundaryExcluded: true,
+    },
+    {
+        name: 'capmatinib (TABRECTA) true positive: "(MET) exon 14 skipping" — keep',
+        gene: 'MET',
+        text: 'TABRECTA is indicated for the treatment of adult patients with metastatic non-small cell lung cancer (NSCLC) whose tumors have a mutation that leads to mesenchymal epithelial transition (MET) exon 14 skipping as detected by an FDA-approved test.',
+        expectExcluded: false,
+    },
+    {
+        name: 'MET amplification positive indication — keep',
+        gene: 'MET',
+        text: 'Indicated for adult patients with advanced solid tumors that have MET amplification.',
+        expectExcluded: false,
+    },
+    {
+        name: 'hyphenated "MET-amplified" still counts as a whole word — keep',
+        gene: 'MET',
+        text: 'Indicated for patients with MET-amplified non-small cell lung cancer.',
+        expectExcluded: false,
+    },
 ];
 
 let passed = 0;
@@ -319,6 +369,27 @@ for (const tc of cases) {
     }
     if (!geneAppears) {
         console.error(`FAIL: ${tc.name} — gene "${tc.gene}" does not appear in test text (case-sensitive)`);
+        failed++;
+        continue;
+    }
+    const appearsAsWord = openFdaGeneAppearsAsWord(tc.text, tc.gene);
+    if (tc.expectBoundaryExcluded) {
+        // Gene present only as a substring of a larger word (AVANDAMET,
+        // METALICUM, …) — the word-boundary filter must drop it.
+        if (appearsAsWord) {
+            console.error(`FAIL: ${tc.name}`);
+            console.error(`  expected boundary-excluded but gene "${tc.gene}" matched as a whole word`);
+            failed++;
+        } else {
+            console.log(`PASS: ${tc.name}`);
+            passed++;
+        }
+        continue;
+    }
+    // Every kept/negation case must survive the word-boundary filter, i.e.
+    // the gene appears at least once as a standalone token.
+    if (!appearsAsWord) {
+        console.error(`FAIL: ${tc.name} — word-boundary filter wrongly dropped a real-word "${tc.gene}" mention`);
         failed++;
         continue;
     }
