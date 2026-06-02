@@ -1175,9 +1175,10 @@ function openFdaGeneAppearsAsWord(text, gene) {
 // is the motivating case: the Gleevec/imatinib label never says "KIT"; it says
 // "Kit (CD117)-positive" and "c-Kit mutation". OPENFDA_GENE_SYNONYMS lets us add
 // per-gene aliases that are matched case-SENSITIVELY *exactly as written* (so
-// "c-Kit" matches "c-Kit", not "C-KIT", and "Kit" matches "Kit" but not the
-// lowercase English word "kit"). This bypasses the all-caps rule for that one
-// symbol while leaving the general filter intact for every other gene.
+// "c-Kit" matches "c-Kit", not "C-KIT"). This bypasses the all-caps rule for
+// that one symbol while leaving the general filter intact for every other gene.
+// (A bare "Kit" alias was tried but produced false positives and was removed —
+// "Kit (CD117)" is still matched via the CD117 alias.)
 //
 // OPENFDA_FALSE_POSITIVE_PHRASES lists case-INSENSITIVE phrases that contain the
 // gene's letters but are not the gene — e.g. "BOWEL PREP KIT" (a colonoscopy
@@ -1186,9 +1187,7 @@ function openFdaGeneAppearsAsWord(text, gene) {
 //
 // KEEP IN SYNC with tests/openfda-filter.test.js.
 const OPENFDA_GENE_SYNONYMS = {
-    // "Kit" is included tentatively — capital-K avoids the lowercase English
-    // word "kit", but watch for false positives and remove if they appear.
-    KIT: ['c-Kit', 'CD117', 'Kit'],
+    KIT: ['c-Kit', 'CD117'],
 };
 const OPENFDA_FALSE_POSITIVE_PHRASES = {
     KIT: ['bowel prep kit'],

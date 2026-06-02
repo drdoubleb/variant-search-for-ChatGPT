@@ -90,7 +90,7 @@ function openFdaGeneAppearsAsWord(text, gene) {
 // Gene synonyms & false-positive exceptions — see script.js
 // "openFDA gene synonyms & false-positive exceptions". KEEP IN SYNC.
 const OPENFDA_GENE_SYNONYMS = {
-    KIT: ['c-Kit', 'CD117', 'Kit'],
+    KIT: ['c-Kit', 'CD117'],
 };
 const OPENFDA_FALSE_POSITIVE_PHRASES = {
     KIT: ['bowel prep kit'],
@@ -466,7 +466,7 @@ for (const tc of cases) {
 const reasonCases = [
     // ── KIT synonyms: the Gleevec/imatinib label never says all-caps "KIT" ──
     {
-        name: 'Gleevec: "Kit (CD117)-positive" — kept via CD117/Kit synonyms',
+        name: 'Gleevec: "Kit (CD117)-positive" — kept via CD117 synonym',
         gene: 'KIT',
         text: 'Gleevec is indicated for the treatment of adult patients with Kit (CD117)-positive unresectable and/or metastatic malignant gastrointestinal stromal tumors (GIST).',
         expect: '',
@@ -496,11 +496,18 @@ const reasonCases = [
         text: 'Supplied as a BOWEL PREP KIT. Also indicated for KIT-mutant GIST.',
         expect: '',
     },
-    // ── Lowercase English "kit" must NOT match (capital-K synonym only) ──
+    // ── Bare "Kit"/"kit" must NOT match — the "Kit" alias was removed for
+    //    false positives; only all-caps KIT, c-Kit and CD117 are synonyms. ──
     {
         name: 'lowercase "kit" (e.g. dosing kit) — not a match',
         gene: 'KIT',
         text: 'Each carton contains a dosing kit with a syringe and adapter.',
+        expect: 'case',
+    },
+    {
+        name: 'capitalized standalone "Kit" (no CD117/c-Kit) — not a match',
+        gene: 'KIT',
+        text: 'Supplied as a Kit containing two vials and a diluent.',
         expect: 'case',
     },
     // ── Synonyms never trip negation boilerplate (all-caps token only) ──
