@@ -87,6 +87,62 @@ function openFdaGeneAppearsAsWord(text, gene) {
     return new RegExp(String.raw`(?<![A-Za-z])${openFdaEscapeRegExp(gene)}(?![A-Za-z])`).test(text);
 }
 
+// Gene synonyms & false-positive exceptions — see script.js
+// "openFDA gene synonyms & false-positive exceptions". KEEP IN SYNC.
+const OPENFDA_GENE_SYNONYMS = {
+    KIT: ['c-Kit', 'CD117', 'Kit'],
+};
+const OPENFDA_FALSE_POSITIVE_PHRASES = {
+    KIT: ['bowel prep kit'],
+};
+function openFdaSynonymsFor(gene) {
+    return OPENFDA_GENE_SYNONYMS[gene] || [];
+}
+function openFdaWordSpans(text, term) {
+    if (!text || !term) return [];
+    const re = new RegExp(String.raw`(?<![A-Za-z])${openFdaEscapeRegExp(term)}(?![A-Za-z])`, 'g');
+    const spans = [];
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        spans.push({ start: m.index, end: m.index + m[0].length });
+        if (re.lastIndex === m.index) re.lastIndex++;
+    }
+    return spans;
+}
+function openFdaFalsePositiveSpans(text, phrases) {
+    if (!text || !phrases || !phrases.length) return [];
+    const spans = [];
+    for (const p of phrases) {
+        const re = new RegExp(openFdaEscapeRegExp(p), 'gi');
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            spans.push({ start: m.index, end: m.index + m[0].length });
+            if (re.lastIndex === m.index) re.lastIndex++;
+        }
+    }
+    return spans;
+}
+function openFdaRecordExclusionReason(ind, gene) {
+    if (!ind || !gene) return 'case';
+    const synonyms = openFdaSynonymsFor(gene);
+    const fpSpans = openFdaFalsePositiveSpans(ind, OPENFDA_FALSE_POSITIVE_PHRASES[gene] || []);
+    const outsideFp = (s) => !fpSpans.some(f => s.start >= f.start && s.end <= f.end);
+
+    if (!ind.includes(gene) && !synonyms.some(t => ind.includes(t))) return 'case';
+
+    const geneSpans = openFdaWordSpans(ind, gene).filter(outsideFp);
+    const synSpans = synonyms.flatMap(t => openFdaWordSpans(ind, t)).filter(outsideFp);
+
+    if (geneSpans.length === 0 && synSpans.length === 0) {
+        const hadRawWord = openFdaGeneAppearsAsWord(ind, gene)
+            || synonyms.some(t => openFdaGeneAppearsAsWord(ind, t));
+        return (hadRawWord && fpSpans.length) ? 'falsePositive' : 'boundary';
+    }
+
+    if (synSpans.length === 0 && openFdaGeneOnlyInNegativeContext(ind, gene)) return 'negation';
+    return '';
+}
+
 // ── Test cases ────────────────────────────────────────────────────────────
 // Each case lists the queried gene, an excerpt that mimics real FDA
 // indications_and_usage text, and the expected outcome (true = excluded
@@ -401,6 +457,88 @@ for (const tc of cases) {
         console.error(`FAIL: ${tc.name}`);
         console.error(`  expected excluded=${tc.expectExcluded}, got ${got}`);
         console.error(`  spans: ${JSON.stringify(findOpenFdaNegationSpans(tc.text).map(s => tc.text.slice(s.start, s.end)))}`);
+        failed++;
+    }
+}
+
+// ── Synonym & false-positive classification (openFdaRecordExclusionReason) ──
+// gene is always passed upper-cased by the caller, mirroring fetchOpenFdaDrugLabels.
+const reasonCases = [
+    // ── KIT synonyms: the Gleevec/imatinib label never says all-caps "KIT" ──
+    {
+        name: 'Gleevec: "Kit (CD117)-positive" — kept via CD117/Kit synonyms',
+        gene: 'KIT',
+        text: 'Gleevec is indicated for the treatment of adult patients with Kit (CD117)-positive unresectable and/or metastatic malignant gastrointestinal stromal tumors (GIST).',
+        expect: '',
+    },
+    {
+        name: 'imatinib: "c-Kit mutation" — kept via c-Kit synonym',
+        gene: 'KIT',
+        text: 'Indicated for adult patients with c-Kit mutation-positive gastrointestinal stromal tumors.',
+        expect: '',
+    },
+    {
+        name: 'genuine all-caps KIT positive indication — kept',
+        gene: 'KIT',
+        text: 'Indicated for patients with KIT exon 11 mutations.',
+        expect: '',
+    },
+    // ── KIT false positive: "BOWEL PREP KIT" is a colonoscopy prep ──
+    {
+        name: 'BOWEL PREP KIT — all-caps KIT only inside false-positive phrase',
+        gene: 'KIT',
+        text: 'SUTAB is a BOWEL PREP KIT indicated for cleansing of the colon in preparation for colonoscopy in adults.',
+        expect: 'falsePositive',
+    },
+    {
+        name: 'false-positive phrase plus a real KIT mention elsewhere — kept',
+        gene: 'KIT',
+        text: 'Supplied as a BOWEL PREP KIT. Also indicated for KIT-mutant GIST.',
+        expect: '',
+    },
+    // ── Lowercase English "kit" must NOT match (capital-K synonym only) ──
+    {
+        name: 'lowercase "kit" (e.g. dosing kit) — not a match',
+        gene: 'KIT',
+        text: 'Each carton contains a dosing kit with a syringe and adapter.',
+        expect: 'case',
+    },
+    // ── Synonyms never trip negation boilerplate (all-caps token only) ──
+    {
+        name: 'c-Kit positive mention survives even with a negated all-caps KIT elsewhere',
+        gene: 'KIT',
+        text: 'Indicated for c-Kit mutation-positive GIST. Not for tumors with no KIT mutations.',
+        expect: '',
+    },
+    // ── Genes without synonyms keep original behaviour exactly ──
+    {
+        name: 'no-synonym gene: EGFR negation boilerplate still excluded',
+        gene: 'EGFR',
+        text: 'Indicated for metastatic NSCLC with no EGFR or ALK genomic tumor aberrations.',
+        expect: 'negation',
+    },
+    {
+        name: 'no-synonym gene: MET substring of AVANDAMET still boundary-excluded',
+        gene: 'MET',
+        text: 'AVANDAMET is indicated as an adjunct to diet and exercise in type 2 diabetes mellitus.',
+        expect: 'boundary',
+    },
+    {
+        name: 'no-synonym gene: MET positive indication still kept',
+        gene: 'MET',
+        text: 'Indicated for adult patients with advanced solid tumors that have MET amplification.',
+        expect: '',
+    },
+];
+
+for (const tc of reasonCases) {
+    const got = openFdaRecordExclusionReason(tc.text, tc.gene);
+    if (got === tc.expect) {
+        console.log(`PASS: ${tc.name}`);
+        passed++;
+    } else {
+        console.error(`FAIL: ${tc.name}`);
+        console.error(`  expected reason="${tc.expect}", got "${got}"`);
         failed++;
     }
 }
