@@ -1163,8 +1163,106 @@ function openFdaGeneAppearsAsWord(text, gene) {
     return new RegExp(String.raw`(?<![A-Za-z])${openFdaEscapeRegExp(gene)}(?![A-Za-z])`).test(text);
 }
 
+// ── openFDA gene synonyms & false-positive exceptions ────────────────────
+// By default openFDA matching is an "all-caps" filter: the queried gene is
+// upper-cased (e.g. "KIT") and a record is kept only when that exact upper-case
+// symbol appears as a whole word in indications_and_usage. That is deliberate —
+// it stops lowercase English words ("kit", "met") and case-variant non-gene
+// uses from matching.
+//
+// A few genes, though, are written in FDA labels under aliases that are NOT the
+// all-caps symbol, so the all-caps filter wrongly drops the label we want. KIT
+// is the motivating case: the Gleevec/imatinib label never says "KIT"; it says
+// "Kit (CD117)-positive" and "c-Kit mutation". OPENFDA_GENE_SYNONYMS lets us add
+// per-gene aliases that are matched case-SENSITIVELY *exactly as written* (so
+// "c-Kit" matches "c-Kit", not "C-KIT"). This bypasses the all-caps rule for
+// that one symbol while leaving the general filter intact for every other gene.
+// (A bare "Kit" alias was tried but produced false positives and was removed —
+// "Kit (CD117)" is still matched via the CD117 alias.)
+//
+// OPENFDA_FALSE_POSITIVE_PHRASES lists case-INSENSITIVE phrases that contain the
+// gene's letters but are not the gene — e.g. "BOWEL PREP KIT" (a colonoscopy
+// prep, not the KIT receptor). A record is dropped when every gene/synonym hit
+// falls inside one of these phrases.
+//
+// KEEP IN SYNC with tests/openfda-filter.test.js.
+const OPENFDA_GENE_SYNONYMS = {
+    KIT: ['c-Kit', 'CD117'],
+};
+const OPENFDA_FALSE_POSITIVE_PHRASES = {
+    KIT: ['bowel prep kit'],
+};
+
+function openFdaSynonymsFor(gene) {
+    return OPENFDA_GENE_SYNONYMS[gene] || [];
+}
+
+// All whole-word, case-sensitive match spans of `term` in `text`.
+function openFdaWordSpans(text, term) {
+    if (!text || !term) return [];
+    const re = new RegExp(String.raw`(?<![A-Za-z])${openFdaEscapeRegExp(term)}(?![A-Za-z])`, 'g');
+    const spans = [];
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        spans.push({ start: m.index, end: m.index + m[0].length });
+        if (re.lastIndex === m.index) re.lastIndex++;
+    }
+    return spans;
+}
+
+// Case-insensitive match spans of each false-positive phrase.
+function openFdaFalsePositiveSpans(text, phrases) {
+    if (!text || !phrases || !phrases.length) return [];
+    const spans = [];
+    for (const p of phrases) {
+        const re = new RegExp(openFdaEscapeRegExp(p), 'gi');
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            spans.push({ start: m.index, end: m.index + m[0].length });
+            if (re.lastIndex === m.index) re.lastIndex++;
+        }
+    }
+    return spans;
+}
+
+// Decide whether an FDA indications_and_usage string matches the queried gene.
+// Returns '' to keep, or an exclusion reason: 'case' (neither the all-caps
+// symbol nor any verbatim synonym is present), 'boundary' (present only inside a
+// larger word), 'falsePositive' (present only inside a known false-positive
+// phrase), or 'negation' (every symbol occurrence sits in a negation span).
+// For genes with no synonyms and no false-positive phrases this reduces exactly
+// to the original three-step filter. KEEP IN SYNC with tests/openfda-filter.test.js.
+function openFdaRecordExclusionReason(ind, gene) {
+    if (!ind || !gene) return 'case';
+    const synonyms = openFdaSynonymsFor(gene);
+    const fpSpans = openFdaFalsePositiveSpans(ind, OPENFDA_FALSE_POSITIVE_PHRASES[gene] || []);
+    const outsideFp = (s) => !fpSpans.some(f => s.start >= f.start && s.end <= f.end);
+
+    // (1) case-sensitive presence of the all-caps symbol OR a verbatim synonym.
+    if (!ind.includes(gene) && !synonyms.some(t => ind.includes(t))) return 'case';
+
+    // Whole-word hits, dropping any that sit wholly inside a false-positive phrase.
+    const geneSpans = openFdaWordSpans(ind, gene).filter(outsideFp);
+    const synSpans = synonyms.flatMap(t => openFdaWordSpans(ind, t)).filter(outsideFp);
+
+    // (2) no surviving whole-word hit → substring of a larger word, or only
+    //     inside a false-positive phrase ("BOWEL PREP KIT").
+    if (geneSpans.length === 0 && synSpans.length === 0) {
+        const hadRawWord = openFdaGeneAppearsAsWord(ind, gene)
+            || synonyms.some(t => openFdaGeneAppearsAsWord(ind, t));
+        return (hadRawWord && fpSpans.length) ? 'falsePositive' : 'boundary';
+    }
+
+    // (3) negation — drop only when the all-caps symbol is the sole evidence and
+    //     every one of its occurrences is negated. A positive synonym hit (e.g.
+    //     "c-Kit mutation") rescues the record; FDA negation boilerplate is
+    //     written with all-caps symbols, so synonyms aren't negation-checked.
+    if (synSpans.length === 0 && openFdaGeneOnlyInNegativeContext(ind, gene)) return 'negation';
+    return '';
+}
+
 async function fetchOpenFdaDrugLabels(gene) {
-    if (!gene) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedBoundary: 0, excludedNegation: 0, results: [] };
+    if (!gene) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedBoundary: 0, excludedFalsePositive: 0, excludedNegation: 0, results: [] };
     const LIMIT = 100;
     const MAX_RECORDS = 1000;
     // Restrict to prescription drugs server-side. The vast majority of false
@@ -1190,7 +1288,7 @@ async function fetchOpenFdaDrugLabels(gene) {
 
     try {
         const firstData = await fetchPage(0);
-        if (!firstData) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedBoundary: 0, excludedNegation: 0, results: [] };
+        if (!firstData) return { total: 0, fetched: 0, excluded: 0, excludedCase: 0, excludedBoundary: 0, excludedFalsePositive: 0, excludedNegation: 0, results: [] };
 
         const total = firstData?.meta?.results?.total || 0;
         let raw = firstData?.results || [];
@@ -1205,13 +1303,16 @@ async function fetchOpenFdaDrugLabels(gene) {
 
         let excludedCase = 0;
         let excludedBoundary = 0;
+        let excludedFalsePositive = 0;
         let excludedNegation = 0;
         const results = [];
         for (const item of raw) {
             const ind = item.indications_and_usage?.[0] || '';
-            if (!ind.includes(gene)) { excludedCase++; continue; }
-            if (!openFdaGeneAppearsAsWord(ind, gene)) { excludedBoundary++; continue; }
-            if (openFdaGeneOnlyInNegativeContext(ind, gene)) { excludedNegation++; continue; }
+            const reason = openFdaRecordExclusionReason(ind, gene);
+            if (reason === 'case') { excludedCase++; continue; }
+            if (reason === 'boundary') { excludedBoundary++; continue; }
+            if (reason === 'falsePositive') { excludedFalsePositive++; continue; }
+            if (reason === 'negation') { excludedNegation++; continue; }
             results.push({
                 brand_name: item.openfda?.brand_name?.[0] || '',
                 generic_name: item.openfda?.generic_name?.[0] || '',
@@ -1225,9 +1326,10 @@ async function fetchOpenFdaDrugLabels(gene) {
         return {
             total,
             fetched: raw.length,
-            excluded: excludedCase + excludedBoundary + excludedNegation,
+            excluded: excludedCase + excludedBoundary + excludedFalsePositive + excludedNegation,
             excludedCase,
             excludedBoundary,
+            excludedFalsePositive,
             excludedNegation,
             results,
         };
@@ -3216,8 +3318,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 ofResultsDiv.appendChild(ofSpinner);
                 openFdaPanel.appendChild(ofResultsDiv);
 
-                fetchOpenFdaDrugLabels(gene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedNegation, results: ofResults }) => {
-                    geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, excludedCase, excludedBoundary, excludedNegation, results: ofResults };
+                fetchOpenFdaDrugLabels(gene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults }) => {
+                    geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
                     ofResultsDiv.innerHTML = '';
                     if (!ofResults || ofResults.length === 0) {
                         ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${gene}.</div>`;
@@ -3230,6 +3332,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const excludedReasons = [];
                     if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
                     if (excludedBoundary) excludedReasons.push(`${excludedBoundary} substring of larger word`);
+                    if (excludedFalsePositive) excludedReasons.push(`${excludedFalsePositive} false-positive phrase`);
                     if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
                     const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
                     ofCountEl.textContent = shownOf + excludedNote;
@@ -7212,8 +7315,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         ofResultsDiv.appendChild(ofSpinner);
                         openFdaPanel.appendChild(ofResultsDiv);
 
-                        fetchOpenFdaDrugLabels(firstGene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedNegation, results: ofResults }) => {
-                            aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, excludedCase, excludedBoundary, excludedNegation, results: ofResults };
+                        fetchOpenFdaDrugLabels(firstGene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults }) => {
+                            aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
                             ofResultsDiv.innerHTML = '';
                             if (!ofResults || ofResults.length === 0) {
                                 ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${firstGene}.</div>`;
@@ -7226,6 +7329,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             const excludedReasons = [];
                             if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
                             if (excludedBoundary) excludedReasons.push(`${excludedBoundary} substring of larger word`);
+                            if (excludedFalsePositive) excludedReasons.push(`${excludedFalsePositive} false-positive phrase`);
                             if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
                             const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
                             ofCountEl.textContent = shownOf + excludedNote;
