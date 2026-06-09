@@ -1037,7 +1037,7 @@ async function fetchCivicApiData(geneName, proteinChange) {
 async function fetchFdaCompanionDiagnostics(gene) {
     if (!gene) return [];
     const params = new URLSearchParams({ gene });
-    const url = `https://drdoubleb.com/BBKB/gene_api.php?${params}`;
+    const url = `https://drdoubleb.com/companion/gene_api.php?${params}`;
     let resp;
     try {
         resp = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.fda);
