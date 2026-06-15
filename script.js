@@ -63,6 +63,7 @@ const API_TIMEOUT_MS = {
     civic: 8000,
     pubmed: 25000,
     fda: 8000,
+    bbkb: 8000,
     gnomadV4: 10000,
     clinicalTrials: 20000,
     spliceai: 25000,
@@ -1028,6 +1029,115 @@ async function fetchCivicApiData(geneName, proteinChange) {
         console.warn('CivicDB API fetch failed', e);
         return null;
     }
+}
+
+/**
+ * Query the Biomarker–therapy (BBKB) API for FDA-approved oncology
+ * biomarker/therapy combinations associated with the given gene.
+ */
+async function fetchBbkbBiomarkerTherapies(gene) {
+    if (!gene) return { total_matched: 0, returned: 0, results: [] };
+    const params = new URLSearchParams({ gene });
+    const url = `https://drdoubleb.com/BBKB/api/biomarker.php?${params}`;
+    let resp;
+    try {
+        resp = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.bbkb);
+    } catch (e) {
+        console.warn('BBKB biomarker-therapy fetch failed', e);
+        return { total_matched: 0, returned: 0, results: [] };
+    }
+    if (!resp.ok) throw new Error(`BBKB biomarker-therapy API error: ${resp.status}`);
+    const data = await resp.json();
+    return {
+        query: data.query || { gene },
+        matched_genes: data.matched_genes || [],
+        total_matched: data.total_matched || 0,
+        returned: data.returned || 0,
+        offset: data.offset || 0,
+        limit: data.limit || 100,
+        generated: data.generated || '',
+        results: Array.isArray(data.results) ? data.results : []
+    };
+}
+
+function renderBbkbBiomarkerTherapies(panel, gene, aiExtras) {
+    const linkEl = document.createElement('a');
+    linkEl.href = 'https://drdoubleb.com/BBKB';
+    linkEl.target = '_blank';
+    linkEl.rel = 'noopener noreferrer';
+    linkEl.textContent = 'BBKB biomarker–therapy database ↗';
+    panel.appendChild(linkEl);
+
+    const queryLabel = document.createElement('div');
+    queryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+    queryLabel.textContent = `Gene: ${gene}`;
+    panel.appendChild(queryLabel);
+
+    const resultsDiv = document.createElement('div');
+    const spinner = document.createElement('div');
+    spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+    spinner.textContent = 'Loading BBKB therapy results…';
+    resultsDiv.appendChild(spinner);
+    panel.appendChild(resultsDiv);
+
+    fetchBbkbBiomarkerTherapies(gene).then((data) => {
+        if (aiExtras) aiExtras.bbkb_biomarker_therapies = { gene, ...data };
+        const records = data.results || [];
+        resultsDiv.innerHTML = '';
+        if (!records.length) {
+            resultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No BBKB biomarker–therapy records found for ${gene}.</div>`;
+            return;
+        }
+        const countEl = document.createElement('div');
+        countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
+        countEl.textContent = `${records.length} record${records.length !== 1 ? 's' : ''}${data.total_matched && data.total_matched !== records.length ? ` (${data.total_matched} total matched)` : ''}`;
+        resultsDiv.appendChild(countEl);
+
+        const BBKB_PREVIEW = 7;
+        const buildRecordEl = (rec) => {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'margin-bottom:8px;padding:8px;background:#fff7f7;border:1px solid #fee2e2;border-radius:4px;font-size:0.82rem;';
+            const therapies = Array.isArray(rec.therapy) ? rec.therapy.join(', ') : (rec.therapy || 'Unknown therapy');
+            const generics = Array.isArray(rec.generic_components) && rec.generic_components.length ? ` (${rec.generic_components.join(', ')})` : '';
+            const title = document.createElement('div');
+            title.style.cssText = 'font-weight:700;color:#7f1d1d;margin-bottom:2px;';
+            title.textContent = `${therapies}${generics}`;
+            wrap.appendChild(title);
+
+            const meta = [rec.tumor_type, rec.alteration, rec.therapeutic_context].filter(Boolean);
+            if (meta.length) {
+                const metaEl = document.createElement('div');
+                metaEl.style.cssText = 'color:#374151;margin-bottom:4px;';
+                metaEl.textContent = meta.join(' · ');
+                wrap.appendChild(metaEl);
+            }
+            const extras = [rec.setting, rec.approval_status, Array.isArray(rec.fda_application_numbers) ? rec.fda_application_numbers.join(', ') : ''].filter(Boolean);
+            if (extras.length) {
+                const extraEl = document.createElement('div');
+                extraEl.style.cssText = 'color:#6b7280;font-size:0.78rem;';
+                extraEl.textContent = extras.join(' · ');
+                wrap.appendChild(extraEl);
+            }
+            return wrap;
+        };
+        records.slice(0, BBKB_PREVIEW).forEach((rec) => resultsDiv.appendChild(buildRecordEl(rec)));
+        if (records.length > BBKB_PREVIEW) {
+            const details = document.createElement('details');
+            details.style.cssText = 'margin-top:2px;';
+            const summary = document.createElement('summary');
+            summary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
+            summary.textContent = `Show ${records.length - BBKB_PREVIEW} more…`;
+            details.appendChild(summary);
+            records.slice(BBKB_PREVIEW).forEach((rec) => details.appendChild(buildRecordEl(rec)));
+            resultsDiv.appendChild(details);
+        }
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+        note.textContent = 'Source: BBKB biomarker–therapy API. Verify against current FDA prescribing information before clinical use.';
+        resultsDiv.appendChild(note);
+    }).catch(() => {
+        resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">BBKB data unavailable.</div>';
+    });
 }
 
 /**
@@ -3169,26 +3279,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 openFdaBtn.type = 'button';
                 openFdaBtn.className = 'card-tab-btn';
                 openFdaBtn.textContent = 'openFDA Labels';
+                const bbkbBtn = document.createElement('button');
+                bbkbBtn.type = 'button';
+                bbkbBtn.className = 'card-tab-btn';
+                bbkbBtn.textContent = 'BBKB';
                 fdaTabBar.appendChild(compDxBtn);
                 fdaTabBar.appendChild(openFdaBtn);
+                fdaTabBar.appendChild(bbkbBtn);
                 fdaContent.appendChild(fdaTabBar);
 
                 const compDxPanel = document.createElement('div');
                 compDxPanel.className = 'card-tab-panel active';
                 const openFdaPanel = document.createElement('div');
                 openFdaPanel.className = 'card-tab-panel';
+                const bbkbPanel = document.createElement('div');
+                bbkbPanel.className = 'card-tab-panel';
 
                 compDxBtn.addEventListener('click', () => {
-                    compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active');
-                    compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active');
+                    compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
+                    compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
                 });
                 openFdaBtn.addEventListener('click', () => {
-                    openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active');
-                    openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active');
+                    openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
+                    openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
+                });
+                bbkbBtn.addEventListener('click', () => {
+                    bbkbBtn.classList.add('active'); compDxBtn.classList.remove('active'); openFdaBtn.classList.remove('active');
+                    bbkbPanel.classList.add('active'); compDxPanel.classList.remove('active'); openFdaPanel.classList.remove('active');
                 });
 
                 fdaContent.appendChild(compDxPanel);
                 fdaContent.appendChild(openFdaPanel);
+                fdaContent.appendChild(bbkbPanel);
                 fdaCard.appendChild(fdaContent);
                 if (cardsContainer) cardsContainer.appendChild(fdaCard);
 
@@ -3297,6 +3419,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 }).catch(() => {
                     fdaResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">FDA drug data unavailable.</div>';
                 });
+
+                // BBKB panel
+                renderBbkbBiomarkerTherapies(bbkbPanel, gene, geneOnlyAiExtras);
 
                 // openFDA Labels panel
                 const ofLinkEl = document.createElement('a');
@@ -3868,8 +3993,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     aiOutput.innerHTML = '<div class="ai-review-loading">Gathering gene-level context for AI review…</div>';
                     try {
                         // Supplemental context for gene-only mode: skip coordinate-dependent calls
-                        const [fdaRecords, clinicalTrialData] = await Promise.all([
+                        const [fdaRecords, bbkbTherapies, clinicalTrialData] = await Promise.all([
                             fetchFdaCompanionDiagnostics(gene).catch(() => []),
+                            fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] })),
                             fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }))
                         ]);
                         const pubmedTerm = altType ? `${gene} ${altType}` : gene;
@@ -3899,6 +4025,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             tumor_type: tumorType,
                             user_notes: userNotes || undefined,
                             fda_companion_diagnostics_records: fdaRecords,
+                            bbkb_biomarker_therapies: bbkbTherapies,
                             clinical_trials: clinicalTrialData,
                             supplemental_card_data: supplementalContext
                         };
@@ -6683,6 +6810,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm)
                         : Promise.resolve(null)],
                     ['openfda_drug_labels', aiReviewGene ? fetchOpenFdaDrugLabels(aiReviewGene).catch(() => null) : Promise.resolve(null)],
+                    ['bbkb_biomarker_therapies', aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null)],
                     ['tp53_mutation_database', isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
                         gene: 'TP53',
                         protein: normaliseAiReviewVariantText(aiReviewProtein),
@@ -7161,26 +7289,38 @@ document.addEventListener('DOMContentLoaded', () => {
                         openFdaBtn.type = 'button';
                         openFdaBtn.className = 'card-tab-btn';
                         openFdaBtn.textContent = 'openFDA Labels';
+                        const bbkbBtn = document.createElement('button');
+                        bbkbBtn.type = 'button';
+                        bbkbBtn.className = 'card-tab-btn';
+                        bbkbBtn.textContent = 'BBKB';
                         fdaTabBar.appendChild(compDxBtn);
                         fdaTabBar.appendChild(openFdaBtn);
+                        fdaTabBar.appendChild(bbkbBtn);
                         fdaContent.appendChild(fdaTabBar);
 
                         const compDxPanel = document.createElement('div');
                         compDxPanel.className = 'card-tab-panel active';
                         const openFdaPanel = document.createElement('div');
                         openFdaPanel.className = 'card-tab-panel';
+                        const bbkbPanel = document.createElement('div');
+                        bbkbPanel.className = 'card-tab-panel';
 
                         compDxBtn.addEventListener('click', () => {
-                            compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active');
-                            compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active');
+                            compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
+                            compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
                         });
                         openFdaBtn.addEventListener('click', () => {
-                            openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active');
-                            openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active');
+                            openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
+                            openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
+                        });
+                        bbkbBtn.addEventListener('click', () => {
+                            bbkbBtn.classList.add('active'); compDxBtn.classList.remove('active'); openFdaBtn.classList.remove('active');
+                            bbkbPanel.classList.add('active'); compDxPanel.classList.remove('active'); openFdaPanel.classList.remove('active');
                         });
 
                         fdaContent.appendChild(compDxPanel);
                         fdaContent.appendChild(openFdaPanel);
+                        fdaContent.appendChild(bbkbPanel);
                         fdaCard.appendChild(fdaContent);
                         cardsContainer.appendChild(fdaCard);
 
@@ -7294,6 +7434,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         }).catch(() => {
                             fdaResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">FDA drug data unavailable.</div>';
                         });
+
+                        // --- BBKB panel ---
+                        renderBbkbBiomarkerTherapies(bbkbPanel, firstGene, aiReviewExtras);
 
                         // --- openFDA Labels panel ---
                         const ofLinkEl = document.createElement('a');
@@ -7895,8 +8038,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     runButton.textContent = 'Running…';
                     aiOutput.innerHTML = '<div class="ai-review-loading">Gathering FDA, trial, and annotation context for AI review…</div>';
                     try {
-                        const [fdaRecords, clinicalTrialData, supplementalContext] = await Promise.all([
+                        const [fdaRecords, bbkbTherapies, clinicalTrialData, supplementalContext] = await Promise.all([
                             aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
+                            aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null),
                             aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
                             fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
                         ]);
@@ -7915,6 +8059,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             details: detailsData,
                             transcripts: transcriptsList,
                             fda_companion_diagnostics_records: fdaRecords,
+                            bbkb_biomarker_therapies: bbkbTherapies,
                             clinical_trials: clinicalTrialData,
                             supplemental_card_data: supplementalContext,
                             myvariant_annotation: (() => {
