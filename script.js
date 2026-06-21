@@ -3834,7 +3834,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             recordEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;font-size:0.82rem;';
                             const headerEl = document.createElement('div');
                             headerEl.style.cssText = 'font-weight:700;color:#166534;margin-bottom:4px;';
-                            const markerDisplay = (record.marker && (record.marker.display_name || record.marker.symbol)) || `Record ${idx + 1}`;
+                            const markerDisplay = (record.biomarker && (record.biomarker.display_name || record.biomarker.symbol)) || `Record ${idx + 1}`;
                             const tumorDisplay = (record.tumor && (record.tumor.name || record.tumor.subtype)) || selectedCancer;
                             headerEl.textContent = `${markerDisplay} — ${tumorDisplay}`;
                             recordEl.appendChild(headerEl);
@@ -3851,19 +3851,22 @@ document.addEventListener('DOMContentLoaded', () => {
                                 recordEl.appendChild(row);
                             };
 
-                            if (record.therapy) {
-                                const t = record.therapy;
-                                if (t.recommended_therapies && t.recommended_therapies.length > 0) {
-                                    buildKVRow('Recommended therapy', t.recommended_therapies.join(', '));
-                                }
-                                if (t.category) buildKVRow('Category', t.category);
-                                if (t.context) buildKVRow('Therapy context', t.context);
+                            if (Array.isArray(record.therapy) && record.therapy.length > 0) {
+                                buildKVRow('Recommended therapy', record.therapy.map(t => t.name).filter(Boolean).join(', '));
+                                const cat = record.therapy.map(t => t.evidence_or_category).filter(Boolean).join(', ');
+                                if (cat) buildKVRow('Category', cat);
+                                const setting = record.therapy.map(t => t.setting).filter(Boolean).join(', ');
+                                if (setting) buildKVRow('Therapy setting', setting);
                             }
                             if (record.testing) {
                                 const te = record.testing;
-                                if (te.recommended_test) buildKVRow('Recommended test', te.recommended_test);
-                                if (te.context) buildKVRow('Testing context', te.context);
-                                if (te.modality) buildKVRow('Modality', te.modality);
+                                if (te.recommended) buildKVRow('Recommended test', te.recommended);
+                                if (Array.isArray(te.methods) && te.methods.length > 0) {
+                                    buildKVRow('Method', te.methods.map(m => m.method).filter(Boolean).join(', '));
+                                }
+                            }
+                            if (record.clinical_significance && record.clinical_significance.summary) {
+                                buildKVRow('Clinical significance', record.clinical_significance.summary);
                             }
 
                             const detailsEl = document.createElement('details');
@@ -3874,15 +3877,15 @@ document.addEventListener('DOMContentLoaded', () => {
                             detailsEl.appendChild(detailsSummary);
                             const detailsBody = document.createElement('div');
                             detailsBody.style.cssText = 'font-size:0.79rem;padding:4px 2px;margin-top:4px;max-height:350px;overflow-y:auto;line-height:1.6;';
-                            if (record.record_id) {
+                            if (record.id) {
                                 const idRow = document.createElement('div');
                                 idRow.style.cssText = 'font-size:0.74rem;color:#9ca3af;margin-bottom:2px;';
-                                idRow.textContent = `Record ID: ${record.record_id}`;
+                                idRow.textContent = `Record ID: ${record.id}`;
                                 detailsBody.appendChild(idRow);
                             }
-                            const sectionDefs = [['Tumor', record.tumor], ['Marker / Biomarker', record.marker], ['Testing', record.testing], ['Therapy', record.therapy], ['Guideline Source', record.guideline_metadata]];
+                            const sectionDefs = [['Tumor', record.tumor], ['Biomarker', record.biomarker], ['Clinical Significance', record.clinical_significance], ['Testing', record.testing], ['Therapy', record.therapy], ['Eligibility Context', record.eligibility_context], ['Interpretive States', record.interpretive_states], ['Guideline Source', record.guideline_metadata]];
                             sectionDefs.forEach(([title, obj]) => renderSection(title, obj, detailsBody));
-                            const skipKeys = new Set(['record_id', 'tumor', 'marker', 'testing', 'therapy', 'guideline_metadata', 'dataset_file', 'dataset_record_index', 'dataset_name']);
+                            const skipKeys = new Set(['id', 'tumor', 'biomarker', 'clinical_significance', 'testing', 'therapy', 'eligibility_context', 'interpretive_states', 'guideline_metadata', 'dataset_file', 'dataset_record_index', 'dataset_name']);
                             Object.keys(record).filter(k => !skipKeys.has(k)).forEach(k => {
                                 const val = record[k];
                                 if (val && typeof val === 'object') {
@@ -7876,7 +7879,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                             const headerEl = document.createElement('div');
                             headerEl.style.cssText = 'font-weight:700;color:#166534;margin-bottom:4px;';
-                            const markerDisplay = (record.marker && (record.marker.display_name || record.marker.symbol)) || `Record ${idx + 1}`;
+                            const markerDisplay = (record.biomarker && (record.biomarker.display_name || record.biomarker.symbol)) || `Record ${idx + 1}`;
                             const tumorDisplay = (record.tumor && (record.tumor.name || record.tumor.subtype)) || selectedCancer;
                             headerEl.textContent = `${markerDisplay} — ${tumorDisplay}`;
                             recordEl.appendChild(headerEl);
@@ -7893,19 +7896,22 @@ document.addEventListener('DOMContentLoaded', () => {
                                 recordEl.appendChild(row);
                             };
 
-                            if (record.therapy) {
-                                const t = record.therapy;
-                                if (t.recommended_therapies && t.recommended_therapies.length > 0) {
-                                    buildKVRow('Recommended therapy', t.recommended_therapies.join(', '));
-                                }
-                                if (t.category) buildKVRow('Category', t.category);
-                                if (t.context) buildKVRow('Therapy context', t.context);
+                            if (Array.isArray(record.therapy) && record.therapy.length > 0) {
+                                buildKVRow('Recommended therapy', record.therapy.map(t => t.name).filter(Boolean).join(', '));
+                                const cat = record.therapy.map(t => t.evidence_or_category).filter(Boolean).join(', ');
+                                if (cat) buildKVRow('Category', cat);
+                                const setting = record.therapy.map(t => t.setting).filter(Boolean).join(', ');
+                                if (setting) buildKVRow('Therapy setting', setting);
                             }
                             if (record.testing) {
                                 const te = record.testing;
-                                if (te.recommended_test) buildKVRow('Recommended test', te.recommended_test);
-                                if (te.context) buildKVRow('Testing context', te.context);
-                                if (te.modality) buildKVRow('Modality', te.modality);
+                                if (te.recommended) buildKVRow('Recommended test', te.recommended);
+                                if (Array.isArray(te.methods) && te.methods.length > 0) {
+                                    buildKVRow('Method', te.methods.map(m => m.method).filter(Boolean).join(', '));
+                                }
+                            }
+                            if (record.clinical_significance && record.clinical_significance.summary) {
+                                buildKVRow('Clinical significance', record.clinical_significance.summary);
                             }
 
                             const detailsEl = document.createElement('details');
@@ -7917,15 +7923,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
                             const detailsBody = document.createElement('div');
                             detailsBody.style.cssText = 'font-size:0.79rem;padding:4px 2px;margin-top:4px;max-height:350px;overflow-y:auto;line-height:1.6;';
-                            if (record.record_id) {
+                            if (record.id) {
                                 const idRow = document.createElement('div');
                                 idRow.style.cssText = 'font-size:0.74rem;color:#9ca3af;margin-bottom:2px;';
-                                idRow.textContent = `Record ID: ${record.record_id}`;
+                                idRow.textContent = `Record ID: ${record.id}`;
                                 detailsBody.appendChild(idRow);
                             }
-                            const sectionDefs = [['Tumor', record.tumor], ['Marker / Biomarker', record.marker], ['Testing', record.testing], ['Therapy', record.therapy], ['Guideline Source', record.guideline_metadata]];
+                            const sectionDefs = [['Tumor', record.tumor], ['Biomarker', record.biomarker], ['Clinical Significance', record.clinical_significance], ['Testing', record.testing], ['Therapy', record.therapy], ['Eligibility Context', record.eligibility_context], ['Interpretive States', record.interpretive_states], ['Guideline Source', record.guideline_metadata]];
                             sectionDefs.forEach(([title, obj]) => renderSection(title, obj, detailsBody));
-                            const skipKeys = new Set(['record_id', 'tumor', 'marker', 'testing', 'therapy', 'guideline_metadata', 'dataset_file', 'dataset_record_index', 'dataset_name']);
+                            const skipKeys = new Set(['id', 'tumor', 'biomarker', 'clinical_significance', 'testing', 'therapy', 'eligibility_context', 'interpretive_states', 'guideline_metadata', 'dataset_file', 'dataset_record_index', 'dataset_name']);
                             Object.keys(record).filter(k => !skipKeys.has(k)).forEach(k => {
                                 const val = record[k];
                                 if (val && typeof val === 'object') {
