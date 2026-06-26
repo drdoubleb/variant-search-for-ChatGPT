@@ -59,10 +59,12 @@ export default async function handler(req, res) {
     const apiKey = process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';
 
     try {
-        const changeClause = changeForms.length === 1
-            ? changeForms[0]
-            : `(${changeForms.join(' OR ')})`;
-        const term = `${safeGene}[gene] AND ${changeClause}`;
+        // ClinVar's own search help recommends querying same-protein-change
+        // variants by gene symbol plus a one- or three-letter protein change
+        // (e.g. "BRCA1 S803R"). Keep the proxy to that single website-style
+        // query instead of broadening into multiple eUtils searches.
+        const preferredChange = changeForms.find((form) => /^[A-Za-z]\d+[A-Za-z*]$/.test(form)) || changeForms[0];
+        const term = `${safeGene} ${preferredChange}`;
         const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=${retmax}&term=${encodeURIComponent(term)}${apiKey}`;
         const searchData = await ncbiFetch(searchUrl);
         const ids = searchData?.esearchresult?.idlist || [];
