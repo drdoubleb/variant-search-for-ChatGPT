@@ -257,6 +257,17 @@ function aaThreeToSingle(aa) {
     return aaSingle[String(aa).toUpperCase()] || null;
 }
 
+// Convert a single-letter amino acid code to its three-letter form (Title case,
+// e.g. 'G' -> 'Gly', '*' -> 'Ter'). Returns null for unknown codes.
+function aaSingleToThree(aa) {
+    const map = {
+        A: 'Ala', R: 'Arg', N: 'Asn', D: 'Asp', C: 'Cys', Q: 'Gln', E: 'Glu', G: 'Gly',
+        H: 'His', I: 'Ile', L: 'Leu', K: 'Lys', M: 'Met', F: 'Phe', P: 'Pro', S: 'Ser',
+        T: 'Thr', W: 'Trp', Y: 'Tyr', V: 'Val', '*': 'Ter'
+    };
+    return map[String(aa || '').toUpperCase()] || null;
+}
+
 // Convert a 3-letter protein HGVS body (without "p.") to single-letter HGVS body.
 // Handles substitutions, nonsense and common frameshift forms.
 function convertProteinBodyToSingle(proteinBody) {
@@ -743,6 +754,22 @@ async function fetchClinvarGeneVariants(gene, retmax = 500) {
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
     return data.variants || [];
+}
+
+async function fetchClinvarProteinVariants(gene, changeForms) {
+    const safeGene = String(gene || '').replace(/[^A-Za-z0-9\-_.]/g, '');
+    const change = (Array.isArray(changeForms) ? changeForms : [changeForms])
+        .map((s) => String(s || '').replace(/[^A-Za-z0-9*]/g, ''))
+        .filter(Boolean)
+        .join(',');
+    if (!safeGene || !change) return { variants: [], total: 0 };
+    const endpoint = getConfiguredApiEndpoint('CLINVAR_PROTEIN_API_ENDPOINT', '/api/clinvar-protein');
+    const params = new URLSearchParams({ gene: safeGene, change });
+    const res = await fetchWithTimeout(`${endpoint}?${params}`, {}, API_TIMEOUT_MS.clinvar);
+    if (!res.ok) throw new Error(`ClinVar protein proxy error: ${res.status}`);
+    const data = await res.json();
+    if (data?.error) throw new Error(data.error);
+    return { variants: data.variants || [], total: data.total ?? (data.variants || []).length };
 }
 
 async function fetchClinvarVariant(variationId) {
@@ -5589,55 +5616,6 @@ document.addEventListener('DOMContentLoaded', () => {
                                 }
                             }
 
-                            // Same protein change, different codon nucleotide.
-                            // ClinVar groups these under the protein search (e.g.
-                            // "CTNNB1 G34R" returns both c.100G>C and c.100G>A). They
-                            // share the queried amino-acid consequence, so an exact
-                            // genomic match alone misses them — surface them explicitly.
-                            const queryProteinChange = parseProteinChange(queryHgvsP)
-                                || parseProteinChange(targetProtGlobal)
-                                || parseProteinChange(protein);
-                            if (queryProteinChange) {
-                                const seen = new Set();
-                                const sameProt = [];
-                                nearby.forEach((v) => {
-                                    const pc = parseProteinChange(v.title) || parseProteinChange(v.variationName);
-                                    if (sameProteinChange(pc, queryProteinChange) && !seen.has(String(v.id))) {
-                                        seen.add(String(v.id));
-                                        sameProt.push(v);
-                                    }
-                                });
-                                if (sameProt.length > 0) {
-                                    const pcKey = `p.${queryProteinChange.ref}${queryProteinChange.pos}${queryProteinChange.alt}`;
-                                    const det = document.createElement('details');
-                                    det.open = sameProt.length <= 6;
-                                    det.style.marginTop = '6px';
-                                    const sum = document.createElement('summary');
-                                    sum.style.cssText = 'font-size:0.84rem;font-weight:600;';
-                                    sum.textContent = `Same protein change (${pcKey}) in ClinVar: ${sameProt.length}`;
-                                    det.appendChild(sum);
-                                    const ul = document.createElement('ul');
-                                    ul.style.cssText = 'margin-top:0.4rem;font-size:0.8rem;padding-left:1.2rem;line-height:1.5;';
-                                    sameProt.forEach((v) => {
-                                        const li = document.createElement('li');
-                                        const color = getPathogenicityColor(v.germline, v);
-                                        const sig = `<span style="color:${color};font-weight:600">${v.germline || 'See ClinVar'}</span>`;
-                                        const isQueried = variantId && String(v.id) === String(variantId);
-                                        const tag = isQueried ? ' <em>(queried variant)</em>' : '';
-                                        const label = v.title || `Variation ${v.id}`;
-                                        const link = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${label}</a>`;
-                                        li.innerHTML = `${sig} — ${link}${tag}`;
-                                        ul.appendChild(li);
-                                    });
-                                    det.appendChild(ul);
-                                    content.appendChild(det);
-                                    // Expose to the AI review context alongside the nearby variants.
-                                    aiReviewExtras.same_protein_change_clinvar_variants = sameProt.map((v) => ({
-                                        id: v.id, title: v.title, classification: v.germline || null, pos: v.pos ?? null
-                                    }));
-                                }
-                            }
-
                             // Condensed variant list (collapsed by default)
                             const listDet = document.createElement('details');
                             listDet.style.marginTop = '4px';
@@ -5665,6 +5643,80 @@ document.addEventListener('DOMContentLoaded', () => {
                         errNote.style.cssText = 'font-size:0.82rem;color:#9ca3af;margin-top:4px;';
                         errNote.textContent = 'Region data unavailable.';
                         content.appendChild(errNote);
+                    }
+                }
+                // Same protein change in ClinVar (any underlying nucleotide change).
+                //
+                // ClinVar groups variants by protein consequence — searching
+                // "CTNNB1 G34R" returns both c.100G>C and c.100G>A. A genomic /
+                // ±30 bp window match only finds the queried codon position, and can
+                // miss same-consequence variants annotated on a different transcript.
+                // Query ClinVar directly by gene + amino-acid change to catch them all,
+                // then filter to an exact protein-change match for correctness.
+                {
+                    const spAnns = annotation?.snpeff?.ann
+                        ? (Array.isArray(annotation.snpeff.ann) ? annotation.snpeff.ann : [annotation.snpeff.ann])
+                        : [];
+                    const hgvsP = (spAnns.find((a) => a.hgvs_p) || {}).hgvs_p || '';
+                    const queryPC = parseProteinChange(hgvsP)
+                        || parseProteinChange(targetProtGlobal)
+                        || parseProteinChange(protein);
+                    const firstGene = geneNames ? geneNames.split(',')[0].trim() : '';
+                    if (queryPC && firstGene) {
+                        const threeRef = aaSingleToThree(queryPC.ref);
+                        const threeAlt = aaSingleToThree(queryPC.alt);
+                        const changeForms = [];
+                        if (threeRef && threeAlt) changeForms.push(`${threeRef}${queryPC.pos}${threeAlt}`);
+                        changeForms.push(`${queryPC.ref}${queryPC.pos}${queryPC.alt}`);
+                        const pcKey = `p.${queryPC.ref}${queryPC.pos}${queryPC.alt}`;
+                        try {
+                            const { variants: protMatches } = await fetchClinvarProteinVariants(firstGene, changeForms);
+                            // Keep only exact protein-change matches; the free-text search is
+                            // recall-oriented and may include unrelated nearby variants.
+                            const seen = new Set();
+                            const sameProt = [];
+                            protMatches.forEach((v) => {
+                                const pc = parseProteinChange(v.title) || parseProteinChange(v.variationName);
+                                if (sameProteinChange(pc, queryPC) && !seen.has(String(v.id))) {
+                                    seen.add(String(v.id));
+                                    sameProt.push(v);
+                                }
+                            });
+                            if (sameProt.length > 0) {
+                                const det = document.createElement('details');
+                                det.open = sameProt.length <= 8;
+                                det.style.marginTop = '8px';
+                                const sum = document.createElement('summary');
+                                sum.style.cssText = 'font-size:0.84rem;font-weight:600;';
+                                sum.textContent = `Same protein change (${pcKey}) in ClinVar: ${sameProt.length}`;
+                                det.appendChild(sum);
+                                const note = document.createElement('div');
+                                note.style.cssText = 'font-size:0.78rem;color:#6b7280;margin:2px 0 2px;';
+                                note.textContent = 'Variants causing the same amino-acid change via any nucleotide change.';
+                                det.appendChild(note);
+                                const ul = document.createElement('ul');
+                                ul.style.cssText = 'margin-top:0.2rem;font-size:0.8rem;padding-left:1.2rem;line-height:1.5;';
+                                sameProt.forEach((v) => {
+                                    const li = document.createElement('li');
+                                    const color = getPathogenicityColor(v.germline, v);
+                                    const sig = `<span style="color:${color};font-weight:600">${v.germline || 'See ClinVar'}</span>`;
+                                    const isQueried = variantId && String(v.id) === String(variantId);
+                                    const tag = isQueried ? ' <em>(queried variant)</em>' : '';
+                                    const label = v.title || `Variation ${v.id}`;
+                                    const link = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${label}</a>`;
+                                    li.innerHTML = `${sig} — ${link}${tag}`;
+                                    ul.appendChild(li);
+                                });
+                                det.appendChild(ul);
+                                content.appendChild(det);
+                                // Expose to the AI review context.
+                                aiReviewExtras.same_protein_change_clinvar_variants = sameProt.map((v) => ({
+                                    id: v.id, title: v.title, classification: v.germline || null, pos: v.pos ?? null
+                                }));
+                            }
+                        } catch (e) {
+                            console.warn('ClinVar protein-change query failed', e);
+                        }
                     }
                 }
                 // Details: list RCV entries if more than one

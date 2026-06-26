@@ -75,6 +75,25 @@ function sameProteinChange(a, b) {
     return !!a && !!b && a.ref === b.ref && a.pos === b.pos && a.alt === b.alt;
 }
 
+function aaSingleToThree(aa) {
+    const map = {
+        A: 'Ala', R: 'Arg', N: 'Asn', D: 'Asp', C: 'Cys', Q: 'Gln', E: 'Glu', G: 'Gly',
+        H: 'His', I: 'Ile', L: 'Leu', K: 'Lys', M: 'Met', F: 'Phe', P: 'Pro', S: 'Ser',
+        T: 'Thr', W: 'Trp', Y: 'Tyr', V: 'Val', '*': 'Ter'
+    };
+    return map[String(aa || '').toUpperCase()] || null;
+}
+
+// Build the eutils change forms the card sends to /api/clinvar-protein.
+function buildChangeForms(pc) {
+    const forms = [];
+    const r3 = aaSingleToThree(pc.ref);
+    const a3 = aaSingleToThree(pc.alt);
+    if (r3 && a3) forms.push(`${r3}${pc.pos}${a3}`);
+    forms.push(`${pc.ref}${pc.pos}${pc.alt}`);
+    return forms;
+}
+
 // --- tiny assertion harness ----------------------------------------------
 
 let passed = 0;
@@ -155,6 +174,14 @@ check('parses nonsense Arg213Ter → R213*',
     sameProteinChange(parseProteinChange('p.Arg213Ter'), { ref: 'R', pos: 213, alt: '*' }));
 check('bare transcript text yields no protein change',
     parseProteinChange('NM_001904.4') === null);
+
+// The eutils search forms the card sends: three-letter (matches ClinVar titles)
+// plus single-letter, so the gene+change query has the best recall.
+check('builds three-letter + single-letter change forms for G34R',
+    JSON.stringify(buildChangeForms({ ref: 'G', pos: 34, alt: 'R' })) === JSON.stringify(['Gly34Arg', 'G34R']));
+check('aaSingleToThree maps stop codon * → Ter', aaSingleToThree('*') === 'Ter');
+check('three-letter search form parses back to the same change',
+    sameProteinChange(parseProteinChange(buildChangeForms({ ref: 'R', pos: 282, alt: 'W' })[0]), { ref: 'R', pos: 282, alt: 'W' }));
 
 // --- summary --------------------------------------------------------------
 

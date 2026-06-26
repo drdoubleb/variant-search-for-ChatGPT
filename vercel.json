@@ -6,6 +6,9 @@
     "api/clinvar-gene.js": {
       "maxDuration": 30
     },
+    "api/clinvar-protein.js": {
+      "maxDuration": 30
+    },
     "api/tp53.js": {
       "maxDuration": 30
     },
