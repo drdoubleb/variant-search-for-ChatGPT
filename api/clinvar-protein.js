@@ -59,16 +59,43 @@ export default async function handler(req, res) {
     const apiKey = process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';
 
     try {
+        // NCBI's ClinVar web search is more forgiving than a single eUtils
+        // boolean query. In practice, a term like "CTNNB1 G34R" finds multiple
+        // nucleotide alleles with the same protein consequence, while
+        // "CTNNB1[gene] AND (Gly34Arg OR G34R)" can under-recall and return
+        // only the nucleotide-identical record. Mirror the website behavior by
+        // issuing a small set of complementary searches and de-duplicating IDs.
+        const searchTerms = [];
+        const addTerm = (term) => {
+            if (term && !searchTerms.includes(term)) searchTerms.push(term);
+        };
+        changeForms.forEach((form) => {
+            addTerm(`${safeGene} ${form}`);
+            addTerm(`${safeGene}[gene] AND ${form}[All Fields]`);
+        });
         const changeClause = changeForms.length === 1
-            ? changeForms[0]
-            : `(${changeForms.join(' OR ')})`;
-        const term = `${safeGene}[gene] AND ${changeClause}`;
-        const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=${retmax}&term=${encodeURIComponent(term)}${apiKey}`;
-        const searchData = await ncbiFetch(searchUrl);
-        const ids = searchData?.esearchresult?.idlist || [];
-        const totalInClinVar = Number(searchData?.esearchresult?.count || 0);
+            ? `${changeForms[0]}[All Fields]`
+            : `(${changeForms.map((form) => `${form}[All Fields]`).join(' OR ')})`;
+        addTerm(`${safeGene}[gene] AND ${changeClause}`);
 
-        if (!Array.isArray(ids) || ids.length === 0) {
+        const ids = [];
+        let totalInClinVar = 0;
+        const seenIds = new Set();
+        for (const term of searchTerms) {
+            const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=${retmax}&term=${encodeURIComponent(term)}${apiKey}`;
+            const searchData = await ncbiFetch(searchUrl);
+            const termIds = searchData?.esearchresult?.idlist || [];
+            totalInClinVar = Math.max(totalInClinVar, Number(searchData?.esearchresult?.count || 0));
+            if (!Array.isArray(termIds)) continue;
+            termIds.forEach((id) => {
+                if (!seenIds.has(String(id))) {
+                    seenIds.add(String(id));
+                    ids.push(String(id));
+                }
+            });
+        }
+
+        if (ids.length === 0) {
             return res.status(200).json({ variants: [], total: 0 });
         }
 

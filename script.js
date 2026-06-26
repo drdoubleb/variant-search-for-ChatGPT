@@ -5683,16 +5683,18 @@ document.addEventListener('DOMContentLoaded', () => {
                                 }
                             });
                             if (sameProt.length > 0) {
+                                const alternateNtCount = sameProt.filter((v) => !variantId || String(v.id) !== String(variantId)).length;
                                 const det = document.createElement('details');
                                 det.open = sameProt.length <= 8;
                                 det.style.marginTop = '8px';
                                 const sum = document.createElement('summary');
                                 sum.style.cssText = 'font-size:0.84rem;font-weight:600;';
-                                sum.textContent = `Same protein change (${pcKey}) in ClinVar: ${sameProt.length}`;
+                                const altText = alternateNtCount > 0 ? `; ${alternateNtCount} alternate nucleotide change${alternateNtCount !== 1 ? 's' : ''}` : '';
+                                sum.textContent = `Same protein change (${pcKey}) in ClinVar: ${sameProt.length}${altText}`;
                                 det.appendChild(sum);
                                 const note = document.createElement('div');
                                 note.style.cssText = 'font-size:0.78rem;color:#6b7280;margin:2px 0 2px;';
-                                note.textContent = 'Variants causing the same amino-acid change via any nucleotide change.';
+                                note.textContent = 'Variants causing the same amino-acid change via any nucleotide change; the queried nucleotide allele is tagged when present.';
                                 det.appendChild(note);
                                 const ul = document.createElement('ul');
                                 ul.style.cssText = 'margin-top:0.2rem;font-size:0.8rem;padding-left:1.2rem;line-height:1.5;';
