@@ -5429,6 +5429,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // the significance line, somatic/oncogenicity data and variation link all
                 // populate as they would for a MyVariant-indexed variant.
                 let prefetchedNearby = null;       // reused by the nearby-variants plot below
+                let clinvarNearbyVariants = [];     // also searched for same protein changes when protein-query recall is low
                 let recoveredSignificance = '';    // germline classification recovered from the region pull
                 let recoveredFromRegion = false;
                 {
@@ -5571,6 +5572,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         const { variants: nearby, total: nearbyTotal } = prefetchedNearby
                             || await fetchClinvarRegionVariants(chr, posNum, 30);
                         aiReviewExtras.nearby_clinvar_variants = nearby;
+                        clinvarNearbyVariants = nearby;
 
                         // Detect gene strand from snpEff annotation to orient plot 5'→3'.
                         const snpEffAnns = annotation?.snpeff?.ann
@@ -5672,10 +5674,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         try {
                             const { variants: protMatches } = await fetchClinvarProteinVariants(firstGene, changeForms);
                             // Keep only exact protein-change matches; the free-text search is
-                            // recall-oriented and may include unrelated nearby variants.
+                            // recall-oriented and may include unrelated nearby variants. Also
+                            // check the already-fetched nearby ClinVar records because eUtils
+                            // protein searches can under-recall same-codon alternate alleles
+                            // that are visible in the regional pull (e.g. CTNNB1 c.100G>C and
+                            // c.100G>A both encode p.Gly34Arg).
                             const seen = new Set();
                             const sameProt = [];
-                            protMatches.forEach((v) => {
+                            [...protMatches, ...clinvarNearbyVariants].forEach((v) => {
                                 const pc = parseProteinChange(v.title) || parseProteinChange(v.variationName);
                                 if (sameProteinChange(pc, queryPC) && !seen.has(String(v.id))) {
                                     seen.add(String(v.id));
