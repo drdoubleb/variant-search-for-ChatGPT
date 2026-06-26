@@ -70,7 +70,7 @@ export default async function handler(req, res) {
         const ids = searchData?.esearchresult?.idlist || [];
         const totalInClinVar = Number(searchData?.esearchresult?.count || 0);
 
-        if (!Array.isArray(ids) || ids.length === 0) {
+        if (ids.length === 0) {
             return res.status(200).json({ variants: [], total: 0 });
         }
 
