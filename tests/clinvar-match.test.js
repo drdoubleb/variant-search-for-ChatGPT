@@ -41,6 +41,40 @@ function findExactClinvarRegionMatch(variants, tuple) {
     return null;
 }
 
+function aaThreeToSingle(aa) {
+    if (!aa) return null;
+    const aaSingle = {
+        ALA: 'A', ARG: 'R', ASN: 'N', ASP: 'D', CYS: 'C', GLN: 'Q', GLU: 'E', GLY: 'G',
+        HIS: 'H', ILE: 'I', LEU: 'L', LYS: 'K', MET: 'M', PHE: 'F', PRO: 'P', SER: 'S',
+        THR: 'T', TRP: 'W', TYR: 'Y', VAL: 'V',
+        TER: '*', STOP: '*'
+    };
+    return aaSingle[String(aa).toUpperCase()] || null;
+}
+
+function parseProteinChange(text) {
+    const s = String(text || '');
+    let m = s.match(/p\.\(?([A-Za-z]{3})(\d+)([A-Za-z]{3})\)?/);
+    if (m) {
+        const ref = aaThreeToSingle(m[1]);
+        const alt = aaThreeToSingle(m[3]);
+        if (ref && alt) return { ref, pos: Number(m[2]), alt };
+    }
+    m = s.match(/\b([A-Za-z]{3})(\d+)([A-Za-z]{3})\b/);
+    if (m) {
+        const ref = aaThreeToSingle(m[1]);
+        const alt = aaThreeToSingle(m[3]);
+        if (ref && alt) return { ref, pos: Number(m[2]), alt };
+    }
+    m = s.match(/\bp?\.?([A-Z])(\d+)([A-Z*])\b/);
+    if (m) return { ref: m[1].toUpperCase(), pos: Number(m[2]), alt: m[3].toUpperCase() };
+    return null;
+}
+
+function sameProteinChange(a, b) {
+    return !!a && !!b && a.ref === b.ref && a.pos === b.pos && a.alt === b.alt;
+}
+
 // --- tiny assertion harness ----------------------------------------------
 
 let passed = 0;
@@ -89,6 +123,38 @@ check('does not attempt recovery for indels',
 check('null variants → null', findExactClinvarRegionMatch(null, { pos: '1', ref: 'A', alt: 'C' }) === null);
 check('missing tuple → null', findExactClinvarRegionMatch(ctnnb1Region, null) === null);
 check('complementBase round-trips', complementBase('A') === 'T' && complementBase('g') === 'C');
+
+// --- protein-change parsing / matching ------------------------------------
+
+// ClinVar titles (three-letter, parenthesised) parse to a single-letter key.
+check('parses p.(Gly34Arg) from a ClinVar title',
+    sameProteinChange(
+        parseProteinChange('NM_001904.4(CTNNB1):c.100G>C (p.Gly34Arg)'),
+        { ref: 'G', pos: 34, alt: 'R' }));
+
+// The whole point of this feature: a different codon nucleotide (c.100G>A)
+// yielding the SAME amino-acid change must compare equal to the queried one.
+check('c.100G>C and c.100G>A both map to G34R and match',
+    sameProteinChange(
+        parseProteinChange('NM_001904.4(CTNNB1):c.100G>C (p.Gly34Arg)'),
+        parseProteinChange('NM_001904.4(CTNNB1):c.100G>A (p.Gly34Arg)')));
+
+// Query-side forms: compact triple (targetProtGlobal) and single-letter.
+check('parses compact triple GLY34ARG', sameProteinChange(parseProteinChange('GLY34ARG'), { ref: 'G', pos: 34, alt: 'R' }));
+check('parses single-letter G34R', sameProteinChange(parseProteinChange('G34R'), { ref: 'G', pos: 34, alt: 'R' }));
+check('parses gene-prefixed p. string', sameProteinChange(parseProteinChange('CTNNB1:p.Gly34Arg'), { ref: 'G', pos: 34, alt: 'R' }));
+
+// A different residue or a different substituted AA must NOT match.
+check('different position does not match',
+    !sameProteinChange(parseProteinChange('p.Gly34Arg'), parseProteinChange('p.Gly35Arg')));
+check('different substituted AA does not match (G34R vs G34V)',
+    !sameProteinChange(parseProteinChange('p.Gly34Arg'), parseProteinChange('p.Gly34Val')));
+
+// Nonsense parses (Ter → *); a transcript accession alone yields no change.
+check('parses nonsense Arg213Ter → R213*',
+    sameProteinChange(parseProteinChange('p.Arg213Ter'), { ref: 'R', pos: 213, alt: '*' }));
+check('bare transcript text yields no protein change',
+    parseProteinChange('NM_001904.4') === null);
 
 // --- summary --------------------------------------------------------------
 
