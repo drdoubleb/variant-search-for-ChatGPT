@@ -782,6 +782,49 @@ function isBelowAxisVariant(variant) {
     return c.includes('benign') && !c.includes('pathogenic');
 }
 
+// Return the Watson-Crick complement of a single DNA base, or '' if not A/C/G/T.
+function complementBase(b) {
+    return { A: 'T', T: 'A', C: 'G', G: 'C' }[String(b || '').toUpperCase()] || '';
+}
+
+// Locate the ClinVar region-pull entry that corresponds to the exact queried
+// variant (same genomic position and substitution). This is used as a fallback
+// when MyVariant.info carries no `clinvar` block for the variant even though
+// ClinVar itself has an entry — the per-variant lookup otherwise shows "N/A".
+//
+// variants: array of region-pull records ({ id, title, variationName, pos, germline }).
+// tuple:    queried variant ({ pos, ref, alt }) from buildSpliceAiLookupTuple.
+//
+// Matching is intentionally conservative: only single-nucleotide substitutions
+// are recovered, and the substitution bases in the ClinVar title must match the
+// queried alleles (allowing for transcript-strand complementation on minus-strand
+// genes). When two SNVs share a position (e.g. G>C and G>A) the allele check
+// disambiguates; if no entry's alleles match, no fallback is applied.
+function findExactClinvarRegionMatch(variants, tuple) {
+    if (!Array.isArray(variants) || !tuple || !tuple.pos) return null;
+    const pos = Number(tuple.pos);
+    const ref = String(tuple.ref || '').toUpperCase();
+    const alt = String(tuple.alt || '').toUpperCase();
+    // Only attempt recovery for simple SNVs, where allele matching is reliable.
+    if (!/^[ACGT]$/.test(ref) || !/^[ACGT]$/.test(alt)) return null;
+
+    const refC = complementBase(ref);
+    const altC = complementBase(alt);
+    const candidates = variants.filter((v) => Number(v.pos) === pos);
+
+    for (const v of candidates) {
+        const text = [v.title, v.variationName].filter(Boolean).join(' ');
+        const m = text.match(/([ACGT])\s*>\s*([ACGT])/i);
+        if (!m) continue;
+        const tRef = m[1].toUpperCase();
+        const tAlt = m[2].toUpperCase();
+        if ((tRef === ref && tAlt === alt) || (tRef === refC && tAlt === altC)) {
+            return v;
+        }
+    }
+    return null;
+}
+
 function parseProteinPos(text) {
     // Handle both p.Arg273His and p.(Arg273His) (predicted-effect parenthesised form)
     const m = String(text || '').match(/\bp\.\(?(?:[A-Za-z*?]{1,5})?(\d+)/i);
@@ -5315,6 +5358,41 @@ document.addEventListener('DOMContentLoaded', () => {
                     sigSummary = Object.entries(sigCount).map(([k, v]) => `${k} (${v})`);
                     conditionsList = Array.from(condSet);
                 }
+                // Fallback recovery from the live ClinVar region query.
+                //
+                // MyVariant.info sometimes carries no `clinvar` block for the queried
+                // variant even though ClinVar itself has an entry (its mirror lags live
+                // ClinVar, particularly for newer somatic records). When that happens
+                // there is no variant_id, so significance renders as "N/A" and the
+                // per-variant VCV lookup below is skipped — yet the same variant shows
+                // up in the region pull. Recover the ClinVar variation ID by matching the
+                // region results to the queried variant on exact position + alleles, so
+                // the significance line, somatic/oncogenicity data and variation link all
+                // populate as they would for a MyVariant-indexed variant.
+                let prefetchedNearby = null;       // reused by the nearby-variants plot below
+                let recoveredSignificance = '';    // germline classification recovered from the region pull
+                let recoveredFromRegion = false;
+                {
+                    const recoveryTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+                    const haveNumericVariantId = variantId && /^\d+$/.test(variantId);
+                    if (!haveNumericVariantId && sigSummary.length === 0
+                        && recoveryTuple && recoveryTuple.chrom && recoveryTuple.pos) {
+                        try {
+                            const chrR = recoveryTuple.chrom.replace(/^chr/i, '');
+                            const posR = Number(recoveryTuple.pos);
+                            prefetchedNearby = await fetchClinvarRegionVariants(chrR, posR, 30);
+                            const match = findExactClinvarRegionMatch(prefetchedNearby.variants, recoveryTuple);
+                            if (match && match.id && /^\d+$/.test(String(match.id))) {
+                                variantId = String(match.id);
+                                clinVarLink = `https://www.ncbi.nlm.nih.gov/clinvar/variation/${variantId}/`;
+                                recoveredSignificance = match.germline || '';
+                                recoveredFromRegion = true;
+                            }
+                        } catch (e) {
+                            console.warn('ClinVar exact-match recovery failed', e);
+                        }
+                    }
+                }
                 // Build ClinVar card
                 const card = document.createElement('div');
                 card.className = 'card';
@@ -5330,15 +5408,28 @@ document.addEventListener('DOMContentLoaded', () => {
                     spanVar.innerHTML = `<strong>Variation ID:</strong> ${variantId}`;
                     content.appendChild(spanVar);
                 }
-                // Significance summary
+                // Significance summary. Kept in a reference so the per-variant VCV
+                // lookup below can fill it in when the significance was only recoverable
+                // from the live ClinVar record (and not from MyVariant.info).
+                const spanSig = document.createElement('div');
+                let haveSignificance = false;
                 if (sigSummary.length > 0) {
-                    const spanSig = document.createElement('div');
                     spanSig.innerHTML = `<strong>Clinical significance:</strong> ${sigSummary.join('; ')}`;
-                    content.appendChild(spanSig);
+                    haveSignificance = true;
+                } else if (recoveredSignificance) {
+                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${recoveredSignificance}`;
+                    haveSignificance = true;
                 } else {
-                    const spanSig = document.createElement('div');
                     spanSig.innerHTML = `<strong>Clinical significance:</strong> N/A`;
-                    content.appendChild(spanSig);
+                }
+                content.appendChild(spanSig);
+                // Note when the variant was matched via the live ClinVar region query
+                // rather than the MyVariant.info annotation, for transparency.
+                if (recoveredFromRegion) {
+                    const recNote = document.createElement('div');
+                    recNote.style.cssText = 'font-size:0.78rem;color:#6b7280;margin-top:1px;';
+                    recNote.textContent = 'Matched via live ClinVar query (not present in MyVariant.info annotation).';
+                    content.appendChild(recNote);
                 }
                 // Conditions summary (show up to 3, rest collapsed)
                 if (conditionsList.length > 0) {
@@ -5353,6 +5444,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         const cvData = await fetchClinvarVariant(variantId);
                         aiReviewExtras.clinvar_variant_record = cvData;
                         if (cvData) {
+                            // If significance is still unresolved (no MyVariant rcv and the
+                            // region pull carried no germline classification), fall back to
+                            // the germline classification from the full VCV record.
+                            if (!haveSignificance && cvData.germline && cvData.germline.description) {
+                                spanSig.innerHTML = `<strong>Clinical significance:</strong> ${cvData.germline.description}`;
+                                haveSignificance = true;
+                            }
                             if (cvData.somatic && cvData.somatic.description) {
                                 const somaticDiv = document.createElement('div');
                                 somaticDiv.style.marginTop = '0.25rem';
@@ -5409,7 +5507,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     regionLink.textContent = 'Search region in ClinVar';
                     content.appendChild(regionLink);
                     try {
-                        const { variants: nearby, total: nearbyTotal } = await fetchClinvarRegionVariants(chr, posNum, 30);
+                        // Reuse the region pull already performed during fallback recovery
+                        // (same chrom/pos/window) to avoid a duplicate eutils call.
+                        const { variants: nearby, total: nearbyTotal } = prefetchedNearby
+                            || await fetchClinvarRegionVariants(chr, posNum, 30);
                         aiReviewExtras.nearby_clinvar_variants = nearby;
 
                         // Detect gene strand from snpEff annotation to orient plot 5'→3'.
