@@ -183,6 +183,62 @@ check('aaSingleToThree maps stop codon * → Ter', aaSingleToThree('*') === 'Ter
 check('three-letter search form parses back to the same change',
     sameProteinChange(parseProteinChange(buildChangeForms({ ref: 'R', pos: 282, alt: 'W' })[0]), { ref: 'R', pos: 282, alt: 'W' }));
 
+// --- same-protein-change collection (mirrors the ClinVar card block) -------
+
+// Collect exact same-protein-change variants the way the card does: merge the
+// (recall-oriented) protein-search hits with the region pull, parse each title,
+// keep exact matches, de-dupe by id. KEEP IN SYNC with script.js.
+function collectSameProtein(queryPC, protMatches, regionVariants) {
+    const seen = new Set();
+    const out = [];
+    [...protMatches, ...regionVariants].forEach((v) => {
+        const pc = parseProteinChange(v.title) || parseProteinChange(v.variationName);
+        if (sameProteinChange(pc, queryPC) && !seen.has(String(v.id))) {
+            seen.add(String(v.id));
+            out.push(v);
+        }
+    });
+    return out;
+}
+
+// Resolve the queried protein change the way the card does: anchor on the
+// queried variant's own ClinVar record (from the region pull) first, then fall
+// back to snpeff hgvs_p / targetProtGlobal / the canonical protein string.
+function resolveQueryPC({ variantId, regionVariants, hgvsP, targetProtGlobal, protein }) {
+    const queried = variantId ? regionVariants.find((v) => String(v.id) === String(variantId)) : null;
+    return (queried && (parseProteinChange(queried.title) || parseProteinChange(queried.variationName)))
+        || parseProteinChange(hgvsP)
+        || parseProteinChange(targetProtGlobal)
+        || parseProteinChange(protein);
+}
+
+const g34r = { ref: 'G', pos: 34, alt: 'R' };
+
+// With the protein proxy returning both records, both are collected and de-duped.
+check('collects both G34R records from the protein search',
+    collectSameProtein(g34r, ctnnb1Region.slice(0, 2), []).map((v) => v.id).join(',') === '375941,17578');
+
+// Proxy failure (empty protMatches) must NOT drop the section: the region pull
+// alone still surfaces both same-codon alleles. This is the core resilience fix.
+check('region pull alone surfaces both G34R records when the protein proxy fails',
+    collectSameProtein(g34r, [], ctnnb1Region).map((v) => v.id).join(',') === '375941,17578');
+
+// De-dupe across the two sources (same id present in both) — no double count.
+check('de-dupes records present in both protein search and region pull',
+    collectSameProtein(g34r, ctnnb1Region.slice(0, 2), ctnnb1Region).length === 2);
+
+// queryPC anchors on the queried variant's own ClinVar title (authoritative),
+// so it is right even if snpeff/protein are absent.
+check('queryPC anchors on the queried variant record (c.100G>A → G34R)',
+    sameProteinChange(
+        resolveQueryPC({ variantId: '17578', regionVariants: ctnnb1Region, hgvsP: '', targetProtGlobal: null, protein: '' }),
+        g34r));
+
+// The alternate-nucleotide count excludes the queried variant itself.
+check('alternate-nucleotide count excludes the queried variant',
+    collectSameProtein(g34r, ctnnb1Region.slice(0, 2), [])
+        .filter((v) => String(v.id) !== '17578').length === 1);
+
 // --- summary --------------------------------------------------------------
 
 console.log(`\nClinVar region match tests: ${passed} passed, ${failed} failed`);

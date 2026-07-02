@@ -5660,7 +5660,17 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? (Array.isArray(annotation.snpeff.ann) ? annotation.snpeff.ann : [annotation.snpeff.ann])
                         : [];
                     const hgvsP = (spAnns.find((a) => a.hgvs_p) || {}).hgvs_p || '';
-                    const queryPC = parseProteinChange(hgvsP)
+                    // Anchor the queried protein change to the ClinVar record this card is
+                    // actually describing when we have it: the region pull carries the
+                    // queried variant's own title (e.g. "…c.100G>C (p.Gly34Arg)"), which is
+                    // the authoritative consequence. MyVariant's snpeff `hgvs_p` can name a
+                    // different transcript, and `protein` may be blank, so those are only
+                    // fallbacks — not the primary source — for "same protein change as *this*".
+                    const queriedRecord = variantId
+                        ? clinvarNearbyVariants.find((v) => String(v.id) === String(variantId))
+                        : null;
+                    const queryPC = (queriedRecord && (parseProteinChange(queriedRecord.title) || parseProteinChange(queriedRecord.variationName)))
+                        || parseProteinChange(hgvsP)
                         || parseProteinChange(targetProtGlobal)
                         || parseProteinChange(protein);
                     const firstGene = geneNames ? geneNames.split(',')[0].trim() : '';
@@ -5672,13 +5682,22 @@ document.addEventListener('DOMContentLoaded', () => {
                         changeForms.push(`${queryPC.ref}${queryPC.pos}${queryPC.alt}`);
                         const pcKey = `p.${queryPC.ref}${queryPC.pos}${queryPC.alt}`;
                         try {
-                            const { variants: protMatches } = await fetchClinvarProteinVariants(firstGene, changeForms);
+                            // The gene+change eUtils search is the primary source, but its
+                            // failure must not sink the section: the already-fetched region
+                            // pull independently carries same-codon alternate alleles (e.g.
+                            // CTNNB1 c.100G>C and c.100G>A both encode p.Gly34Arg), so treat a
+                            // proxy error as "no extra matches" and still fall back to it.
+                            let protMatches = [];
+                            try {
+                                ({ variants: protMatches } = await fetchClinvarProteinVariants(firstGene, changeForms));
+                            } catch (protErr) {
+                                console.warn('ClinVar protein-change proxy failed; using region pull only', protErr);
+                            }
                             // Keep only exact protein-change matches; the free-text search is
                             // recall-oriented and may include unrelated nearby variants. Also
                             // check the already-fetched nearby ClinVar records because eUtils
                             // protein searches can under-recall same-codon alternate alleles
-                            // that are visible in the regional pull (e.g. CTNNB1 c.100G>C and
-                            // c.100G>A both encode p.Gly34Arg).
+                            // that are visible in the regional pull.
                             const seen = new Set();
                             const sameProt = [];
                             [...protMatches, ...clinvarNearbyVariants].forEach((v) => {
@@ -5723,7 +5742,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 }));
                             }
                         } catch (e) {
-                            console.warn('ClinVar protein-change query failed', e);
+                            console.warn('ClinVar same-protein-change section failed to render', e);
                         }
                     }
                 }
