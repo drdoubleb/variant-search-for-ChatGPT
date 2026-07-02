@@ -5728,6 +5728,33 @@ document.addEventListener('DOMContentLoaded', () => {
                             });
                             if (sameProt.length > 0) {
                                 const alternateNtCount = sameProt.filter((v) => !variantId || String(v.id) !== String(variantId)).length;
+                                // Cross-reference: when the queried allele itself has no germline
+                                // ClinVar classification (e.g. the somatic-only CTNNB1 c.100G>C,
+                                // whose G-line reads "N/A"), surface any same-protein-change
+                                // sibling that IS classified — right under the significance line,
+                                // clearly labelled so a different nucleotide variant's germline
+                                // call is not mistaken for this allele's own.
+                                if (!haveSignificance) {
+                                    const classifiedSiblings = sameProt.filter((v) => v.germline
+                                        && !(variantId && String(v.id) === String(variantId)));
+                                    if (classifiedSiblings.length > 0) {
+                                        const parts = classifiedSiblings.slice(0, 2).map((v) => {
+                                            const cLabel = (String(v.title || '').match(/c\.[A-Za-z0-9>_+*\-]+/) || [])[0] || `Variation ${v.id}`;
+                                            const color = getPathogenicityColor(v.germline, v);
+                                            const link = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${escapeHtml(cLabel)}</a>`;
+                                            return `<span style="color:${color};font-weight:600">${escapeHtml(v.germline)}</span> (${link})`;
+                                        });
+                                        const extra = classifiedSiblings.length > 2 ? ` +${classifiedSiblings.length - 2} more` : '';
+                                        const xref = document.createElement('div');
+                                        xref.style.cssText = 'margin-top:2px;font-size:0.86rem;';
+                                        xref.innerHTML = `<strong>Same protein change (${pcKey}):</strong> ${parts.join('; ')}${extra}`;
+                                        const xnote = document.createElement('div');
+                                        xnote.style.cssText = 'font-size:0.74rem;color:#6b7280;margin-top:1px;';
+                                        xnote.textContent = 'Classification of a different nucleotide change with the same amino-acid effect — not this allele’s own germline classification.';
+                                        xref.appendChild(xnote);
+                                        spanSig.insertAdjacentElement('afterend', xref);
+                                    }
+                                }
                                 const det = document.createElement('details');
                                 det.open = sameProt.length <= 8;
                                 det.style.marginTop = '8px';
