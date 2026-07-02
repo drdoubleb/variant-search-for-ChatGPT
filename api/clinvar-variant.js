@@ -6,11 +6,9 @@
 //
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
-const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
+import { ncbiFetchResponse, ncbiApiKeyParam as apiKey } from './_ncbi.js';
 
-function apiKey() {
-    return process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';
-}
+const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
 // Extract text content of the first occurrence of a tag (non-nested).
 function tagText(xml, tag) {
@@ -123,11 +121,7 @@ export default async function handler(req, res) {
     try {
         // VCV efetch gives the full classification tree including per-condition somatic data.
         const vcvUrl = `${EUTILS_BASE}/efetch.fcgi?db=clinvar&rettype=vcv&is_variationid&id=${encodeURIComponent(id)}${apiKey()}`;
-        const vcvRes = await fetch(vcvUrl, {
-            headers: { 'Accept': 'application/xml, text/xml' },
-            signal: AbortSignal.timeout(15000),
-        });
-        if (!vcvRes.ok) throw new Error(`VCV efetch failed: ${vcvRes.status}`);
+        const vcvRes = await ncbiFetchResponse(vcvUrl, { accept: 'application/xml, text/xml', timeout: 15000 });
         const xml = await vcvRes.text();
 
         const aggregate = parseAggregateClassifications(xml);

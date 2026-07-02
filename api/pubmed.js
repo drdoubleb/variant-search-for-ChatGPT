@@ -6,23 +6,16 @@
 //
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
+import { ncbiFetchJson, ncbiFetchResponse } from './_ncbi.js';
+
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
 async function ncbiFetch(url) {
-    const res = await fetch(url, {
-        headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(12000)
-    });
-    if (!res.ok) throw new Error(`NCBI request failed: ${res.status}`);
-    return res.json();
+    return ncbiFetchJson(url);
 }
 
 async function ncbiFetchText(url) {
-    const res = await fetch(url, {
-        headers: { 'Accept': 'text/xml,application/xml' },
-        signal: AbortSignal.timeout(12000)
-    });
-    if (!res.ok) throw new Error(`NCBI request failed: ${res.status}`);
+    const res = await ncbiFetchResponse(url, { accept: 'text/xml,application/xml' });
     return res.text();
 }
 

@@ -7,16 +7,9 @@
 //
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
-const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
+import { ncbiFetchJson } from './_ncbi.js';
 
-async function ncbiFetch(url) {
-    const res = await fetch(url, {
-        headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(12000)
-    });
-    if (!res.ok) throw new Error(`NCBI request failed: ${res.status}`);
-    return res.json();
-}
+const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -42,7 +35,7 @@ export default async function handler(req, res) {
     try {
         const term = `${safeGene}[gene] AND single nucleotide variant[variation type]`;
         const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=${retmax}&term=${encodeURIComponent(term)}${apiKey}`;
-        const searchData = await ncbiFetch(searchUrl);
+        const searchData = await ncbiFetchJson(searchUrl);
         const ids = searchData?.esearchresult?.idlist || [];
         const totalInClinVar = Number(searchData?.esearchresult?.count || 0);
 
@@ -55,7 +48,7 @@ export default async function handler(req, res) {
         for (let i = 0; i < ids.length; i += BATCH) {
             const chunk = ids.slice(i, i + BATCH);
             const sumUrl = `${EUTILS_BASE}/esummary.fcgi?db=clinvar&retmode=json&retmax=${chunk.length}&id=${chunk.join(',')}${apiKey}`;
-            const sumData = await ncbiFetch(sumUrl);
+            const sumData = await ncbiFetchJson(sumUrl);
             Object.assign(resultMap, sumData?.result || {});
         }
 

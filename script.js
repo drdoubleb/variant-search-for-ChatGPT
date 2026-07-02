@@ -5672,7 +5672,18 @@ document.addEventListener('DOMContentLoaded', () => {
                         changeForms.push(`${queryPC.ref}${queryPC.pos}${queryPC.alt}`);
                         const pcKey = `p.${queryPC.ref}${queryPC.pos}${queryPC.alt}`;
                         try {
-                            const { variants: protMatches } = await fetchClinvarProteinVariants(firstGene, changeForms);
+                            // The gene+change proxy is the primary source, but it can fail
+                            // transiently (NCBI eUtils rate-limits to 3 req/s and a lookup
+                            // fires several ClinVar calls at once). Degrade gracefully: on
+                            // failure fall back to the already-fetched nearby region records,
+                            // which for same-codon alternate alleles (e.g. CTNNB1 c.100G>C and
+                            // c.100G>A, both p.Gly34Arg) already contain the match.
+                            let protMatches = [];
+                            try {
+                                ({ variants: protMatches } = await fetchClinvarProteinVariants(firstGene, changeForms));
+                            } catch (protErr) {
+                                console.warn('ClinVar protein-change query failed; using nearby region records only', protErr);
+                            }
                             // Keep only exact protein-change matches; the free-text search is
                             // recall-oriented and may include unrelated nearby variants. Also
                             // check the already-fetched nearby ClinVar records because eUtils
