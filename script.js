@@ -890,6 +890,33 @@ function sameProteinChange(a, b) {
     return !!a && !!b && a.ref === b.ref && a.pos === b.pos && a.alt === b.alt;
 }
 
+// Escape a string for safe interpolation into innerHTML.
+function escapeHtml(text) {
+    return String(text ?? '').replace(/[&<>"']/g, (ch) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+    ));
+}
+
+// Render a ClinVar review status as its 0–4 gold-star confidence rating
+// (matching the stars on the ClinVar website), or '' when no status is given.
+// e.g. "criteria provided, single submitter" → ★☆☆☆.
+function clinvarReviewStars(status) {
+    const s = String(status || '').toLowerCase();
+    if (!s) return '';
+    let filled = 0;
+    // Check the zero-star "no assertion / no classification" statuses first: the
+    // string "no assertion criteria provided" contains "criteria provided" and
+    // would otherwise be miscounted as one star.
+    if (s.includes('no assertion') || s.includes('no classification')) filled = 0;
+    else if (s.includes('practice guideline')) filled = 4;
+    else if (s.includes('expert panel')) filled = 3;
+    else if (s.includes('multiple submitters')) filled = 2; // "…, no conflicts"
+    else if (s.includes('criteria provided')) filled = 1; // single submitter or conflicting
+    else filled = 0;
+    const stars = '★'.repeat(filled) + '☆'.repeat(4 - filled);
+    return `<span style="color:#f59e0b" title="${escapeHtml(status)}">${stars}</span>`;
+}
+
 // Returns a color hex string for a ClinVar/CIViC pathogenicity classification.
 function getPathogenicityColor(classification, variant = null) {
     if (variant && isTruncatingClinvarVariant(variant)) return '#111827';
@@ -5488,7 +5515,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (recoveredFromRegion) {
                     const recNote = document.createElement('div');
                     recNote.style.cssText = 'font-size:0.78rem;color:#6b7280;margin-top:1px;';
-                    recNote.textContent = 'Matched via live ClinVar query (not present in MyVariant.info annotation).';
+                    recNote.textContent = "Matched via live ClinVar query — MyVariant.info's ClinVar mirror has no record for this allele (expected for somatic-only entries).";
                     content.appendChild(recNote);
                 }
                 // Conditions summary (show up to 3, rest collapsed)
@@ -5717,20 +5744,45 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ul.style.cssText = 'margin-top:0.2rem;font-size:0.8rem;padding-left:1.2rem;line-height:1.5;';
                                 sameProt.forEach((v) => {
                                     const li = document.createElement('li');
-                                    const color = getPathogenicityColor(v.germline, v);
-                                    const sig = `<span style="color:${color};font-weight:600">${v.germline || 'See ClinVar'}</span>`;
+                                    // Primary badge: prefer the germline classification; for
+                                    // somatic-only records (Tier I somatic variants often carry
+                                    // no germline call, e.g. the queried CTNNB1 c.100G>C) fall
+                                    // back to the somatic clinical impact so the row isn't blank.
+                                    const primary = v.germline || (v.somatic ? `Somatic: ${v.somatic}` : 'See ClinVar');
+                                    const color = getPathogenicityColor(v.germline || v.somatic, v);
+                                    const sig = `<span style="color:${color};font-weight:600">${escapeHtml(primary)}</span>`;
                                     const isQueried = variantId && String(v.id) === String(variantId);
                                     const tag = isQueried ? ' <em>(queried variant)</em>' : '';
                                     const label = v.title || `Variation ${v.id}`;
-                                    const link = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${label}</a>`;
+                                    const link = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
                                     li.innerHTML = `${sig} — ${link}${tag}`;
+                                    // Secondary detail line: review-confidence stars, somatic
+                                    // tier (when germline was the primary badge) / oncogenicity,
+                                    // and the associated condition(s).
+                                    const bits = [];
+                                    const stars = clinvarReviewStars(v.review);
+                                    if (stars) bits.push(stars);
+                                    if (v.germline && v.somatic) bits.push(`somatic: ${escapeHtml(v.somatic)}`);
+                                    if (v.oncogenicity) bits.push(`oncogenicity: ${escapeHtml(v.oncogenicity)}`);
+                                    if (Array.isArray(v.conditions) && v.conditions.length > 0) {
+                                        const shown = v.conditions.slice(0, 3).map(escapeHtml).join(', ');
+                                        bits.push(shown + (v.conditions.length > 3 ? '…' : ''));
+                                    }
+                                    if (bits.length > 0) {
+                                        const detail = document.createElement('div');
+                                        detail.style.cssText = 'font-size:0.72rem;color:#6b7280;margin:1px 0 3px;';
+                                        detail.innerHTML = bits.join(' · ');
+                                        li.appendChild(detail);
+                                    }
                                     ul.appendChild(li);
                                 });
                                 det.appendChild(ul);
                                 content.appendChild(det);
                                 // Expose to the AI review context.
                                 aiReviewExtras.same_protein_change_clinvar_variants = sameProt.map((v) => ({
-                                    id: v.id, title: v.title, classification: v.germline || null, pos: v.pos ?? null
+                                    id: v.id, title: v.title, classification: v.germline || null,
+                                    somatic_clinical_impact: v.somatic || null, oncogenicity: v.oncogenicity || null,
+                                    review_status: v.review || null, conditions: v.conditions || [], pos: v.pos ?? null
                                 }));
                             }
                         } catch (e) {

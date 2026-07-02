@@ -20,6 +20,24 @@ import { ncbiFetchJson } from './_ncbi.js';
 
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
+// Collect the unique, meaningful condition names attached to an esummary
+// record across its germline, somatic (clinical impact) and oncogenicity
+// classification trait sets. Placeholder traits ("not provided"/"not
+// specified") are dropped.
+function collectTraitNames(rec) {
+    const names = new Set();
+    for (const key of ['germline_classification', 'clinical_impact_classification', 'oncogenicity_classification']) {
+        const traits = rec?.[key]?.trait_set;
+        if (Array.isArray(traits)) {
+            for (const t of traits) {
+                const name = String(t?.trait_name || '').trim();
+                if (name && !/^not (provided|specified)$/i.test(name)) names.add(name);
+            }
+        }
+    }
+    return Array.from(names);
+}
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
@@ -89,6 +107,10 @@ export default async function handler(req, res) {
                 title: rec.title || '',
                 germline: rec.germline_classification?.description || '',
                 review: rec.germline_classification?.review_status || '',
+                somatic: rec.clinical_impact_classification?.description || '',
+                somaticReview: rec.clinical_impact_classification?.review_status || '',
+                oncogenicity: rec.oncogenicity_classification?.description || '',
+                conditions: collectTraitNames(rec),
                 variationName: rec.variation_set?.[0]?.variation_name || '',
                 molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
                 pos: varPos !== null ? Number(varPos) : null
