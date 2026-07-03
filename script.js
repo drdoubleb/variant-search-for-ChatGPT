@@ -5672,7 +5672,18 @@ document.addEventListener('DOMContentLoaded', () => {
                                 block.appendChild(header);
                                 const note = document.createElement('div');
                                 note.style.cssText = 'font-size:0.75rem;color:#6b7280;margin:1px 0 4px;';
-                                note.textContent = 'Records with the same amino-acid change via any nucleotide change; conditions/tumors are listed per record. Each classification belongs to that specific nucleotide change, not necessarily the queried allele.';
+                                // The "belongs to a different nucleotide change" caveat only makes
+                                // sense when the list actually contains an alternate allele. For a
+                                // protein-level query (e.g. "BRAF V600E") that resolves to a single
+                                // record — the queried variant itself — it would read as a false
+                                // mismatch warning, so drop it in that case.
+                                const queriedInList = variantId ? sameProt.filter((v) => String(v.id) === String(variantId)).length : 0;
+                                const alternateNtCount = sameProt.length - queriedInList;
+                                let noteText = 'Records with the same amino-acid change; conditions/tumors are listed per record.';
+                                if (alternateNtCount > 0) {
+                                    noteText += ' An alternate nucleotide change’s classification is that record’s own and may differ from the queried variant.';
+                                }
+                                note.textContent = noteText;
                                 block.appendChild(note);
                                 sameProt.forEach((v) => {
                                     const isQueried = variantId && String(v.id) === String(variantId);
