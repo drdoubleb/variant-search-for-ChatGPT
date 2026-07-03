@@ -16,15 +16,26 @@
 //
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
+import { ncbiFetchJson } from './_ncbi.js';
+
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
-async function ncbiFetch(url) {
-    const res = await fetch(url, {
-        headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(12000)
-    });
-    if (!res.ok) throw new Error(`NCBI request failed: ${res.status}`);
-    return res.json();
+// Collect the unique, meaningful condition names attached to an esummary
+// record across its germline, somatic (clinical impact) and oncogenicity
+// classification trait sets. Placeholder traits ("not provided"/"not
+// specified") are dropped.
+function collectTraitNames(rec) {
+    const names = new Set();
+    for (const key of ['germline_classification', 'clinical_impact_classification', 'oncogenicity_classification']) {
+        const traits = rec?.[key]?.trait_set;
+        if (Array.isArray(traits)) {
+            for (const t of traits) {
+                const name = String(t?.trait_name || '').trim();
+                if (name && !/^not (provided|specified)$/i.test(name)) names.add(name);
+            }
+        }
+    }
+    return Array.from(names);
 }
 
 export default async function handler(req, res) {
@@ -66,7 +77,7 @@ export default async function handler(req, res) {
         const preferredChange = changeForms.find((form) => /^[A-Za-z]\d+[A-Za-z*]$/.test(form)) || changeForms[0];
         const term = `${safeGene} ${preferredChange}`;
         const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=${retmax}&term=${encodeURIComponent(term)}${apiKey}`;
-        const searchData = await ncbiFetch(searchUrl);
+        const searchData = await ncbiFetchJson(searchUrl);
         const ids = searchData?.esearchresult?.idlist || [];
         const totalInClinVar = Number(searchData?.esearchresult?.count || 0);
 
@@ -79,7 +90,7 @@ export default async function handler(req, res) {
         for (let i = 0; i < ids.length; i += BATCH) {
             const chunk = ids.slice(i, i + BATCH);
             const sumUrl = `${EUTILS_BASE}/esummary.fcgi?db=clinvar&retmode=json&retmax=${chunk.length}&id=${chunk.join(',')}${apiKey}`;
-            const sumData = await ncbiFetch(sumUrl);
+            const sumData = await ncbiFetchJson(sumUrl);
             Object.assign(resultMap, sumData?.result || {});
         }
 
@@ -96,6 +107,10 @@ export default async function handler(req, res) {
                 title: rec.title || '',
                 germline: rec.germline_classification?.description || '',
                 review: rec.germline_classification?.review_status || '',
+                somatic: rec.clinical_impact_classification?.description || '',
+                somaticReview: rec.clinical_impact_classification?.review_status || '',
+                oncogenicity: rec.oncogenicity_classification?.description || '',
+                conditions: collectTraitNames(rec),
                 variationName: rec.variation_set?.[0]?.variation_name || '',
                 molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
                 pos: varPos !== null ? Number(varPos) : null

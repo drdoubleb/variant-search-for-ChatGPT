@@ -183,6 +183,47 @@ check('aaSingleToThree maps stop codon * → Ter', aaSingleToThree('*') === 'Ter
 check('three-letter search form parses back to the same change',
     sameProteinChange(parseProteinChange(buildChangeForms({ ref: 'R', pos: 282, alt: 'W' })[0]), { ref: 'R', pos: 282, alt: 'W' }));
 
+// --- review-status stars (copied verbatim from script.js) -----------------
+
+function escapeHtml(text) {
+    return String(text ?? '').replace(/[&<>"']/g, (ch) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+    ));
+}
+
+function clinvarReviewStars(status) {
+    const s = String(status || '').toLowerCase();
+    if (!s) return '';
+    let filled = 0;
+    if (s.includes('no assertion') || s.includes('no classification')) filled = 0;
+    else if (s.includes('practice guideline')) filled = 4;
+    else if (s.includes('expert panel')) filled = 3;
+    else if (s.includes('multiple submitters')) filled = 2;
+    else if (s.includes('criteria provided')) filled = 1;
+    else filled = 0;
+    const stars = '★'.repeat(filled) + '☆'.repeat(4 - filled);
+    return `<span style="color:#f59e0b" title="${escapeHtml(status)}">${stars}</span>`;
+}
+
+// Extract just the ★/☆ glyphs from the rendered span for easy assertions.
+function starsOf(status) {
+    const html = clinvarReviewStars(status);
+    const m = html.match(/>([★☆]+)</);
+    return m ? m[1] : '';
+}
+
+check('empty status renders no stars element', clinvarReviewStars('') === '');
+// The regression this guards: "no assertion criteria provided" contains the
+// substring "criteria provided" but must score ZERO stars, not one.
+check('"no assertion criteria provided" → 0 stars', starsOf('no assertion criteria provided') === '☆☆☆☆');
+check('"criteria provided, single submitter" → 1 star', starsOf('criteria provided, single submitter') === '★☆☆☆');
+check('"criteria provided, conflicting classifications" → 1 star', starsOf('criteria provided, conflicting classifications') === '★☆☆☆');
+check('"criteria provided, multiple submitters, no conflicts" → 2 stars', starsOf('criteria provided, multiple submitters, no conflicts') === '★★☆☆');
+check('"reviewed by expert panel" → 3 stars', starsOf('reviewed by expert panel') === '★★★☆');
+check('"practice guideline" → 4 stars', starsOf('practice guideline') === '★★★★');
+check('review-status tooltip is html-escaped', clinvarReviewStars('a & b').includes('title="a &amp; b"'));
+check('escapeHtml neutralises angle brackets', escapeHtml('<x>') === '&lt;x&gt;');
+
 // --- summary --------------------------------------------------------------
 
 console.log(`\nClinVar region match tests: ${passed} passed, ${failed} failed`);

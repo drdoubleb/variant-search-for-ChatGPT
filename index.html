@@ -94,10 +94,16 @@
         // Defaults to the absolute Vercel deployment URL so API calls work from
         // any hosting environment (Hostinger, GitHub Pages, etc.) without
         // needing to deploy the /api serverless functions locally.
+        // Exception: on a Vercel preview/branch deployment (a *.vercel.app host
+        // that is not the production host) default to the same origin ('') so the
+        // preview frontend calls its OWN serverless functions — this lets a branch
+        // be tested end-to-end on Vercel before it is merged to production.
         // Override these if you deploy your own backend instance:
         // window.BACKEND_API_BASE_URL = "https://your-domain.example";
         if (typeof window.BACKEND_API_BASE_URL === 'undefined') {
-            window.BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
+            var __host = (window.location && window.location.hostname) || '';
+            var __isVercelPreview = /\.vercel\.app$/i.test(__host) && __host !== 'variant-search-for-chat-gpt.vercel.app';
+            window.BACKEND_API_BASE_URL = __isVercelPreview ? '' : 'https://variant-search-for-chat-gpt.vercel.app';
         }
         if (typeof window.TP53_API_ENDPOINT === 'undefined') {
             window.TP53_API_ENDPOINT = `${window.BACKEND_API_BASE_URL}/api/tp53`;
