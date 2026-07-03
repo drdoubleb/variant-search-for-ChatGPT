@@ -18,13 +18,34 @@ const accessionToChr = (accession) => {
 
 
 const DEFAULT_BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
+// The canonical production Vercel host. Any *other* *.vercel.app host is a
+// preview/branch deployment.
+const PRODUCTION_VERCEL_HOST = 'variant-search-for-chat-gpt.vercel.app';
 
 function trimTrailingSlash(value) {
     return String(value || '').trim().replace(/\/+$/, '');
 }
 
+// True when the page is served from a Vercel preview/branch deployment
+// (a *.vercel.app host other than the pinned production host).
+function isVercelPreviewHost() {
+    const host = (typeof window !== 'undefined' && window.location && window.location.hostname) || '';
+    return /\.vercel\.app$/i.test(host) && host !== PRODUCTION_VERCEL_HOST;
+}
+
 function getBackendApiBaseUrl() {
-    return trimTrailingSlash(window.BACKEND_API_BASE_URL || DEFAULT_BACKEND_API_BASE_URL);
+    // An explicit config wins — including an empty string, which means "call the
+    // same origin". index.html normally sets this global.
+    if (typeof window.BACKEND_API_BASE_URL === 'string') {
+        return trimTrailingSlash(window.BACKEND_API_BASE_URL);
+    }
+    // No explicit config: on a Vercel preview/branch deployment prefer the
+    // same-origin API so the preview frontend calls its own serverless functions
+    // (which match the loaded build) instead of the pinned production backend.
+    // Everywhere else (Hostinger, custom domains, the production apex) use the
+    // pinned production backend so no local /api deploy is required.
+    if (isVercelPreviewHost()) return '';
+    return DEFAULT_BACKEND_API_BASE_URL;
 }
 
 function getConfiguredApiEndpoint(globalName, apiPath) {
