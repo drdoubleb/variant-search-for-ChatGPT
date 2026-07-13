@@ -76,8 +76,8 @@ function parseUserKey(value) {
 // and truncating them would degrade the interpretation. Cost/volume is bounded by
 // the rate limiter / Turnstile / BYO-key valve instead. The body limit sits just
 // under Vercel's ~4.5 MB serverless request ceiling; contexts larger than this
-// can't be sent as one request regardless (see the openFDA trimming note in
-// buildContext on the frontend for the real lever on payload size).
+// can't be sent as one request regardless (the frontend caps the openFDA record
+// COUNT — see condenseOpenFdaForAi — while keeping each record's full text).
 const CONTEXT_MAX_CHARS = 1500000;    // safety ceiling only; realistic contexts pass untouched
 const USER_NOTES_MAX_CHARS = 4000;    // free-text notes from the user
 const COMPLETION_MAX_TOKENS = 3000;   // bounded JSON output; caps generation length

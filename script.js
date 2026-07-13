@@ -1630,25 +1630,28 @@ async function fetchOpenFdaDrugLabels(gene) {
     }
 }
 
-// The openFDA `indications_and_usage`/`purpose` full-label text dominates the AI
-// context for drug-rich genes — HER2/ERBB2 amplification measured ≈ 957 KB / ~219k
-// tokens, almost entirely openFDA. That risks Vercel's request ceiling, exceeds
-// some models' context windows, and is costly. Truncate those long free-text fields
-// for the AI payload (the opening states the biomarker-specific indication, which is
-// what matters) and cap the number of records. Returns a NEW object so the on-screen
-// openFDA card's data is left untouched.
-function condenseOpenFdaForAi(data, { maxRecords = 40, indChars = 1200, purposeChars = 400 } = {}) {
+// openFDA can return many label records for drug-rich genes — HER2/ERBB2 assembles
+// ~957 KB, almost entirely openFDA — which risks Vercel's request ceiling and model
+// context limits. Cap the number of records for the AI payload, but keep each record's
+// full text: `indications_and_usage` is the crucial biomarker-approval section and must
+// not be truncated. When records are dropped, add an explicit note so the model (and
+// anyone reading the context inspector) knows the list was capped. Returns a NEW object
+// so the on-screen openFDA card's data is left untouched.
+function condenseOpenFdaForAi(data, { maxRecords = 40 } = {}) {
     if (!data || !Array.isArray(data.results)) return data;
-    const truncate = (text, max) => (typeof text === 'string' && text.length > max)
-        ? `${text.slice(0, max)} …[truncated]`
-        : text;
-    const results = data.results.slice(0, maxRecords).map((r) => ({
-        ...r,
-        indications_and_usage: truncate(r.indications_and_usage, indChars),
-        purpose: truncate(r.purpose, purposeChars)
-    }));
-    const droppedRecords = Math.max(0, data.results.length - results.length);
-    return { ...data, results, ...(droppedRecords ? { results_truncated_for_ai: droppedRecords } : {}) };
+    if (data.results.length <= maxRecords) return data;
+    const results = data.results.slice(0, maxRecords);
+    const omitted = data.results.length - results.length;
+    return {
+        ...data,
+        results,
+        openfda_records_truncated: {
+            shown: results.length,
+            total: data.results.length,
+            omitted,
+            note: `openFDA returned ${data.results.length} label records; only the first ${results.length} are included here to bound payload size. Full indications_and_usage text is retained for the included records.`
+        }
+    };
 }
 
 async function fetchPubmedArticles(searchTerm, limit = 5) {
@@ -4474,7 +4477,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         openfda_drug_labels: condenseOpenFdaForAi(openFdaData)
                     };
                     // geneOnlyAiExtras may itself carry a full openFDA payload (from the
-                    // openFDA card); condense that copy too so the AI context stays bounded.
+                    // openFDA card); cap that copy's record count too so the AI context stays bounded.
                     if (supplementalContext.openfda) supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
                     return {
                         submitted_query: rawInput,
@@ -8644,9 +8647,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
                         fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
                     ]);
-                    // Condense the openFDA free-text (the dominant payload for drug-rich
-                    // genes) on the shallow supplemental copy, leaving the on-screen card data
-                    // intact. supplementalContext is a fresh object per run.
+                    // Cap the openFDA record count (the dominant payload for drug-rich genes)
+                    // on the shallow supplemental copy, keeping each record's full text and
+                    // leaving the on-screen card data intact. supplementalContext is fresh per run.
                     if (supplementalContext && typeof supplementalContext === 'object') {
                         if (supplementalContext.openfda_drug_labels) supplementalContext.openfda_drug_labels = condenseOpenFdaForAi(supplementalContext.openfda_drug_labels);
                         if (supplementalContext.openfda) supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
