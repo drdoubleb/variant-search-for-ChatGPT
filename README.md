@@ -29,25 +29,31 @@ The API returns:
 - optional `debug` object (when `debug: true` is passed in the request payload)
 
 Protein matching normalizes HGVS three-letter amino-acid notation to single-letter
-notation (for example `p.Arg273His` → `R273H`) before scoring, improving matching
-against TP53 dataset rows that use single-letter protein codes.
+notation (for example `p.Arg273His` → `R273H`) before scoring. A row scores on an
+**exact** protein token match, an exact cDNA substring, or an exact genomic position;
+same-codon variants (e.g. `R175C` when you queried `R175H`) are surfaced in `matches`
+for context (flagged `same_codon_match: true`) but do not count toward `match_count`
+(they are reported separately as `related_codon_count`) and never drive the
+pathogenicity summary.
 
 ### Dataset source links
 
-The backend now hard-codes TP53 dataset endpoints from `tp53.cancer.gov`:
+The backend loads the dataset directly from the NCI TP53 database's CSV files under
+`https://tp53.cancer.gov/static/data/` (e.g. `MutationView_r21.csv`). It does **not**
+use the `view_data?bq_view_name=*` URLs, which render HTML pages rather than CSV.
 
-- `https://tp53.cancer.gov/view_data?bq_view_name=MutationView`
-- `https://tp53.cancer.gov/view_data?bq_view_name=MutationViewDownload`
-- `https://tp53.cancer.gov/view_data?bq_view_name=TumorVariantDownload`
-- `https://tp53.cancer.gov/view_data?bq_view_name=GermlineDownload`
+To survive release bumps (r21 → r22 → …), the proxy first scrapes the current-release
+CSV links from the download page `https://tp53.cancer.gov/get_tp53data`; if that can't
+be reached it falls back to the hard-coded r21 URLs. If a refresh fails but a dataset
+was previously loaded, the last-good copy keeps being served instead of erroring.
 
 ### Optional env var override
 
 Set this in Vercel Project Settings → Environment Variables:
 
-- `TP53_MUTATION_DATASET_URL` = custom direct URL to override the built-in hard-coded list.
+- `TP53_MUTATION_DATASET_URL` = a direct CSV URL that takes priority over discovery and the built-in list.
 
-If not set, the function uses the built-in hard-coded TP53 URLs above.
+If not set, the function discovers the current release and falls back to the built-in URLs.
 
 ### Troubleshooting mode
 

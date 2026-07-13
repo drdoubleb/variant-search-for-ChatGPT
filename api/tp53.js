@@ -1,11 +1,49 @@
+// Last-resort fallback URLs (release r21, Jan 2025). Discovery (below) normally
+// supplies the current release; these are used only if the download page can't be
+// reached or parsed. The view_data?bq_view_name=* URLs render HTML, not CSV — the
+// actual files live under /static/data/.
 const DEFAULT_DATASET_CANDIDATES = [
-  // Direct static CSV downloads from the NCI TP53 Database (release r21, Jan 2025).
-  // The view_data?bq_view_name=* URLs render HTML pages, not CSV files.
-  // The actual data files are served from the /static/data/ path.
   'https://tp53.cancer.gov/static/data/MutationView_r21.csv',
   'https://tp53.cancer.gov/static/data/TumorVariantDownload_r21.csv',
   'https://tp53.cancer.gov/static/data/GermlineDownload_r21.csv'
 ];
+
+// The NCI TP53 database download page lists the current release's CSV files (e.g.
+// MutationView_r21.csv). Scraping it lets a new release be picked up automatically
+// instead of 404-ing against a hard-coded release number.
+const TP53_DOWNLOAD_PAGE = 'https://tp53.cancer.gov/get_tp53data';
+
+// Discover current-release CSV URLs from the download page. Returns absolute URLs for
+// the datasets the proxy can parse (MutationView first — it carries the columns
+// buildMatches needs), or [] when discovery fails so callers fall back to the
+// hard-coded list. The MutationView pattern is anchored on a leading slash so it does
+// not also match InducedMutationView.
+async function discoverDatasetUrls() {
+  try {
+    const res = await fetch(TP53_DOWNLOAD_PAGE, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; variant-search-tp53-proxy/1.0)',
+        'Accept': 'text/html,*/*'
+      }
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const found = [...String(html).matchAll(/static\/data\/[A-Za-z0-9_]+_r\d+\.csv/gi)].map(m => m[0]);
+    const pick = (re) => {
+      const hit = found.find(h => re.test(h));
+      if (!hit) return null;
+      try { return new URL(hit, TP53_DOWNLOAD_PAGE).toString(); } catch { return null; }
+    };
+    const urls = [
+      pick(/\/MutationView_r\d+\.csv$/i),
+      pick(/\/TumorVariantDownload_r\d+\.csv$/i),
+      pick(/\/GermlineDownload_r\d+\.csv$/i)
+    ].filter(Boolean);
+    return Array.from(new Set(urls));
+  } catch {
+    return [];
+  }
+}
 
 const CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
 const MAX_RESPONSE_MATCHES = 5;
@@ -27,48 +65,57 @@ function normalizeText(v) {
   return String(v || '').trim().toLowerCase();
 }
 
-function parseCsvLine(line) {
-  const out = [];
+// Single-pass CSV parser that tracks quote state ACROSS newlines, so a quoted field
+// containing a newline (common in the NCI TP53 free-text columns) does not split its
+// row. Handles doubled-quote ("") escaping. Splitting on lines first (as the previous
+// implementation did) corrupted column alignment for any such row.
+function parseCsv(text) {
+  const s = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const rows = [];
+  let row = [];
   let cur = '';
   let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        cur += '"';
-        i++;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (s[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = false;
       } else {
-        inQuotes = !inQuotes;
+        cur += ch;
       }
-    } else if (ch === ',' && !inQuotes) {
-      out.push(cur);
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(cur);
       cur = '';
+    } else if (ch === '\n') {
+      row.push(cur);
+      cur = '';
+      rows.push(row);
+      row = [];
     } else {
       cur += ch;
     }
   }
-  out.push(cur);
-  return out;
-}
-
-function parseCsv(text) {
-  const lines = String(text || '')
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .split('\n')
-    .filter(Boolean);
-  if (lines.length < 2) return [];
-  const headers = parseCsvLine(lines[0]).map(h => h.trim());
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = parseCsvLine(lines[i]);
-    const row = {};
-    headers.forEach((h, idx) => {
-      row[h] = cols[idx] !== undefined ? cols[idx] : '';
-    });
+  // Flush the final field/row when the text doesn't end in a newline.
+  if (cur !== '' || row.length > 0) {
+    row.push(cur);
     rows.push(row);
   }
-  return rows;
+  if (rows.length < 2) return [];
+  const headers = rows[0].map(h => String(h).trim());
+  const out = [];
+  for (let r = 1; r < rows.length; r++) {
+    const cols = rows[r];
+    if (cols.length === 1 && cols[0] === '') continue; // skip blank rows
+    const obj = {};
+    headers.forEach((h, idx) => {
+      obj[h] = cols[idx] !== undefined ? cols[idx] : '';
+    });
+    out.push(obj);
+  }
+  return out;
 }
 
 function looksLikeHtml(text) {
@@ -159,9 +206,37 @@ function parseGenomicPosition(g) {
   return Number.isFinite(n) ? n : null;
 }
 
+// The ref amino acid + codon number of a compact protein change (e.g. "R175H" -> "R175").
+// Returns null when there is no parseable ref+number.
+function proteinCodonKey(compact) {
+  const m = String(compact || '').match(/^([A-Z*])(\d+)/);
+  return m ? `${m[1]}${m[2]}` : null;
+}
+
+// Same codon (same ref residue + position), different/again alt — e.g. R175C vs R175H.
+function sameProteinCodon(a, b) {
+  const ka = proteinCodonKey(a);
+  const kb = proteinCodonKey(b);
+  return !!ka && ka === kb;
+}
+
+// True when the coordinate string contains `pos` as a whole integer token. Handles a
+// single position or a range (e.g. "7578406-7578490"), and — unlike a substring test —
+// does not let 7578406 match 17578406.
+function coordinateHasPosition(coord, pos) {
+  const nums = String(coord || '').match(/\d+/g);
+  return Array.isArray(nums) && nums.some(n => Number(n) === pos);
+}
+
 async function fetchDatasetText() {
   const envUrl = process.env.TP53_MUTATION_DATASET_URL;
-  const candidates = envUrl ? [envUrl, ...DEFAULT_DATASET_CANDIDATES] : DEFAULT_DATASET_CANDIDATES;
+  const discovered = await discoverDatasetUrls();
+  // Priority: explicit env override → discovered current-release URLs → hard-coded r21.
+  const candidates = Array.from(new Set([
+    ...(envUrl ? [envUrl] : []),
+    ...discovered,
+    ...DEFAULT_DATASET_CANDIDATES
+  ]));
   const debugAttempts = [];
   for (const url of candidates) {
     try {
@@ -221,13 +296,25 @@ async function ensureDatasetLoaded() {
   if (cache.rows && now - cache.loadedAt < CACHE_TTL_MS) {
     return cache;
   }
-  const fetched = await fetchDatasetText();
-  if (!fetched || !fetched.text) {
+  let fetched = null;
+  try {
+    fetched = await fetchDatasetText();
+  } catch {
+    fetched = null;
+  }
+  const rows = fetched && fetched.text ? parseCsv(fetched.text) : null;
+  if (!rows || rows.length === 0) {
+    // Refresh failed (or returned no usable rows). Serve the last-good dataset if we
+    // have one, rather than 502-ing the whole TP53 card — important when a release
+    // bump temporarily breaks the URLs or the upstream is down.
+    if (cache.rows && cache.rows.length) {
+      cache.staleSince = cache.staleSince || now;
+      return cache;
+    }
     throw new Error(
       `Unable to fetch TP53 dataset. Attempts: ${JSON.stringify((fetched && fetched.debugAttempts) || [])}`
     );
   }
-  const rows = parseCsv(fetched.text);
   cache = {
     loadedAt: now,
     rows,
@@ -255,11 +342,25 @@ function buildMatches(rows, { protein, cdna, genomic }) {
     const cdNorm = normalizeText(cd);
 
     let score = 0;
-    if (proteinNeedle && protCompact && protCompact.includes(proteinNeedle)) score += 4;
+    // Protein: an exact token match scores highest. A same-codon match (same ref+
+    // position, different alt — e.g. R175C when querying R175H) is surfaced at a lower
+    // score so related variants appear without ever outranking the exact hit. The old
+    // substring test let a short needle (e.g. "R175") match R175H/C/L indiscriminately.
+    let sameCodon = false;
+    if (proteinNeedle && protCompact) {
+      if (protCompact === proteinNeedle) {
+        score += 4;
+      } else if (sameProteinCodon(protCompact, proteinNeedle)) {
+        score += 1;
+        sameCodon = true;
+      }
+    }
+    // cDNA: substring is retained — cDNA strings are specific and formatting varies.
     if (cdnaNeedle && cdNorm && cdNorm.includes(cdnaNeedle)) score += 5;
+    // Genomic: exact integer-token compare, not substring (7578406 must not match 17578406).
     if (genomicPos !== null) {
-      if (String(hg19).includes(String(genomicPos))) score += 2;
-      if (String(hg38).includes(String(genomicPos))) score += 2;
+      if (coordinateHasPosition(hg19, genomicPos)) score += 2;
+      if (coordinateHasPosition(hg38, genomicPos)) score += 2;
     }
     if (score === 0) continue;
 
@@ -302,6 +403,7 @@ function buildMatches(rows, { protein, cdna, genomic }) {
 
     matches.push({
       score,
+      same_codon_match: sameCodon,
       mut_id: mutId || '',
       protein: prot || '',
       cdna_or_genomic: cd || '',
@@ -388,7 +490,12 @@ export default async function handler(req, res) {
     const { rows, datasetUrl, debug } = await ensureDatasetLoaded();
     const matches = buildMatches(rows, body);
     const top = matches.slice(0, MAX_RESPONSE_MATCHES);
-    const best = top[0] || null;
+    // match_count reflects strong matches (exact protein / cDNA / genomic, score >= 2).
+    // Same-codon relatives (score 1) are surfaced in `matches` for context but counted
+    // separately and never drive the pathogenicity summary.
+    const strongMatches = matches.filter(m => m.score >= 2);
+    const relatedCodonCount = matches.length - strongMatches.length;
+    const best = strongMatches[0] || null;
 
     // Build a concise pathogenicity summary from the best match for top-level consumption
     const pathogenicitySummary = best ? {
@@ -423,13 +530,16 @@ export default async function handler(req, res) {
       source: 'tp53-database',
       dataset_url: datasetUrl,
       total_records: rows.length,
-      match_count: matches.length,
+      match_count: strongMatches.length,
+      related_codon_count: relatedCodonCount,
       pathogenicity: pathogenicitySummary,
       classification: best?.exon_intron || '',
       prevalence: best?.somatic_count ? `somatic count: ${best.somatic_count}` : '',
-      note: matches.length
-        ? 'Matched against TP53 MutationView dataset using protein/cDNA/genomic similarity.'
-        : 'No TP53 dataset row matched the supplied variant.',
+      note: strongMatches.length
+        ? 'Matched against TP53 MutationView dataset by exact protein/cDNA/genomic position.'
+        : (relatedCodonCount
+          ? 'No exact TP53 record; showing same-codon variant(s) at this position for context.'
+          : 'No TP53 dataset row matched the supplied variant.'),
       matches: top
     };
     if (debugEnabled) {
