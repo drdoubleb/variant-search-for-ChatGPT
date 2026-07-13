@@ -318,6 +318,20 @@ function convertProteinBodyToSingle(proteinBody) {
         if (ref && alt) return `${ref}${m[2]}${alt}`;
     }
 
+    // In-frame deletions, duplications, insertions and delins (single residue or range):
+    //   Lys18del -> K18del, Lys18_Arg20del -> K18_R20del,
+    //   Lys18_Arg20delinsGlyPro -> K18_R20delinsGP, Met1? -> unchanged.
+    // Replace each three-letter amino-acid token with its single-letter code while leaving
+    // the del/dup/ins/delins keywords and positions intact. Only apply when the body actually
+    // contains such a keyword and an amino-acid-plus-position token, to avoid touching other forms.
+    if (/(?:del|dup|ins)/i.test(body) && /[A-Za-z]{3}\d/.test(body)) {
+        const converted = body.replace(
+            /Ala|Arg|Asn|Asp|Cys|Gln|Glu|Gly|His|Ile|Leu|Lys|Met|Phe|Pro|Ser|Thr|Trp|Tyr|Val|Ter|Stop/gi,
+            (token) => aaThreeToSingle(token) || token
+        );
+        if (converted !== body) return converted;
+    }
+
     // Fallback to strict triple substitution converter.
     const compact = body.toUpperCase();
     return tripleToSingle(compact);
@@ -1842,8 +1856,22 @@ async function fetchMyVariant(variant) {
 async function resolveGeneSymbolFromVep(consequences, recoderData) {
     if (!Array.isArray(consequences) || consequences.length === 0) return '';
 
-    // 1) Prefer any direct gene_symbol that is not chromosome-like.
-    for (const c of consequences) {
+    // Rank consequences so that a gene actually altered by the variant is preferred over a
+    // neighbouring gene that VEP only reports as an upstream/downstream/intergenic variant.
+    // Without this, a nearby gene (e.g. RRP9 listed as an upstream_gene_variant) can mask the
+    // gene that truly carries the change (e.g. PARP3 with an inframe deletion).
+    const isNeighbourOnly = (c) => {
+        const terms = Array.isArray(c?.consequence_terms) ? c.consequence_terms : [];
+        if (terms.length === 0) return false;
+        return terms.every(t => /^(upstream_gene_variant|downstream_gene_variant|intergenic_variant)$/i.test(String(t)));
+    };
+    const hasCodingEffect = (c) => Boolean(c?.hgvsp || c?.amino_acids || c?.protein_start != null || c?.hgvsc);
+    const scoreConsequence = (c) => (hasCodingEffect(c) ? 2 : 0) + (isNeighbourOnly(c) ? 0 : 1);
+    const rankedConsequences = [...consequences].sort((a, b) => scoreConsequence(b) - scoreConsequence(a));
+
+    // 1) Prefer any direct gene_symbol that is not chromosome-like, from the highest-ranked
+    // (variant-overlapping) consequences first.
+    for (const c of rankedConsequences) {
         const sym = c?.gene_symbol ? String(c.gene_symbol).trim() : '';
         if (sym && !isChromosomeLikeGeneSymbol(sym)) return sym;
     }
@@ -1919,24 +1947,44 @@ async function fetchVepHgvsHg19(variant) {
     if (m) {
         hgvs = `${m[1]}:g.${m[2]}`;
     }
-    const url = `https://grch37.rest.ensembl.org/vep/human/hgvs/${encodeURIComponent(hgvs)}?content-type=application/json`;
-    const response = await fetchWithTimeout(url, {
-        headers: {
-            'Accept': 'application/json'
+    // Request HGVS notations (hgvs=1) so hgvsc/hgvsp strings are returned per transcript, and
+    // prefer the RefSeq transcript set (refseq=1). The rest of the app selects and displays the
+    // canonical isoform by RefSeq NM_ accession, so RefSeq notations (e.g. NM_005485.6:c.52_54del,
+    // NP_005476.4:p.Lys18del) match the nomenclature users expect. Fall back to the default
+    // Ensembl transcript set when RefSeq returns no transcript consequences.
+    const requestVep = async (useRefseq) => {
+        const params = useRefseq ? 'hgvs=1&refseq=1' : 'hgvs=1';
+        const url = `https://grch37.rest.ensembl.org/vep/human/hgvs/${encodeURIComponent(hgvs)}?content-type=application/json&${params}`;
+        const response = await fetchWithTimeout(url, {
+            headers: {
+                'Accept': 'application/json'
+            }
+        }, API_TIMEOUT_MS.vep);
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`VEP HGVS request failed (${response.status}): ${text}`);
         }
-    }, API_TIMEOUT_MS.vep);
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`VEP HGVS request failed (${response.status}): ${text}`);
-    }
-    const data = await response.json();
-    if (!Array.isArray(data) || data.length === 0) {
-        throw new Error('No VEP HGVS data found');
+        const data = await response.json();
+        if (!Array.isArray(data) || data.length === 0) {
+            throw new Error('No VEP HGVS data found');
+        }
+        return data;
+    };
+    let data;
+    try {
+        data = await requestVep(true);
+        const cons = (data[0] && data[0].transcript_consequences) || [];
+        if (cons.length === 0) {
+            data = await requestVep(false);
+        }
+    } catch (refseqErr) {
+        // If the RefSeq request failed outright, fall back to the default Ensembl transcript set.
+        data = await requestVep(false);
     }
     // Extract transcript consequences list from the first result
     const first = data[0];
     const consequences = first.transcript_consequences || [];
-    return { vepData: data, consequences };
+    return { vepData: data, consequences, mostSevere: first.most_severe_consequence || '' };
 }
 
 function parseProteinTargetFromQueryVariant(variantPart) {
@@ -4658,17 +4706,34 @@ document.addEventListener('DOMContentLoaded', () => {
                                         if (geneSym) {
                                             annotation.dbnsfp = { genename: geneSym };
                                         }
-                                        // Populate transcriptsFromRecoder with transcript identifiers from the VEP data so
-                                        // that the summary display can include a list of transcripts. Mark these as coming
-                                        // from the VEP source.
-                                        transcriptsFromRecoder = vepConsequences.map(c => {
-                                            return {
-                                                transcript: c.transcript_id || '',
-                                                cDNA: '',
-                                                protein: '',
-                                                source: 'vep'
-                                            };
-                                        });
+                                        // Expose the most severe consequence so the summary can display an Effect
+                                        // (e.g. "inframe_deletion") instead of N/A for VEP-only variants.
+                                        if (vepRes.mostSevere) {
+                                            annotation.cadd = Object.assign({}, annotation.cadd, { consequence: vepRes.mostSevere });
+                                        }
+                                        // Populate transcriptsFromRecoder with the cDNA (hgvsc) and protein (hgvsp)
+                                        // notations returned by VEP so the summary can display c./p. and select a
+                                        // canonical isoform. Split the "accession:change" strings into a transcript
+                                        // accession plus the c./p. portion, matching the shape used elsewhere. Skip
+                                        // consequences without an hgvsc (e.g. neighbouring upstream/downstream genes).
+                                        transcriptsFromRecoder = vepConsequences
+                                            .filter(c => c && c.hgvsc)
+                                            .map(c => {
+                                                const cParts = String(c.hgvsc).split(':');
+                                                const transcriptId = cParts[0] || (c.transcript_id || '');
+                                                const cDNA = cParts.slice(1).join(':');
+                                                let protein = '';
+                                                if (c.hgvsp) {
+                                                    const pParts = String(c.hgvsp).split(':');
+                                                    protein = pParts.slice(1).join(':');
+                                                }
+                                                return {
+                                                    transcript: transcriptId,
+                                                    cDNA: cDNA,
+                                                    protein: protein,
+                                                    source: 'vep'
+                                                };
+                                            });
                                         altFound = true;
                                     }
                                 } catch (vepErr) {
