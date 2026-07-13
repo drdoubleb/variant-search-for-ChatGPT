@@ -1,0 +1,14 @@
+{
+  "name": "variant-search-for-chatgpt",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Variant Search (Beta) — HGVS variant annotation frontend with Vercel serverless proxies.",
+  "type": "module",
+  "scripts": {
+    "test": "for f in tests/*.test.js; do echo \"# $f\"; node \"$f\" || exit 1; done"
+  },
+  "dependencies": {
+    "@upstash/ratelimit": "^2.0.5",
+    "@upstash/redis": "^1.34.3"
+  }
+}

@@ -932,6 +932,21 @@ function escapeHtml(text) {
     ));
 }
 
+// Return a URL that is safe to place in an href, or '' when it isn't. Only http(s)
+// and mailto schemes are allowed, so untrusted values (e.g. a CIViC source URL or a
+// model-supplied link) can't smuggle in `javascript:`/`data:` schemes. The result is
+// NOT HTML-escaped — escape it separately when interpolating into an attribute.
+function safeUrl(url) {
+    const raw = String(url ?? '').trim();
+    if (!raw) return '';
+    try {
+        const parsed = new URL(raw, window.location.href);
+        return /^(https?:|mailto:)$/i.test(parsed.protocol) ? raw : '';
+    } catch {
+        return '';
+    }
+}
+
 // Render a ClinVar review status as its 0–4 gold-star confidence rating
 // (matching the stars on the ClinVar website), or '' when no status is given.
 // e.g. "criteria provided, single submitter" → ★☆☆☆.
@@ -1251,7 +1266,7 @@ function renderBbkbBiomarkerTherapies(panel, gene, aiExtras) {
         const records = data.results || [];
         resultsDiv.innerHTML = '';
         if (!records.length) {
-            resultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No BBKB biomarker–therapy records found for ${gene}.</div>`;
+            resultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No BBKB biomarker–therapy records found for ${escapeHtml(gene)}.</div>`;
             return;
         }
         const countEl = document.createElement('div');
@@ -1615,6 +1630,30 @@ async function fetchOpenFdaDrugLabels(gene) {
     }
 }
 
+// openFDA can return many label records for drug-rich genes — HER2/ERBB2 assembles
+// ~957 KB, almost entirely openFDA — which risks Vercel's request ceiling and model
+// context limits. Cap the number of records for the AI payload, but keep each record's
+// full text: `indications_and_usage` is the crucial biomarker-approval section and must
+// not be truncated. When records are dropped, add an explicit note so the model (and
+// anyone reading the context inspector) knows the list was capped. Returns a NEW object
+// so the on-screen openFDA card's data is left untouched.
+function condenseOpenFdaForAi(data, { maxRecords = 40 } = {}) {
+    if (!data || !Array.isArray(data.results)) return data;
+    if (data.results.length <= maxRecords) return data;
+    const results = data.results.slice(0, maxRecords);
+    const omitted = data.results.length - results.length;
+    return {
+        ...data,
+        results,
+        openfda_records_truncated: {
+            shown: results.length,
+            total: data.results.length,
+            omitted,
+            note: `openFDA returned ${data.results.length} label records; only the first ${results.length} are included here to bound payload size. Full indications_and_usage text is retained for the included records.`
+        }
+    };
+}
+
 async function fetchPubmedArticles(searchTerm, limit = 5) {
     if (!searchTerm) return { total: 0, articles: [] };
     const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
@@ -1661,12 +1700,17 @@ const OPENROUTER_MODEL_OPTIONS = [
     'qwen/qwen3-32b'
 ];
 
-async function fetchAiReview(context, model) {
+async function fetchAiReview(context, model, extra = {}) {
     const endpoint = getConfiguredApiEndpoint('AI_REVIEW_API_ENDPOINT', '/api/ai-review');
+    const payload = { model, context };
+    // Optional bring-your-own OpenRouter key and Cloudflare Turnstile token. Both are
+    // omitted when empty so the backend uses the owner key / skips verification.
+    if (extra.apiKey) payload.openrouter_api_key = extra.apiKey;
+    if (extra.turnstileToken) payload.turnstile_token = extra.turnstileToken;
     const res = await fetchWithTimeout(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, context })
+        body: JSON.stringify(payload)
     }, API_TIMEOUT_MS.aiReview);
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.error) {
@@ -1674,6 +1718,285 @@ async function fetchAiReview(context, model) {
         throw new Error(`${data?.error || `AI review request failed (${res.status})`}${detail}`);
     }
     return data;
+}
+
+// Fetch the fully assembled prompt from the backend without calling any model.
+// Powers the "Copy prompt" button so users can paste it into their own LLM.
+async function fetchAiReviewPrompt(context, model) {
+    const endpoint = getConfiguredApiEndpoint('AI_REVIEW_API_ENDPOINT', '/api/ai-review');
+    const res = await fetchWithTimeout(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, context, mode: 'prompt' })
+    }, API_TIMEOUT_MS.aiReview);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.error) {
+        throw new Error(data?.error || `Prompt request failed (${res.status})`);
+    }
+    return data.prompt || '';
+}
+
+// sessionStorage helpers for the optional BYO OpenRouter key. Stored only for the
+// current tab (cleared when it closes) so returning users don't re-paste each lookup.
+const AI_REVIEW_KEY_STORAGE = 'aiReviewOpenRouterKey';
+function getStoredUserKey() {
+    try { return sessionStorage.getItem(AI_REVIEW_KEY_STORAGE) || ''; } catch { return ''; }
+}
+function setStoredUserKey(value) {
+    try {
+        if (value) sessionStorage.setItem(AI_REVIEW_KEY_STORAGE, value);
+        else sessionStorage.removeItem(AI_REVIEW_KEY_STORAGE);
+    } catch { /* storage unavailable — ignore */ }
+}
+
+// Lazily load the Cloudflare Turnstile script, only when a site key is configured.
+let _turnstileScriptPromise = null;
+function loadTurnstileScript() {
+    if (window.turnstile) return Promise.resolve();
+    if (_turnstileScriptPromise) return _turnstileScriptPromise;
+    _turnstileScriptPromise = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        s.async = true;
+        s.defer = true;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('Failed to load Turnstile'));
+        document.head.appendChild(s);
+    });
+    return _turnstileScriptPromise;
+}
+
+// Build the shared "Optional AI Review" card. Both the gene-only and full-variant
+// flows use this so the model picker, notes, BYO-key field, copy-prompt button,
+// Turnstile widget, context inspector, and run handler are defined once.
+// `buildContext` is an async callback returning the context object to send.
+function createAiReviewCard({ container, idSuffix, introText, loadingText, buildContext }) {
+    const aiCard = document.createElement('div');
+    aiCard.className = 'card ai-review-card';
+    aiCard.setAttribute('data-card', 'optional-ai-review'); // mirrors applyCardTheme()
+    const aiTitle = document.createElement('h3');
+    aiTitle.textContent = 'Optional AI Review';
+    aiCard.appendChild(aiTitle);
+
+    const aiContent = document.createElement('div');
+    aiContent.className = 'card-content ai-review-content';
+
+    const aiIntro = document.createElement('p');
+    aiIntro.className = 'ai-review-intro';
+    aiIntro.textContent = introText;
+    aiContent.appendChild(aiIntro);
+
+    const controls = document.createElement('div');
+    controls.className = 'ai-review-controls';
+
+    const modelLabel = document.createElement('label');
+    modelLabel.textContent = 'Model';
+    modelLabel.setAttribute('for', `aiReviewModelSelect${idSuffix}`);
+    controls.appendChild(modelLabel);
+
+    const modelSelect = document.createElement('select');
+    modelSelect.id = `aiReviewModelSelect${idSuffix}`;
+    OPENROUTER_MODEL_OPTIONS.forEach((modelName) => {
+        const opt = document.createElement('option');
+        opt.value = modelName;
+        opt.textContent = modelName;
+        modelSelect.appendChild(opt);
+    });
+    controls.appendChild(modelSelect);
+
+    const runButton = document.createElement('button');
+    runButton.type = 'button';
+    runButton.textContent = 'Run AI review';
+    controls.appendChild(runButton);
+
+    const copyPromptButton = document.createElement('button');
+    copyPromptButton.type = 'button';
+    copyPromptButton.className = 'ai-review-secondary-btn';
+    copyPromptButton.textContent = 'Copy prompt';
+    copyPromptButton.title = 'Copy the exact prompt so you can paste it into your own LLM';
+    controls.appendChild(copyPromptButton);
+
+    aiContent.appendChild(controls);
+
+    const notesWrap = document.createElement('div');
+    notesWrap.className = 'ai-review-notes';
+    const notesLabel = document.createElement('label');
+    notesLabel.setAttribute('for', `aiReviewNotes${idSuffix}`);
+    notesLabel.textContent = 'Any additional notes for AI review';
+    notesWrap.appendChild(notesLabel);
+    const notesInput = document.createElement('textarea');
+    notesInput.id = `aiReviewNotes${idSuffix}`;
+    notesInput.rows = 3;
+    notesInput.placeholder = 'Optional — extra clinical context, prior therapies, specific questions, etc.';
+    notesWrap.appendChild(notesInput);
+    aiContent.appendChild(notesWrap);
+
+    // Optional bring-your-own OpenRouter key (collapsed by default).
+    const keyDetails = document.createElement('details');
+    keyDetails.className = 'ai-review-key';
+    const keySummary = document.createElement('summary');
+    keySummary.textContent = 'Use your own OpenRouter API key (optional)';
+    keyDetails.appendChild(keySummary);
+    const keyRow = document.createElement('div');
+    keyRow.className = 'ai-review-key-row';
+    const keyInput = document.createElement('input');
+    keyInput.type = 'password';
+    keyInput.id = `aiReviewKey${idSuffix}`;
+    keyInput.autocomplete = 'off';
+    keyInput.placeholder = 'sk-or-...';
+    keyInput.value = getStoredUserKey();
+    keyRow.appendChild(keyInput);
+    const rememberWrap = document.createElement('label');
+    rememberWrap.className = 'ai-review-key-remember';
+    const rememberChk = document.createElement('input');
+    rememberChk.type = 'checkbox';
+    rememberChk.checked = Boolean(getStoredUserKey());
+    rememberWrap.appendChild(rememberChk);
+    rememberWrap.appendChild(document.createTextNode(' Remember in this tab'));
+    keyRow.appendChild(rememberWrap);
+    keyDetails.appendChild(keyRow);
+    const keyNote = document.createElement('div');
+    keyNote.className = 'ai-review-key-note';
+    keyNote.textContent = 'Your key is sent only with your own review request and, if remembered, stored only in this browser tab (cleared when it closes). Requests using your own key are not rate-limited by this site.';
+    keyDetails.appendChild(keyNote);
+    if (getStoredUserKey()) keyDetails.open = true;
+    aiContent.appendChild(keyDetails);
+
+    // Turnstile widget mount point — only used when a site key is configured.
+    const turnstileHost = document.createElement('div');
+    turnstileHost.className = 'ai-review-turnstile';
+    aiContent.appendChild(turnstileHost);
+    let currentTurnstileToken = '';
+    let turnstileWidgetId = null;
+    if (window.TURNSTILE_SITE_KEY) {
+        loadTurnstileScript().then(() => {
+            if (!window.turnstile) return;
+            try {
+                turnstileWidgetId = window.turnstile.render(turnstileHost, {
+                    sitekey: window.TURNSTILE_SITE_KEY,
+                    callback: (token) => { currentTurnstileToken = token; },
+                    'expired-callback': () => { currentTurnstileToken = ''; },
+                    'error-callback': () => { currentTurnstileToken = ''; }
+                });
+            } catch { /* rendering failed — treat as no challenge */ }
+        }).catch(() => { /* script blocked — backend skips when no secret set */ });
+    }
+
+    const aiContextInspector = document.createElement('details');
+    aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
+    const aiContextInspectorSummary = document.createElement('summary');
+    aiContextInspectorSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;list-style:revert;font-size:0.79rem;';
+    aiContextInspectorSummary.textContent = 'Context sent to AI (populated after run)';
+    aiContextInspector.appendChild(aiContextInspectorSummary);
+    const aiContextPre = document.createElement('pre');
+    aiContextPre.style.cssText = 'font-size:0.73rem;white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e5e7eb;padding:8px;border-radius:4px;margin-top:4px;max-height:400px;overflow-y:auto;color:#374151;';
+    aiContextPre.textContent = 'Run AI review to populate this section.';
+    aiContextInspector.appendChild(aiContextPre);
+    aiContent.appendChild(aiContextInspector);
+
+    // Collapsible prompt output — filled by "Copy prompt" and shown for manual copy
+    // when the clipboard API is unavailable/blocked.
+    const promptDetails = document.createElement('details');
+    promptDetails.className = 'ai-review-prompt-view';
+    promptDetails.style.cssText = 'margin:2px 0;font-size:0.80rem;';
+    const promptSummary = document.createElement('summary');
+    promptSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;font-size:0.79rem;';
+    promptSummary.textContent = 'Full prompt (for your own LLM)';
+    promptDetails.appendChild(promptSummary);
+    const promptTextarea = document.createElement('textarea');
+    promptTextarea.readOnly = true;
+    promptTextarea.rows = 8;
+    promptTextarea.style.cssText = 'width:100%;box-sizing:border-box;font:inherit;font-size:0.73rem;line-height:1.4;background:#f8fafc;border:1px solid #e5e7eb;border-radius:4px;padding:8px;margin-top:4px;color:#374151;';
+    promptTextarea.placeholder = 'Click "Copy prompt" to populate.';
+    promptDetails.appendChild(promptTextarea);
+    aiContent.appendChild(promptDetails);
+
+    const aiOutput = document.createElement('div');
+    aiOutput.className = 'ai-review-output';
+    aiContent.appendChild(aiOutput);
+    aiCard.appendChild(aiContent);
+    if (container) container.appendChild(aiCard);
+
+    const persistKey = () => {
+        const key = (keyInput.value || '').trim();
+        if (rememberChk.checked && key) setStoredUserKey(key);
+        else setStoredUserKey('');
+    };
+
+    copyPromptButton.addEventListener('click', async () => {
+        copyPromptButton.disabled = true;
+        const prev = copyPromptButton.textContent;
+        copyPromptButton.textContent = 'Building…';
+        try {
+            const aiContext = await buildContext((notesInput.value || '').trim());
+            aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
+            aiContextInspectorSummary.textContent = 'Context sent to AI';
+            const prompt = await fetchAiReviewPrompt(aiContext, modelSelect.value);
+            promptTextarea.value = prompt;
+            let copied = false;
+            try {
+                await navigator.clipboard.writeText(prompt);
+                copied = true;
+            } catch { /* clipboard blocked — fall back to manual copy below */ }
+            if (copied) {
+                copyPromptButton.textContent = 'Copied!';
+            } else {
+                promptDetails.open = true;
+                promptTextarea.focus();
+                promptTextarea.select();
+                copyPromptButton.textContent = 'Copy from box below';
+            }
+        } catch (err) {
+            copyPromptButton.textContent = 'Prompt failed';
+            promptDetails.open = true;
+            promptTextarea.value = `Unable to build prompt: ${err.message}`;
+        } finally {
+            setTimeout(() => { copyPromptButton.textContent = prev; }, 2000);
+            copyPromptButton.disabled = false;
+        }
+    });
+
+    runButton.addEventListener('click', async () => {
+        runButton.disabled = true;
+        const previousText = runButton.textContent;
+        runButton.textContent = 'Running…';
+        aiOutput.innerHTML = `<div class="ai-review-loading">${loadingText}</div>`;
+        try {
+            const userKey = (keyInput.value || '').trim();
+            persistKey();
+            // Require a Turnstile token only when a site key is configured and the user
+            // is spending the owner key (BYO-key requests bypass the challenge).
+            let turnstileToken = '';
+            if (window.TURNSTILE_SITE_KEY && !userKey) {
+                turnstileToken = currentTurnstileToken;
+                if (!turnstileToken) throw new Error('Please complete the verification challenge above, then run again.');
+            }
+            const aiContext = await buildContext((notesInput.value || '').trim());
+            aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
+            aiContextInspectorSummary.textContent = 'Context sent to AI';
+            const data = await fetchAiReview(aiContext, modelSelect.value, {
+                apiKey: userKey || undefined,
+                turnstileToken: turnstileToken || undefined
+            });
+            renderAiReview(data.review, aiOutput);
+            // Turnstile tokens are single-use; reset so a follow-up run gets a fresh one.
+            if (window.turnstile && turnstileWidgetId != null) {
+                try { window.turnstile.reset(turnstileWidgetId); } catch { /* ignore */ }
+                currentTurnstileToken = '';
+            }
+        } catch (err) {
+            aiOutput.innerHTML = '';
+            const errorEl = document.createElement('div');
+            errorEl.className = 'ai-review-error';
+            errorEl.textContent = `AI review unavailable: ${err.message}`;
+            aiOutput.appendChild(errorEl);
+        } finally {
+            runButton.disabled = false;
+            runButton.textContent = previousText;
+        }
+    });
+
+    return aiCard;
 }
 
 function appendListOrEmpty(parent, values, emptyText) {
@@ -1698,9 +2021,10 @@ function appendListOrEmpty(parent, values, emptyText) {
                 value.relevance,
                 value.evidence
             ].filter(Boolean);
-            if (value.url) {
+            const href = safeUrl(value.url);
+            if (href) {
                 const a = document.createElement('a');
-                a.href = value.url;
+                a.href = href;
                 a.target = '_blank';
                 a.rel = 'noopener noreferrer';
                 a.textContent = title;
@@ -2495,7 +2819,10 @@ function buildDetailsData(annotation, rawInput, gVariant) {
             if (c.entrez_id !== undefined) civic['Entrez ID'] = c.entrez_id;
             if (c.evidence_items && Array.isArray(c.evidence_items)) civic['Evidence Items'] = c.evidence_items.length;
             if (c.evidence_level) civic['Evidence Level'] = c.evidence_level;
-            if (c.source && c.source.url) civic['CIViC Source'] = { html: `<a href="${c.source.url}" target="_blank" rel="noopener noreferrer">${c.source.url}</a>` };
+            if (c.source && c.source.url) {
+                const srcUrl = safeUrl(c.source.url);
+                if (srcUrl) civic['CIViC Source'] = { html: `<a href="${escapeHtml(srcUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(c.source.url)}</a>` };
+            }
             if (Object.keys(civic).length > 0) details.push({ title: 'CIViC', items: civic });
         } else {
             // Use whichever array of evidence entries is available (annotation.cgi or annotation.civic if array)
@@ -3114,7 +3441,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                     const { gene: apiGene, matchedVariant, assertions } = civicApiData;
                     if (!apiGene) {
-                        civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${gene}" not found in CIViC.</div>`;
+                        civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${escapeHtml(gene)}" not found in CIViC.</div>`;
                         return;
                     }
 
@@ -3135,7 +3462,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (ampLevel) {
                             const ampEl = document.createElement('div');
                             ampEl.style.cssText = 'font-size:0.9rem;font-weight:600;margin-bottom:4px;';
-                            ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${ampLevel}`;
+                            ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${escapeHtml(ampLevel)}`;
                             civicApiDiv.appendChild(ampEl);
                         }
                     }
@@ -3647,7 +3974,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
                     ofResultsDiv.innerHTML = '';
                     if (!ofResults || ofResults.length === 0) {
-                        ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${gene}.</div>`;
+                        ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${escapeHtml(gene)}.</div>`;
                         return;
                     }
                     const OF_PREVIEW = 7;
@@ -4111,143 +4438,60 @@ document.addEventListener('DOMContentLoaded', () => {
                         sourceNote.textContent = 'Source: drdoubleb.com/guidelines. For reference only — verify against current published guidelines.';
                         guidelinesResults.appendChild(sourceNote);
                     } catch (err) {
-                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${err.message}</div>`;
+                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${escapeHtml(err.message)}</div>`;
                         geneOnlyAiExtras.guidelines = { error: err.message, cancer_type: selectedCancer, gene };
                     }
                 });
             }
 
-            // ── Card: Optional AI Review ───────────────────────────────────
-            {
-                const aiCard = document.createElement('div');
-                aiCard.className = 'card ai-review-card';
-                const aiTitle = document.createElement('h3');
-                aiTitle.textContent = 'Optional AI Review';
-                applyCardTheme(aiCard, 'Optional AI Review');
-                aiCard.appendChild(aiTitle);
-
-                const aiContent = document.createElement('div');
-                aiContent.className = 'card-content ai-review-content';
-
-                const aiIntro = document.createElement('p');
-                aiIntro.className = 'ai-review-intro';
-                aiIntro.textContent = 'Send the retrieved gene-level data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.';
-                aiContent.appendChild(aiIntro);
-
-                const controls = document.createElement('div');
-                controls.className = 'ai-review-controls';
-
-                const modelLabel = document.createElement('label');
-                modelLabel.textContent = 'Model';
-                modelLabel.setAttribute('for', 'aiReviewModelSelectGene');
-                controls.appendChild(modelLabel);
-
-                const modelSelect = document.createElement('select');
-                modelSelect.id = 'aiReviewModelSelectGene';
-                OPENROUTER_MODEL_OPTIONS.forEach((modelName) => {
-                    const opt = document.createElement('option');
-                    opt.value = modelName;
-                    opt.textContent = modelName;
-                    modelSelect.appendChild(opt);
-                });
-                controls.appendChild(modelSelect);
-
-                const runButton = document.createElement('button');
-                runButton.type = 'button';
-                runButton.textContent = 'Run AI review';
-                controls.appendChild(runButton);
-                aiContent.appendChild(controls);
-
-                const notesWrap = document.createElement('div');
-                notesWrap.className = 'ai-review-notes';
-                const notesLabel = document.createElement('label');
-                notesLabel.setAttribute('for', 'aiReviewNotesGene');
-                notesLabel.textContent = 'Any additional notes for AI review';
-                notesWrap.appendChild(notesLabel);
-                const notesInput = document.createElement('textarea');
-                notesInput.id = 'aiReviewNotesGene';
-                notesInput.rows = 3;
-                notesInput.placeholder = 'Optional — extra clinical context, prior therapies, specific questions, etc.';
-                notesWrap.appendChild(notesInput);
-                aiContent.appendChild(notesWrap);
-
-                const aiContextInspector = document.createElement('details');
-                aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
-                const aiContextInspectorSummary = document.createElement('summary');
-                aiContextInspectorSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;list-style:revert;font-size:0.79rem;';
-                aiContextInspectorSummary.textContent = 'Context sent to AI (populated after run)';
-                aiContextInspector.appendChild(aiContextInspectorSummary);
-                const aiContextPre = document.createElement('pre');
-                aiContextPre.style.cssText = 'font-size:0.73rem;white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e5e7eb;padding:8px;border-radius:4px;margin-top:4px;max-height:400px;overflow-y:auto;color:#374151;';
-                aiContextPre.textContent = 'Run AI review to populate this section.';
-                aiContextInspector.appendChild(aiContextPre);
-                aiContent.appendChild(aiContextInspector);
-
-                const aiOutput = document.createElement('div');
-                aiOutput.className = 'ai-review-output';
-                aiContent.appendChild(aiOutput);
-                aiCard.appendChild(aiContent);
-                if (cardsContainer) cardsContainer.appendChild(aiCard);
-
-                runButton.addEventListener('click', async () => {
-                    runButton.disabled = true;
-                    const previousText = runButton.textContent;
-                    runButton.textContent = 'Running…';
-                    aiOutput.innerHTML = '<div class="ai-review-loading">Gathering gene-level context for AI review…</div>';
-                    try {
-                        // Supplemental context for gene-only mode: skip coordinate-dependent calls
-                        const [fdaRecords, bbkbTherapies, clinicalTrialData] = await Promise.all([
-                            fetchFdaCompanionDiagnostics(gene).catch(() => []),
-                            fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] })),
-                            fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }))
-                        ]);
-                        const pubmedTerm = altType ? `${gene} ${altType}` : gene;
-                        // Prefer the PubMed card's already-fetched data over re-fetching.
-                        // Re-fetching alongside the card increases NCBI concurrency and can
-                        // drop abstracts when efetch hits the rate limit.
-                        const cachedPubmed = geneOnlyAiExtras.pubmed;
-                        const pubmedPromise = (cachedPubmed && Array.isArray(cachedPubmed.articles) && cachedPubmed.articles.length > 0)
-                            ? Promise.resolve({ total: cachedPubmed.total ?? cachedPubmed.articles.length, articles: cachedPubmed.articles })
-                            : fetchPubmedArticles(pubmedTerm, 5).catch(() => ({ total: 0, articles: [] }));
-                        const [pubmedData, civicData, openFdaData] = await Promise.all([
-                            pubmedPromise,
-                            fetchCivicApiData(gene, '').catch(() => null),
-                            fetchOpenFdaDrugLabels(gene).catch(() => null)
-                        ]);
-                        const supplementalContext = {
-                            ...geneOnlyAiExtras,
-                            civic_api: civicData,
-                            pubmed: pubmedData,
-                            openfda_drug_labels: openFdaData
-                        };
-                        const userNotes = (notesInput.value || '').trim();
-                        const aiContext = {
-                            submitted_query: rawInput,
-                            gene,
-                            alteration_type: altType,
-                            tumor_type: tumorType,
-                            user_notes: userNotes || undefined,
-                            fda_companion_diagnostics_records: fdaRecords,
-                            bbkb_biomarker_therapies: bbkbTherapies,
-                            clinical_trials: clinicalTrialData,
-                            supplemental_card_data: supplementalContext
-                        };
-                        aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
-                        aiContextInspectorSummary.textContent = 'Context sent to AI';
-                        const data = await fetchAiReview(aiContext, modelSelect.value);
-                        renderAiReview(data.review, aiOutput);
-                    } catch (err) {
-                        aiOutput.innerHTML = '';
-                        const errorEl = document.createElement('div');
-                        errorEl.className = 'ai-review-error';
-                        errorEl.textContent = `AI review unavailable: ${err.message}`;
-                        aiOutput.appendChild(errorEl);
-                    } finally {
-                        runButton.disabled = false;
-                        runButton.textContent = previousText;
-                    }
-                });
-            }
+            // ── Card: Optional AI Review (gene-only mode) ──────────────────
+            createAiReviewCard({
+                container: cardsContainer,
+                idSuffix: 'Gene',
+                introText: 'Send the retrieved gene-level data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
+                loadingText: 'Gathering gene-level context for AI review…',
+                buildContext: async (userNotes) => {
+                    // Supplemental context for gene-only mode: skip coordinate-dependent calls
+                    const [fdaRecords, bbkbTherapies, clinicalTrialData] = await Promise.all([
+                        fetchFdaCompanionDiagnostics(gene).catch(() => []),
+                        fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] })),
+                        fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }))
+                    ]);
+                    const pubmedTerm = altType ? `${gene} ${altType}` : gene;
+                    // Prefer the PubMed card's already-fetched data over re-fetching.
+                    // Re-fetching alongside the card increases NCBI concurrency and can
+                    // drop abstracts when efetch hits the rate limit.
+                    const cachedPubmed = geneOnlyAiExtras.pubmed;
+                    const pubmedPromise = (cachedPubmed && Array.isArray(cachedPubmed.articles) && cachedPubmed.articles.length > 0)
+                        ? Promise.resolve({ total: cachedPubmed.total ?? cachedPubmed.articles.length, articles: cachedPubmed.articles })
+                        : fetchPubmedArticles(pubmedTerm, 5).catch(() => ({ total: 0, articles: [] }));
+                    const [pubmedData, civicData, openFdaData] = await Promise.all([
+                        pubmedPromise,
+                        fetchCivicApiData(gene, '').catch(() => null),
+                        fetchOpenFdaDrugLabels(gene).catch(() => null)
+                    ]);
+                    const supplementalContext = {
+                        ...geneOnlyAiExtras,
+                        civic_api: civicData,
+                        pubmed: pubmedData,
+                        openfda_drug_labels: condenseOpenFdaForAi(openFdaData)
+                    };
+                    // geneOnlyAiExtras may itself carry a full openFDA payload (from the
+                    // openFDA card); cap that copy's record count too so the AI context stays bounded.
+                    if (supplementalContext.openfda) supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
+                    return {
+                        submitted_query: rawInput,
+                        gene,
+                        alteration_type: altType,
+                        tumor_type: tumorType,
+                        user_notes: userNotes || undefined,
+                        fda_companion_diagnostics_records: fdaRecords,
+                        bbkb_biomarker_therapies: bbkbTherapies,
+                        clinical_trials: clinicalTrialData,
+                        supplemental_card_data: supplementalContext
+                    };
+                }
+            });
 
             return; // Skip the variant annotation pipeline
         }
@@ -4812,7 +5056,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (cosmicData.COSMIC_GENE) {
                             const encodedGene = encodeURIComponent(cosmicData.COSMIC_GENE);
                             const geneLink = `https://cancer.sanger.ac.uk/cosmic/gene/analysis?ln=${encodedGene}`;
-                            cosmicItems['COSMIC Gene Page'] = { html: `<a href="${geneLink}" target="_blank" rel="noopener noreferrer">View analysis for ${cosmicData.COSMIC_GENE}</a>` };
+                            cosmicItems['COSMIC Gene Page'] = { html: `<a href="${geneLink}" target="_blank" rel="noopener noreferrer">View analysis for ${escapeHtml(cosmicData.COSMIC_GENE)}</a>` };
                         }
                         // Site counts with per-type frequencies and gene-specific frequencies
                         if (cosmicData.COSMIC_SITE_COUNTS) {
@@ -4820,12 +5064,12 @@ document.addEventListener('DOMContentLoaded', () => {
                             for (const [type, info] of Object.entries(cosmicData.COSMIC_SITE_COUNTS)) {
                                 const count = info.count || 0;
                                 const samplesWithGeneType = info.samples_with_gene_in_type || 1;
-                                let rowText = `${type}: ${count} tumor${count === 1 ? '' : 's'}`;
+                                let rowText = `${escapeHtml(type)}: ${count} tumor${count === 1 ? '' : 's'}`;
                                 if (meta && meta.total_samples_by_cancer_type && meta.total_samples_by_cancer_type[type]) {
                                     const typeTotal = meta.total_samples_by_cancer_type[type] || 1;
                                     const typeFreq = ((count / typeTotal) * 100).toFixed(2);
                                     const geneFreqType = ((count / samplesWithGeneType) * 100).toFixed(2);
-                                    rowText += ` (${typeFreq}% of ${type}, ${geneFreqType}% with ${geneNameForDisplay})`;
+                                    rowText += ` (${typeFreq}% of ${escapeHtml(type)}, ${geneFreqType}% with ${escapeHtml(geneNameForDisplay)})`;
                                 }
                                 siteRows.push(`<li>${rowText}</li>`);
                             }
@@ -5365,7 +5609,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 content.className = 'card-content';
                 const makeLine = (label, value) => {
                     const span = document.createElement('span');
-                    span.innerHTML = `<strong>${label}:</strong> ${value || 'N/A'}`;
+                    span.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${value ? escapeHtml(value) : 'N/A'}`;
                     return span;
                 };
                 content.appendChild(makeLine('g.', gVariant));
@@ -5432,7 +5676,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 content.appendChild(makeLine('Effect', effect));
                 const ucscUrl = buildUcscHg19Url(rawInput, gVariant, annotation);
                 if (ucscUrl) {
-                    content.appendChild(makeLine('UCSC (hg19)', `<a href="${ucscUrl}" target="_blank" rel="noopener noreferrer">Zoom to region</a>`));
+                    // Build with DOM nodes rather than makeLine (which escapes its value) so the
+                    // link renders as a real anchor.
+                    const ucscSpan = document.createElement('span');
+                    const ucscLabel = document.createElement('strong');
+                    ucscLabel.textContent = 'UCSC (hg19):';
+                    ucscSpan.appendChild(ucscLabel);
+                    ucscSpan.appendChild(document.createTextNode(' '));
+                    const ucscLink = document.createElement('a');
+                    ucscLink.href = ucscUrl;
+                    ucscLink.target = '_blank';
+                    ucscLink.rel = 'noopener noreferrer';
+                    ucscLink.textContent = 'Zoom to region';
+                    ucscSpan.appendChild(ucscLink);
+                    content.appendChild(ucscSpan);
                 }
                 // Append list of transcripts showing cDNA and protein for each transcript in a collapsible details element
                 if (transcriptsList && transcriptsList.length > 1) {
@@ -5448,7 +5705,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         let inner = `${t.transcript}: ${t.cDNA}`;
                         if (t.protein) inner += `, ${t.protein}`;
                         if (t.canonical) {
-                            li.innerHTML = `<strong>${inner}</strong>`;
+                            li.innerHTML = `<strong>${escapeHtml(inner)}</strong>`;
                         } else {
                             li.textContent = inner;
                         }
@@ -5579,7 +5836,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Variation ID line if present
                 if (variantId) {
                     const spanVar = document.createElement('div');
-                    spanVar.innerHTML = `<strong>Variation ID:</strong> ${variantId}`;
+                    spanVar.innerHTML = `<strong>Variation ID:</strong> ${escapeHtml(variantId)}`;
                     content.appendChild(spanVar);
                 }
                 // Significance summary. Kept in a reference so the per-variant VCV
@@ -5588,10 +5845,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const spanSig = document.createElement('div');
                 let haveSignificance = false;
                 if (sigSummary.length > 0) {
-                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${sigSummary.join('; ')}`;
+                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${sigSummary.map(escapeHtml).join('; ')}`;
                     haveSignificance = true;
                 } else if (recoveredSignificance) {
-                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${recoveredSignificance}`;
+                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${escapeHtml(recoveredSignificance)}`;
                     haveSignificance = true;
                 } else {
                     spanSig.innerHTML = `<strong>Clinical significance:</strong> N/A`;
@@ -5608,7 +5865,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Conditions summary (show up to 3, rest collapsed)
                 if (conditionsList.length > 0) {
                     const spanCond = document.createElement('div');
-                    const displayConds = conditionsList.slice(0, 3).join(', ');
+                    const displayConds = conditionsList.slice(0, 3).map(escapeHtml).join(', ');
                     spanCond.innerHTML = `<strong>Conditions:</strong> ${displayConds}${conditionsList.length > 3 ? '…' : ''}`;
                     content.appendChild(spanCond);
                 }
@@ -5622,18 +5879,18 @@ document.addEventListener('DOMContentLoaded', () => {
                             // region pull carried no germline classification), fall back to
                             // the germline classification from the full VCV record.
                             if (!haveSignificance && cvData.germline && cvData.germline.description) {
-                                spanSig.innerHTML = `<strong>Clinical significance:</strong> ${cvData.germline.description}`;
+                                spanSig.innerHTML = `<strong>Clinical significance:</strong> ${escapeHtml(cvData.germline.description)}`;
                                 haveSignificance = true;
                             }
                             if (cvData.somatic && cvData.somatic.description) {
                                 const somaticDiv = document.createElement('div');
                                 somaticDiv.style.marginTop = '0.25rem';
-                                somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${cvData.somatic.description}`;
+                                somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${escapeHtml(cvData.somatic.description)}`;
                                 content.appendChild(somaticDiv);
                             }
                             if (cvData.oncogenicity && cvData.oncogenicity.description) {
                                 const oncDiv = document.createElement('div');
-                                oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${cvData.oncogenicity.description}`;
+                                oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${escapeHtml(cvData.oncogenicity.description)}`;
                                 content.appendChild(oncDiv);
                             }
                             if (cvData.somaticConditions && cvData.somaticConditions.length > 0) {
@@ -5646,10 +5903,10 @@ document.addEventListener('DOMContentLoaded', () => {
                                 cvData.somaticConditions.forEach((sc) => {
                                     const li = document.createElement('li');
                                     const parts = [];
-                                    if (sc.condition) parts.push(`<strong>${sc.condition}</strong>`);
+                                    if (sc.condition) parts.push(`<strong>${escapeHtml(sc.condition)}</strong>`);
                                     // Combine tier + assertion type + clinical significance into one readable string.
                                     const impactParts = [sc.tier, sc.assertionType, sc.clinSig].filter(Boolean);
-                                    if (impactParts.length) parts.push(impactParts.join(' — '));
+                                    if (impactParts.length) parts.push(escapeHtml(impactParts.join(' — ')));
                                     li.innerHTML = parts.join(': ');
                                     scUl.appendChild(li);
                                 });
@@ -5880,10 +6137,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             nearby.forEach((v) => {
                                 const li = document.createElement('li');
                                 const color = getPathogenicityColor(v.germline, v);
-                                const sigSpan = `<span style="color:${color};font-weight:600">${v.germline || 'Unknown'}</span>`;
-                                const posInfo = v.pos ? ` · pos ${v.pos}` : '';
-                                const cvLink = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${v.id}</a>`;
-                                li.innerHTML = `${sigSpan}${posInfo} — ${v.title || cvLink}`;
+                                const sigSpan = `<span style="color:${color};font-weight:600">${escapeHtml(v.germline || 'Unknown')}</span>`;
+                                const posInfo = v.pos ? ` · pos ${escapeHtml(String(v.pos))}` : '';
+                                const cvLink = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${encodeURIComponent(v.id)}/" target="_blank" rel="noopener noreferrer">${escapeHtml(String(v.id))}</a>`;
+                                li.innerHTML = `${sigSpan}${posInfo} — ${v.title ? escapeHtml(v.title) : cvLink}`;
                                 ul.appendChild(li);
                             });
                             listDet.appendChild(ul);
@@ -5940,7 +6197,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (value === null || value === undefined || value === '') return;
                     const div = document.createElement('div');
                     div.style.marginBottom = '0.2rem';
-                    div.innerHTML = `<strong>${label}:</strong> ${value}`;
+                    div.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}`;
                     content.appendChild(div);
                 };
 
@@ -6132,7 +6389,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                         const { gene: apiGene, matchedVariant, assertions } = civicApiData;
                         if (!apiGene) {
-                            civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${civicGene}" not found in CIViC.</div>`;
+                            civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${escapeHtml(civicGene)}" not found in CIViC.</div>`;
                             return;
                         }
 
@@ -6161,7 +6418,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (ampLevel) {
                                 const ampEl = document.createElement('div');
                                 ampEl.style.cssText = 'font-size:0.9rem;font-weight:600;margin-bottom:4px;';
-                                ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${ampLevel}`;
+                                ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${escapeHtml(ampLevel)}`;
                                 civicApiDiv.appendChild(ampEl);
                             }
                         }
@@ -6173,7 +6430,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 : '';
                             const varEl = document.createElement('div');
                             varEl.style.fontSize = '0.88rem';
-                            varEl.innerHTML = `<strong>CIViC variant:</strong> ${matchedVariant.name}${vTypes ? ` <span style="color:#6b7280">(${vTypes})</span>` : ''} — <a href="https://civicdb.org/variants/${matchedVariant.id}/summary" target="_blank" rel="noopener noreferrer">View ↗</a>`;
+                            varEl.innerHTML = `<strong>CIViC variant:</strong> ${escapeHtml(matchedVariant.name)}${vTypes ? ` <span style="color:#6b7280">(${escapeHtml(vTypes)})</span>` : ''} — <a href="https://civicdb.org/variants/${encodeURIComponent(matchedVariant.id)}/summary" target="_blank" rel="noopener noreferrer">View ↗</a>`;
                             civicApiDiv.appendChild(varEl);
                         }
 
@@ -6442,7 +6699,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         return;
                     }
                     const showV4Msg = (msg) => {
-                        v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${msg}</div>`;
+                        v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${escapeHtml(msg)}</div>`;
                     };
                     fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
                         // Drop sex-stratified (_XX/_XY) and 1000 Genomes (1KG:*)
@@ -6655,7 +6912,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     } else {
                         emojis.push(classify(val, name));
                     }
-                    summaryParts.push(`<strong>${name}</strong>: ${emojis.join('/')}`);
+                    summaryParts.push(`<strong>${escapeHtml(name)}</strong>: ${emojis.join('/')}`);
                 });
                 const card = document.createElement('div');
                 card.className = 'card';
@@ -6678,7 +6935,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const list = document.createElement('ul');
                     Object.entries(items).forEach(([n, v]) => {
                         const li = document.createElement('li');
-                        li.innerHTML = `<strong>${n}</strong>: ${v}`;
+                        li.innerHTML = `<strong>${escapeHtml(n)}</strong>: ${escapeHtml(v)}`;
                         list.appendChild(li);
                     });
                     detailsEl.appendChild(list);
@@ -6721,7 +6978,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const content = document.createElement('div');
                 content.className = 'card-content';
                 const sigSpan = document.createElement('span');
-                sigSpan.innerHTML = `<strong>Oncogenicity:</strong> ${oncogenic || 'N/A'}`;
+                sigSpan.innerHTML = `<strong>Oncogenicity:</strong> ${escapeHtml(oncogenic || 'N/A')}`;
                 content.appendChild(sigSpan);
                 // Append links
                 if (variantLink) {
@@ -6763,20 +7020,20 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Total tumors summary
                     if (items['Total Tumors'] !== undefined) {
                         const span = document.createElement('span');
-                        span.innerHTML = `<strong>Found in:</strong> ${items['Total Tumors']} tumor${items['Total Tumors'] === 1 ? '' : 's'}`;
+                        span.innerHTML = `<strong>Found in:</strong> ${escapeHtml(items['Total Tumors'])} tumor${items['Total Tumors'] === 1 ? '' : 's'}`;
                         content.appendChild(span);
                     }
                     // Frequency overall
                     if (items['Frequency (overall)']) {
                         const p = document.createElement('p');
-                        p.innerHTML = `<strong>Frequency (overall):</strong> ${items['Frequency (overall)']}`;
+                        p.innerHTML = `<strong>Frequency (overall):</strong> ${escapeHtml(items['Frequency (overall)'])}`;
                         content.appendChild(p);
                     }
                     // Find the key that starts with "Frequency in" (gene-specific frequency)
                     Object.keys(items).forEach(key => {
                         if (key.startsWith('Frequency in')) {
                             const p = document.createElement('p');
-                            p.innerHTML = `<strong>${key}:</strong> ${items[key]}`;
+                            p.innerHTML = `<strong>${escapeHtml(key)}:</strong> ${escapeHtml(items[key])}`;
                             content.appendChild(p);
                         }
                     });
@@ -6797,7 +7054,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const items = cosmicBase.items;
                     if (items['Mutation Frequency'] !== undefined) {
                         const span = document.createElement('span');
-                        span.innerHTML = `<strong>Mutation Frequency:</strong> ${items['Mutation Frequency']}`;
+                        span.innerHTML = `<strong>Mutation Frequency:</strong> ${escapeHtml(items['Mutation Frequency'])}`;
                         content.appendChild(span);
                     }
                     // Add any other COSMIC base items except those with html
@@ -6805,7 +7062,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (k === 'Mutation Frequency') return;
                         if (v && typeof v === 'object' && v.html) return;
                         const p = document.createElement('p');
-                        p.innerHTML = `<strong>${k}:</strong> ${v}`;
+                        p.innerHTML = `<strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}`;
                         content.appendChild(p);
                     });
                 } else {
@@ -6844,7 +7101,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 tp53Content.appendChild(summary);
 
                 const variantSummary = document.createElement('span');
-                variantSummary.innerHTML = `<strong>Variant:</strong> ${tp53Protein || tp53Cdna || tp53Genomic || 'N/A'}`;
+                variantSummary.innerHTML = `<strong>Variant:</strong> ${escapeHtml(tp53Protein || tp53Cdna || tp53Genomic || 'N/A')}`;
                 tp53Content.appendChild(variantSummary);
 
                 const dbHomeUrl = 'https://tp53.cancer.gov/';
@@ -7460,7 +7717,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             const bestEl = document.createElement('div');
                             bestEl.style.cssText = 'font-size:0.86rem;margin-bottom:4px;';
                             const pct = (summary.best.value * 100).toFixed(1);
-                            bestEl.innerHTML = `<strong>Max delta score:</strong> ${summary.best.value.toFixed(3)} (${pct}%) ${summary.best.label}${summary.best.position !== null ? ` at ${summary.best.position}` : ''}${summary.best.transcript ? ` · ${summary.best.transcript}` : ''}`;
+                            bestEl.innerHTML = `<strong>Max delta score:</strong> ${summary.best.value.toFixed(3)} (${pct}%) ${escapeHtml(summary.best.label)}${summary.best.position !== null ? ` at ${escapeHtml(String(summary.best.position))}` : ''}${summary.best.transcript ? ` · ${escapeHtml(summary.best.transcript)}` : ''}`;
                             spliceResultsDiv.appendChild(bestEl);
                         }
                         const tableWrapper = document.createElement('div');
@@ -7877,7 +8134,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
                             ofResultsDiv.innerHTML = '';
                             if (!ofResults || ofResults.length === 0) {
-                                ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${firstGene}.</div>`;
+                                ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${escapeHtml(firstGene)}.</div>`;
                                 return;
                             }
                             const OF_PREVIEW = 7;
@@ -8371,162 +8628,82 @@ document.addEventListener('DOMContentLoaded', () => {
                         guidelinesResults.appendChild(sourceNote);
 
                     } catch (err) {
-                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${err.message}</div>`;
+                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${escapeHtml(err.message)}</div>`;
                         aiReviewExtras.guidelines = { error: err.message, cancer_type: selectedCancer, gene };
                     }
                 });
             }
 
             // Optional AI review card (manual trigger; sends current annotation context to OpenRouter via backend proxy).
-            {
-                const aiCard = document.createElement('div');
-                aiCard.className = 'card ai-review-card';
-                const aiTitle = document.createElement('h3');
-                aiTitle.textContent = 'Optional AI Review';
-                applyCardTheme(aiCard, 'Optional AI Review');
-                aiCard.appendChild(aiTitle);
-
-                const aiContent = document.createElement('div');
-                aiContent.className = 'card-content ai-review-content';
-
-                const aiIntro = document.createElement('p');
-                aiIntro.className = 'ai-review-intro';
-                aiIntro.textContent = 'Send the retrieved variant data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.';
-                aiContent.appendChild(aiIntro);
-
-                const controls = document.createElement('div');
-                controls.className = 'ai-review-controls';
-
-                const modelLabel = document.createElement('label');
-                modelLabel.textContent = 'Model';
-                modelLabel.setAttribute('for', 'aiReviewModelSelect');
-                controls.appendChild(modelLabel);
-
-                const modelSelect = document.createElement('select');
-                modelSelect.id = 'aiReviewModelSelect';
-                OPENROUTER_MODEL_OPTIONS.forEach((modelName) => {
-                    const opt = document.createElement('option');
-                    opt.value = modelName;
-                    opt.textContent = modelName;
-                    modelSelect.appendChild(opt);
-                });
-                controls.appendChild(modelSelect);
-
-                const runButton = document.createElement('button');
-                runButton.type = 'button';
-                runButton.textContent = 'Run AI review';
-                controls.appendChild(runButton);
-
-                aiContent.appendChild(controls);
-
-                const notesWrap = document.createElement('div');
-                notesWrap.className = 'ai-review-notes';
-                const notesLabel = document.createElement('label');
-                notesLabel.setAttribute('for', 'aiReviewNotes');
-                notesLabel.textContent = 'Any additional notes for AI review';
-                notesWrap.appendChild(notesLabel);
-                const notesInput = document.createElement('textarea');
-                notesInput.id = 'aiReviewNotes';
-                notesInput.rows = 3;
-                notesInput.placeholder = 'Optional — extra clinical context, prior therapies, specific questions, etc.';
-                notesWrap.appendChild(notesInput);
-                aiContent.appendChild(notesWrap);
-
-                const aiContextInspector = document.createElement('details');
-                aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
-                const aiContextInspectorSummary = document.createElement('summary');
-                aiContextInspectorSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;list-style:revert;font-size:0.79rem;';
-                aiContextInspectorSummary.textContent = 'Context sent to AI (populated after run)';
-                aiContextInspector.appendChild(aiContextInspectorSummary);
-                const aiContextPre = document.createElement('pre');
-                aiContextPre.style.cssText = 'font-size:0.73rem;white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e5e7eb;padding:8px;border-radius:4px;margin-top:4px;max-height:400px;overflow-y:auto;color:#374151;';
-                aiContextPre.textContent = 'Run AI review to populate this section.';
-                aiContextInspector.appendChild(aiContextPre);
-                aiContent.appendChild(aiContextInspector);
-
-                const aiOutput = document.createElement('div');
-                aiOutput.className = 'ai-review-output';
-                aiContent.appendChild(aiOutput);
-                aiCard.appendChild(aiContent);
-                cardsContainer.appendChild(aiCard);
-
-                runButton.addEventListener('click', async () => {
-                    runButton.disabled = true;
-                    const previousText = runButton.textContent;
-                    runButton.textContent = 'Running…';
-                    aiOutput.innerHTML = '<div class="ai-review-loading">Gathering FDA, trial, and annotation context for AI review…</div>';
-                    try {
-                        const [fdaRecords, bbkbTherapies, clinicalTrialData, supplementalContext] = await Promise.all([
-                            aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
-                            aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null),
-                            aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
-                            fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
-                        ]);
-                        const userNotes = (notesInput.value || '').trim();
-                        const aiContext = {
-                            submitted_variant: rawInput,
-                            normalized_genomic_variant: gVariant,
-                            tumor_type: tumorType,
-                            user_notes: userNotes || undefined,
-                            gene: aiReviewGene,
-                            genes: geneNames,
-                            selected_variant_term: aiReviewSearchVariantTerm,
-                            cdna: aiReviewCdna,
-                            protein: aiReviewProtein,
-                            summary_rows: summaryRows,
-                            details: detailsData,
-                            transcripts: transcriptsList,
-                            fda_companion_diagnostics_records: fdaRecords,
-                            bbkb_biomarker_therapies: bbkbTherapies,
-                            clinical_trials: clinicalTrialData,
-                            supplemental_card_data: supplementalContext,
-                            myvariant_annotation: (() => {
-                                if (!annotation) return null;
-                                const { clinvar, civic, gnomad_exome, dbsnp } = annotation;
-                                // Use dedicated API results when available; fall back to myvariant.info
-                                // only when the dedicated call failed or returned no data.
-                                const clinvarOk = supplementalContext?.clinvar_variant_record && !supplementalContext.clinvar_variant_record.error;
-                                const civicOk = supplementalContext?.civic_api?.gene != null;
-                                const gnomadOk = supplementalContext?.gnomad_v4?.status === 'found';
-                                const trimmed = {};
-                                if (!clinvarOk && clinvar) trimmed.clinvar = clinvar;
-                                if (!civicOk && civic) trimmed.civic = civic;
-                                if (!gnomadOk && gnomad_exome) trimmed.gnomad_exome = gnomad_exome;
-                                if (dbsnp) {
-                                    // Drop noisy fields that don't help variant interpretation:
-                                    // - gene.rnas: ~15 transcript entries that all report the reference
-                                    //   SPDI (e.g. c.818=), not the variant itself.
-                                    // - citations: bare PMID list with no titles/abstracts.
-                                    const { citations: _dbsnpCitations, gene: dbsnpGene, ...dbsnpRest } = dbsnp;
-                                    let trimmedGene = dbsnpGene;
-                                    if (dbsnpGene && typeof dbsnpGene === 'object') {
-                                        const { rnas: _dbsnpRnas, ...geneRest } = dbsnpGene;
-                                        trimmedGene = geneRest;
-                                    }
-                                    trimmed.dbsnp = trimmedGene !== undefined
-                                        ? { ...dbsnpRest, gene: trimmedGene }
-                                        : dbsnpRest;
-                                }
-                                return Object.keys(trimmed).length > 0 ? trimmed : null;
-                            })(),
-                            ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
-                        };
-                        aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
-                        aiContextInspectorSummary.textContent = 'Context sent to AI';
-                        const data = await fetchAiReview(aiContext, modelSelect.value);
-                        renderAiReview(data.review, aiOutput);
-                    } catch (err) {
-                        aiOutput.innerHTML = '';
-                        const errorEl = document.createElement('div');
-                        errorEl.className = 'ai-review-error';
-                        errorEl.textContent = `AI review unavailable: ${err.message}`;
-                        aiOutput.appendChild(errorEl);
-                    } finally {
-                        runButton.disabled = false;
-                        runButton.textContent = previousText;
+            createAiReviewCard({
+                container: cardsContainer,
+                idSuffix: '',
+                introText: 'Send the retrieved variant data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
+                loadingText: 'Gathering FDA, trial, and annotation context for AI review…',
+                buildContext: async (userNotes) => {
+                    const [fdaRecords, bbkbTherapies, clinicalTrialData, supplementalContext] = await Promise.all([
+                        aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
+                        aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null),
+                        aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
+                        fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
+                    ]);
+                    // Cap the openFDA record count (the dominant payload for drug-rich genes)
+                    // on the shallow supplemental copy, keeping each record's full text and
+                    // leaving the on-screen card data intact. supplementalContext is fresh per run.
+                    if (supplementalContext && typeof supplementalContext === 'object') {
+                        if (supplementalContext.openfda_drug_labels) supplementalContext.openfda_drug_labels = condenseOpenFdaForAi(supplementalContext.openfda_drug_labels);
+                        if (supplementalContext.openfda) supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
                     }
-                });
-            }
+                    return {
+                        submitted_variant: rawInput,
+                        normalized_genomic_variant: gVariant,
+                        tumor_type: tumorType,
+                        user_notes: userNotes || undefined,
+                        gene: aiReviewGene,
+                        genes: geneNames,
+                        selected_variant_term: aiReviewSearchVariantTerm,
+                        cdna: aiReviewCdna,
+                        protein: aiReviewProtein,
+                        summary_rows: summaryRows,
+                        details: detailsData,
+                        transcripts: transcriptsList,
+                        fda_companion_diagnostics_records: fdaRecords,
+                        bbkb_biomarker_therapies: bbkbTherapies,
+                        clinical_trials: clinicalTrialData,
+                        supplemental_card_data: supplementalContext,
+                        myvariant_annotation: (() => {
+                            if (!annotation) return null;
+                            const { clinvar, civic, gnomad_exome, dbsnp } = annotation;
+                            // Use dedicated API results when available; fall back to myvariant.info
+                            // only when the dedicated call failed or returned no data.
+                            const clinvarOk = supplementalContext?.clinvar_variant_record && !supplementalContext.clinvar_variant_record.error;
+                            const civicOk = supplementalContext?.civic_api?.gene != null;
+                            const gnomadOk = supplementalContext?.gnomad_v4?.status === 'found';
+                            const trimmed = {};
+                            if (!clinvarOk && clinvar) trimmed.clinvar = clinvar;
+                            if (!civicOk && civic) trimmed.civic = civic;
+                            if (!gnomadOk && gnomad_exome) trimmed.gnomad_exome = gnomad_exome;
+                            if (dbsnp) {
+                                // Drop noisy fields that don't help variant interpretation:
+                                // - gene.rnas: ~15 transcript entries that all report the reference
+                                //   SPDI (e.g. c.818=), not the variant itself.
+                                // - citations: bare PMID list with no titles/abstracts.
+                                const { citations: _dbsnpCitations, gene: dbsnpGene, ...dbsnpRest } = dbsnp;
+                                let trimmedGene = dbsnpGene;
+                                if (dbsnpGene && typeof dbsnpGene === 'object') {
+                                    const { rnas: _dbsnpRnas, ...geneRest } = dbsnpGene;
+                                    trimmedGene = geneRest;
+                                }
+                                trimmed.dbsnp = trimmedGene !== undefined
+                                    ? { ...dbsnpRest, gene: trimmedGene }
+                                    : dbsnpRest;
+                            }
+                            return Object.keys(trimmed).length > 0 ? trimmed : null;
+                        })(),
+                        ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
+                    };
+                }
+            });
 
             // Show cards and hide legacy tables for a cleaner view
             cardsContainer.classList.remove('hidden');
