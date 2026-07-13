@@ -204,33 +204,6 @@ function normaliseVariantTypes(variantTypes) {
     return { nodes: [] };
 }
 
-// Step 3: fetch assertions
-async function fetchAssertions(geneId, geneName) {
-    const assertionsQuery = `
-        query CivicAssertionsForGene($name: String!) {
-            assertions(molecularProfileName: $name, status: ACCEPTED, first: 25) {
-                nodes {
-                    id
-                    ampLevel
-                    assertionType
-                    significance
-                    summary
-                    disease { name }
-                    therapies { name }
-                }
-            }
-        }
-    `;
-
-    const rA = await civicPost(assertionsQuery, { name: geneName || '' });
-
-    if (!rA.errors?.length && rA.data?.assertions) {
-        return normaliseAssertions(rA.data.assertions.nodes || []);
-    }
-
-    return [];
-}
-
 function normaliseAssertions(assertions) {
     const seen = new Set();
     return assertions
@@ -262,6 +235,27 @@ function collectAssertionsFromGene(gene) {
     return normaliseAssertions(nested);
 }
 
+// Assertions for the matched variant specifically, plus gene-wide assertions as a
+// fallback/supplement (in case a variant isn't covered per-variant). Variant-specific
+// assertions come first and are tagged scope: 'variant'; remaining gene-level ones are
+// tagged scope: 'gene'. Deduplicated by id across both sets. (CIViC molecular profiles
+// are named per-variant, e.g. "BRAF V600E", so the previous
+// assertions(molecularProfileName: <geneSymbol>) query never matched and was dead.)
+function buildAssertions(matchedVariant, gene) {
+    const variantNodes = matchedVariant?.singleVariantMolecularProfile?.assertions?.nodes || [];
+    const variantAssertions = normaliseAssertions(variantNodes).map(a => ({ ...a, scope: 'variant' }));
+    const geneAssertions = collectAssertionsFromGene(gene).map(a => ({ ...a, scope: 'gene' }));
+
+    const seen = new Set(variantAssertions.map(a => a.id).filter(id => id != null));
+    const merged = [...variantAssertions];
+    for (const a of geneAssertions) {
+        if (a.id != null && seen.has(a.id)) continue;
+        if (a.id != null) seen.add(a.id);
+        merged.push(a);
+    }
+    return merged;
+}
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
@@ -286,10 +280,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ gene: null, matchedVariant: null, assertions: [], queryErrors });
     }
 
-    const [fullGene, fetchedAssertions] = await Promise.all([
-        fetchGeneById(geneId),
-        fetchAssertions(geneId, geneName)
-    ]);
+    const fullGene = await fetchGeneById(geneId);
 
     const apiGene = fullGene || {
         id: geneId,
@@ -297,11 +288,6 @@ export default async function handler(req, res) {
         description: '',
         variants: { nodes: [] }
     };
-
-    let assertions = fetchedAssertions;
-    if (!assertions || assertions.length === 0) {
-        assertions = collectAssertionsFromGene(apiGene);
-    }
 
     let matchedVariant = null;
 
@@ -336,6 +322,9 @@ export default async function handler(req, res) {
         }
         if (!matchedVariant) matchedVariant = bestSubstring;
     }
+
+    // Assertions scoped to the matched variant, plus gene-wide as supplement/fallback.
+    const assertions = buildAssertions(matchedVariant, apiGene);
 
     return res.status(200).json({ gene: apiGene, matchedVariant, assertions });
 }
