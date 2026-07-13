@@ -932,6 +932,21 @@ function escapeHtml(text) {
     ));
 }
 
+// Return a URL that is safe to place in an href, or '' when it isn't. Only http(s)
+// and mailto schemes are allowed, so untrusted values (e.g. a CIViC source URL or a
+// model-supplied link) can't smuggle in `javascript:`/`data:` schemes. The result is
+// NOT HTML-escaped — escape it separately when interpolating into an attribute.
+function safeUrl(url) {
+    const raw = String(url ?? '').trim();
+    if (!raw) return '';
+    try {
+        const parsed = new URL(raw, window.location.href);
+        return /^(https?:|mailto:)$/i.test(parsed.protocol) ? raw : '';
+    } catch {
+        return '';
+    }
+}
+
 // Render a ClinVar review status as its 0–4 gold-star confidence rating
 // (matching the stars on the ClinVar website), or '' when no status is given.
 // e.g. "criteria provided, single submitter" → ★☆☆☆.
@@ -1251,7 +1266,7 @@ function renderBbkbBiomarkerTherapies(panel, gene, aiExtras) {
         const records = data.results || [];
         resultsDiv.innerHTML = '';
         if (!records.length) {
-            resultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No BBKB biomarker–therapy records found for ${gene}.</div>`;
+            resultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No BBKB biomarker–therapy records found for ${escapeHtml(gene)}.</div>`;
             return;
         }
         const countEl = document.createElement('div');
@@ -2003,9 +2018,10 @@ function appendListOrEmpty(parent, values, emptyText) {
                 value.relevance,
                 value.evidence
             ].filter(Boolean);
-            if (value.url) {
+            const href = safeUrl(value.url);
+            if (href) {
                 const a = document.createElement('a');
-                a.href = value.url;
+                a.href = href;
                 a.target = '_blank';
                 a.rel = 'noopener noreferrer';
                 a.textContent = title;
@@ -2800,7 +2816,10 @@ function buildDetailsData(annotation, rawInput, gVariant) {
             if (c.entrez_id !== undefined) civic['Entrez ID'] = c.entrez_id;
             if (c.evidence_items && Array.isArray(c.evidence_items)) civic['Evidence Items'] = c.evidence_items.length;
             if (c.evidence_level) civic['Evidence Level'] = c.evidence_level;
-            if (c.source && c.source.url) civic['CIViC Source'] = { html: `<a href="${c.source.url}" target="_blank" rel="noopener noreferrer">${c.source.url}</a>` };
+            if (c.source && c.source.url) {
+                const srcUrl = safeUrl(c.source.url);
+                if (srcUrl) civic['CIViC Source'] = { html: `<a href="${escapeHtml(srcUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(c.source.url)}</a>` };
+            }
             if (Object.keys(civic).length > 0) details.push({ title: 'CIViC', items: civic });
         } else {
             // Use whichever array of evidence entries is available (annotation.cgi or annotation.civic if array)
@@ -3419,7 +3438,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                     const { gene: apiGene, matchedVariant, assertions } = civicApiData;
                     if (!apiGene) {
-                        civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${gene}" not found in CIViC.</div>`;
+                        civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${escapeHtml(gene)}" not found in CIViC.</div>`;
                         return;
                     }
 
@@ -3440,7 +3459,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (ampLevel) {
                             const ampEl = document.createElement('div');
                             ampEl.style.cssText = 'font-size:0.9rem;font-weight:600;margin-bottom:4px;';
-                            ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${ampLevel}`;
+                            ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${escapeHtml(ampLevel)}`;
                             civicApiDiv.appendChild(ampEl);
                         }
                     }
@@ -3952,7 +3971,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
                     ofResultsDiv.innerHTML = '';
                     if (!ofResults || ofResults.length === 0) {
-                        ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${gene}.</div>`;
+                        ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${escapeHtml(gene)}.</div>`;
                         return;
                     }
                     const OF_PREVIEW = 7;
@@ -4416,7 +4435,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         sourceNote.textContent = 'Source: drdoubleb.com/guidelines. For reference only — verify against current published guidelines.';
                         guidelinesResults.appendChild(sourceNote);
                     } catch (err) {
-                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${err.message}</div>`;
+                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${escapeHtml(err.message)}</div>`;
                         geneOnlyAiExtras.guidelines = { error: err.message, cancer_type: selectedCancer, gene };
                     }
                 });
@@ -5034,7 +5053,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (cosmicData.COSMIC_GENE) {
                             const encodedGene = encodeURIComponent(cosmicData.COSMIC_GENE);
                             const geneLink = `https://cancer.sanger.ac.uk/cosmic/gene/analysis?ln=${encodedGene}`;
-                            cosmicItems['COSMIC Gene Page'] = { html: `<a href="${geneLink}" target="_blank" rel="noopener noreferrer">View analysis for ${cosmicData.COSMIC_GENE}</a>` };
+                            cosmicItems['COSMIC Gene Page'] = { html: `<a href="${geneLink}" target="_blank" rel="noopener noreferrer">View analysis for ${escapeHtml(cosmicData.COSMIC_GENE)}</a>` };
                         }
                         // Site counts with per-type frequencies and gene-specific frequencies
                         if (cosmicData.COSMIC_SITE_COUNTS) {
@@ -5042,12 +5061,12 @@ document.addEventListener('DOMContentLoaded', () => {
                             for (const [type, info] of Object.entries(cosmicData.COSMIC_SITE_COUNTS)) {
                                 const count = info.count || 0;
                                 const samplesWithGeneType = info.samples_with_gene_in_type || 1;
-                                let rowText = `${type}: ${count} tumor${count === 1 ? '' : 's'}`;
+                                let rowText = `${escapeHtml(type)}: ${count} tumor${count === 1 ? '' : 's'}`;
                                 if (meta && meta.total_samples_by_cancer_type && meta.total_samples_by_cancer_type[type]) {
                                     const typeTotal = meta.total_samples_by_cancer_type[type] || 1;
                                     const typeFreq = ((count / typeTotal) * 100).toFixed(2);
                                     const geneFreqType = ((count / samplesWithGeneType) * 100).toFixed(2);
-                                    rowText += ` (${typeFreq}% of ${type}, ${geneFreqType}% with ${geneNameForDisplay})`;
+                                    rowText += ` (${typeFreq}% of ${escapeHtml(type)}, ${geneFreqType}% with ${escapeHtml(geneNameForDisplay)})`;
                                 }
                                 siteRows.push(`<li>${rowText}</li>`);
                             }
@@ -5587,7 +5606,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 content.className = 'card-content';
                 const makeLine = (label, value) => {
                     const span = document.createElement('span');
-                    span.innerHTML = `<strong>${label}:</strong> ${value || 'N/A'}`;
+                    span.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${value ? escapeHtml(value) : 'N/A'}`;
                     return span;
                 };
                 content.appendChild(makeLine('g.', gVariant));
@@ -5654,7 +5673,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 content.appendChild(makeLine('Effect', effect));
                 const ucscUrl = buildUcscHg19Url(rawInput, gVariant, annotation);
                 if (ucscUrl) {
-                    content.appendChild(makeLine('UCSC (hg19)', `<a href="${ucscUrl}" target="_blank" rel="noopener noreferrer">Zoom to region</a>`));
+                    // Build with DOM nodes rather than makeLine (which escapes its value) so the
+                    // link renders as a real anchor.
+                    const ucscSpan = document.createElement('span');
+                    const ucscLabel = document.createElement('strong');
+                    ucscLabel.textContent = 'UCSC (hg19):';
+                    ucscSpan.appendChild(ucscLabel);
+                    ucscSpan.appendChild(document.createTextNode(' '));
+                    const ucscLink = document.createElement('a');
+                    ucscLink.href = ucscUrl;
+                    ucscLink.target = '_blank';
+                    ucscLink.rel = 'noopener noreferrer';
+                    ucscLink.textContent = 'Zoom to region';
+                    ucscSpan.appendChild(ucscLink);
+                    content.appendChild(ucscSpan);
                 }
                 // Append list of transcripts showing cDNA and protein for each transcript in a collapsible details element
                 if (transcriptsList && transcriptsList.length > 1) {
@@ -5670,7 +5702,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         let inner = `${t.transcript}: ${t.cDNA}`;
                         if (t.protein) inner += `, ${t.protein}`;
                         if (t.canonical) {
-                            li.innerHTML = `<strong>${inner}</strong>`;
+                            li.innerHTML = `<strong>${escapeHtml(inner)}</strong>`;
                         } else {
                             li.textContent = inner;
                         }
@@ -5801,7 +5833,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Variation ID line if present
                 if (variantId) {
                     const spanVar = document.createElement('div');
-                    spanVar.innerHTML = `<strong>Variation ID:</strong> ${variantId}`;
+                    spanVar.innerHTML = `<strong>Variation ID:</strong> ${escapeHtml(variantId)}`;
                     content.appendChild(spanVar);
                 }
                 // Significance summary. Kept in a reference so the per-variant VCV
@@ -5810,10 +5842,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const spanSig = document.createElement('div');
                 let haveSignificance = false;
                 if (sigSummary.length > 0) {
-                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${sigSummary.join('; ')}`;
+                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${sigSummary.map(escapeHtml).join('; ')}`;
                     haveSignificance = true;
                 } else if (recoveredSignificance) {
-                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${recoveredSignificance}`;
+                    spanSig.innerHTML = `<strong>Clinical significance:</strong> ${escapeHtml(recoveredSignificance)}`;
                     haveSignificance = true;
                 } else {
                     spanSig.innerHTML = `<strong>Clinical significance:</strong> N/A`;
@@ -5830,7 +5862,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Conditions summary (show up to 3, rest collapsed)
                 if (conditionsList.length > 0) {
                     const spanCond = document.createElement('div');
-                    const displayConds = conditionsList.slice(0, 3).join(', ');
+                    const displayConds = conditionsList.slice(0, 3).map(escapeHtml).join(', ');
                     spanCond.innerHTML = `<strong>Conditions:</strong> ${displayConds}${conditionsList.length > 3 ? '…' : ''}`;
                     content.appendChild(spanCond);
                 }
@@ -5844,18 +5876,18 @@ document.addEventListener('DOMContentLoaded', () => {
                             // region pull carried no germline classification), fall back to
                             // the germline classification from the full VCV record.
                             if (!haveSignificance && cvData.germline && cvData.germline.description) {
-                                spanSig.innerHTML = `<strong>Clinical significance:</strong> ${cvData.germline.description}`;
+                                spanSig.innerHTML = `<strong>Clinical significance:</strong> ${escapeHtml(cvData.germline.description)}`;
                                 haveSignificance = true;
                             }
                             if (cvData.somatic && cvData.somatic.description) {
                                 const somaticDiv = document.createElement('div');
                                 somaticDiv.style.marginTop = '0.25rem';
-                                somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${cvData.somatic.description}`;
+                                somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${escapeHtml(cvData.somatic.description)}`;
                                 content.appendChild(somaticDiv);
                             }
                             if (cvData.oncogenicity && cvData.oncogenicity.description) {
                                 const oncDiv = document.createElement('div');
-                                oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${cvData.oncogenicity.description}`;
+                                oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${escapeHtml(cvData.oncogenicity.description)}`;
                                 content.appendChild(oncDiv);
                             }
                             if (cvData.somaticConditions && cvData.somaticConditions.length > 0) {
@@ -5868,10 +5900,10 @@ document.addEventListener('DOMContentLoaded', () => {
                                 cvData.somaticConditions.forEach((sc) => {
                                     const li = document.createElement('li');
                                     const parts = [];
-                                    if (sc.condition) parts.push(`<strong>${sc.condition}</strong>`);
+                                    if (sc.condition) parts.push(`<strong>${escapeHtml(sc.condition)}</strong>`);
                                     // Combine tier + assertion type + clinical significance into one readable string.
                                     const impactParts = [sc.tier, sc.assertionType, sc.clinSig].filter(Boolean);
-                                    if (impactParts.length) parts.push(impactParts.join(' — '));
+                                    if (impactParts.length) parts.push(escapeHtml(impactParts.join(' — ')));
                                     li.innerHTML = parts.join(': ');
                                     scUl.appendChild(li);
                                 });
@@ -6102,10 +6134,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             nearby.forEach((v) => {
                                 const li = document.createElement('li');
                                 const color = getPathogenicityColor(v.germline, v);
-                                const sigSpan = `<span style="color:${color};font-weight:600">${v.germline || 'Unknown'}</span>`;
-                                const posInfo = v.pos ? ` · pos ${v.pos}` : '';
-                                const cvLink = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${v.id}/" target="_blank" rel="noopener noreferrer">${v.id}</a>`;
-                                li.innerHTML = `${sigSpan}${posInfo} — ${v.title || cvLink}`;
+                                const sigSpan = `<span style="color:${color};font-weight:600">${escapeHtml(v.germline || 'Unknown')}</span>`;
+                                const posInfo = v.pos ? ` · pos ${escapeHtml(String(v.pos))}` : '';
+                                const cvLink = `<a href="https://www.ncbi.nlm.nih.gov/clinvar/variation/${encodeURIComponent(v.id)}/" target="_blank" rel="noopener noreferrer">${escapeHtml(String(v.id))}</a>`;
+                                li.innerHTML = `${sigSpan}${posInfo} — ${v.title ? escapeHtml(v.title) : cvLink}`;
                                 ul.appendChild(li);
                             });
                             listDet.appendChild(ul);
@@ -6162,7 +6194,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (value === null || value === undefined || value === '') return;
                     const div = document.createElement('div');
                     div.style.marginBottom = '0.2rem';
-                    div.innerHTML = `<strong>${label}:</strong> ${value}`;
+                    div.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}`;
                     content.appendChild(div);
                 };
 
@@ -6354,7 +6386,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                         const { gene: apiGene, matchedVariant, assertions } = civicApiData;
                         if (!apiGene) {
-                            civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${civicGene}" not found in CIViC.</div>`;
+                            civicApiDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${escapeHtml(civicGene)}" not found in CIViC.</div>`;
                             return;
                         }
 
@@ -6383,7 +6415,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (ampLevel) {
                                 const ampEl = document.createElement('div');
                                 ampEl.style.cssText = 'font-size:0.9rem;font-weight:600;margin-bottom:4px;';
-                                ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${ampLevel}`;
+                                ampEl.innerHTML = `<strong>AMP/ACMG tier (CIViC):</strong> ${escapeHtml(ampLevel)}`;
                                 civicApiDiv.appendChild(ampEl);
                             }
                         }
@@ -6395,7 +6427,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 : '';
                             const varEl = document.createElement('div');
                             varEl.style.fontSize = '0.88rem';
-                            varEl.innerHTML = `<strong>CIViC variant:</strong> ${matchedVariant.name}${vTypes ? ` <span style="color:#6b7280">(${vTypes})</span>` : ''} — <a href="https://civicdb.org/variants/${matchedVariant.id}/summary" target="_blank" rel="noopener noreferrer">View ↗</a>`;
+                            varEl.innerHTML = `<strong>CIViC variant:</strong> ${escapeHtml(matchedVariant.name)}${vTypes ? ` <span style="color:#6b7280">(${escapeHtml(vTypes)})</span>` : ''} — <a href="https://civicdb.org/variants/${encodeURIComponent(matchedVariant.id)}/summary" target="_blank" rel="noopener noreferrer">View ↗</a>`;
                             civicApiDiv.appendChild(varEl);
                         }
 
@@ -6664,7 +6696,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         return;
                     }
                     const showV4Msg = (msg) => {
-                        v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${msg}</div>`;
+                        v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${escapeHtml(msg)}</div>`;
                     };
                     fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
                         // Drop sex-stratified (_XX/_XY) and 1000 Genomes (1KG:*)
@@ -6877,7 +6909,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     } else {
                         emojis.push(classify(val, name));
                     }
-                    summaryParts.push(`<strong>${name}</strong>: ${emojis.join('/')}`);
+                    summaryParts.push(`<strong>${escapeHtml(name)}</strong>: ${emojis.join('/')}`);
                 });
                 const card = document.createElement('div');
                 card.className = 'card';
@@ -6900,7 +6932,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const list = document.createElement('ul');
                     Object.entries(items).forEach(([n, v]) => {
                         const li = document.createElement('li');
-                        li.innerHTML = `<strong>${n}</strong>: ${v}`;
+                        li.innerHTML = `<strong>${escapeHtml(n)}</strong>: ${escapeHtml(v)}`;
                         list.appendChild(li);
                     });
                     detailsEl.appendChild(list);
@@ -6943,7 +6975,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const content = document.createElement('div');
                 content.className = 'card-content';
                 const sigSpan = document.createElement('span');
-                sigSpan.innerHTML = `<strong>Oncogenicity:</strong> ${oncogenic || 'N/A'}`;
+                sigSpan.innerHTML = `<strong>Oncogenicity:</strong> ${escapeHtml(oncogenic || 'N/A')}`;
                 content.appendChild(sigSpan);
                 // Append links
                 if (variantLink) {
@@ -6985,20 +7017,20 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Total tumors summary
                     if (items['Total Tumors'] !== undefined) {
                         const span = document.createElement('span');
-                        span.innerHTML = `<strong>Found in:</strong> ${items['Total Tumors']} tumor${items['Total Tumors'] === 1 ? '' : 's'}`;
+                        span.innerHTML = `<strong>Found in:</strong> ${escapeHtml(items['Total Tumors'])} tumor${items['Total Tumors'] === 1 ? '' : 's'}`;
                         content.appendChild(span);
                     }
                     // Frequency overall
                     if (items['Frequency (overall)']) {
                         const p = document.createElement('p');
-                        p.innerHTML = `<strong>Frequency (overall):</strong> ${items['Frequency (overall)']}`;
+                        p.innerHTML = `<strong>Frequency (overall):</strong> ${escapeHtml(items['Frequency (overall)'])}`;
                         content.appendChild(p);
                     }
                     // Find the key that starts with "Frequency in" (gene-specific frequency)
                     Object.keys(items).forEach(key => {
                         if (key.startsWith('Frequency in')) {
                             const p = document.createElement('p');
-                            p.innerHTML = `<strong>${key}:</strong> ${items[key]}`;
+                            p.innerHTML = `<strong>${escapeHtml(key)}:</strong> ${escapeHtml(items[key])}`;
                             content.appendChild(p);
                         }
                     });
@@ -7019,7 +7051,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const items = cosmicBase.items;
                     if (items['Mutation Frequency'] !== undefined) {
                         const span = document.createElement('span');
-                        span.innerHTML = `<strong>Mutation Frequency:</strong> ${items['Mutation Frequency']}`;
+                        span.innerHTML = `<strong>Mutation Frequency:</strong> ${escapeHtml(items['Mutation Frequency'])}`;
                         content.appendChild(span);
                     }
                     // Add any other COSMIC base items except those with html
@@ -7027,7 +7059,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (k === 'Mutation Frequency') return;
                         if (v && typeof v === 'object' && v.html) return;
                         const p = document.createElement('p');
-                        p.innerHTML = `<strong>${k}:</strong> ${v}`;
+                        p.innerHTML = `<strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}`;
                         content.appendChild(p);
                     });
                 } else {
@@ -7066,7 +7098,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 tp53Content.appendChild(summary);
 
                 const variantSummary = document.createElement('span');
-                variantSummary.innerHTML = `<strong>Variant:</strong> ${tp53Protein || tp53Cdna || tp53Genomic || 'N/A'}`;
+                variantSummary.innerHTML = `<strong>Variant:</strong> ${escapeHtml(tp53Protein || tp53Cdna || tp53Genomic || 'N/A')}`;
                 tp53Content.appendChild(variantSummary);
 
                 const dbHomeUrl = 'https://tp53.cancer.gov/';
@@ -7682,7 +7714,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             const bestEl = document.createElement('div');
                             bestEl.style.cssText = 'font-size:0.86rem;margin-bottom:4px;';
                             const pct = (summary.best.value * 100).toFixed(1);
-                            bestEl.innerHTML = `<strong>Max delta score:</strong> ${summary.best.value.toFixed(3)} (${pct}%) ${summary.best.label}${summary.best.position !== null ? ` at ${summary.best.position}` : ''}${summary.best.transcript ? ` · ${summary.best.transcript}` : ''}`;
+                            bestEl.innerHTML = `<strong>Max delta score:</strong> ${summary.best.value.toFixed(3)} (${pct}%) ${escapeHtml(summary.best.label)}${summary.best.position !== null ? ` at ${escapeHtml(String(summary.best.position))}` : ''}${summary.best.transcript ? ` · ${escapeHtml(summary.best.transcript)}` : ''}`;
                             spliceResultsDiv.appendChild(bestEl);
                         }
                         const tableWrapper = document.createElement('div');
@@ -8099,7 +8131,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
                             ofResultsDiv.innerHTML = '';
                             if (!ofResults || ofResults.length === 0) {
-                                ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${firstGene}.</div>`;
+                                ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${escapeHtml(firstGene)}.</div>`;
                                 return;
                             }
                             const OF_PREVIEW = 7;
@@ -8593,7 +8625,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         guidelinesResults.appendChild(sourceNote);
 
                     } catch (err) {
-                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${err.message}</div>`;
+                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${escapeHtml(err.message)}</div>`;
                         aiReviewExtras.guidelines = { error: err.message, cancer_type: selectedCancer, gene };
                     }
                 });
