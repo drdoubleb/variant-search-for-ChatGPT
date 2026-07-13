@@ -4,7 +4,51 @@
 
 const CT_API_BASE = 'https://clinicaltrials.gov/api/v2/studies';
 
+// Pagination bounds. Server-side filtering (below) shrinks the candidate set enough
+// that one page almost always suffices; the extra page is a backstop for broad genes.
+const CT_PAGE_SIZE = 1000;
+const CT_MAX_PAGES = 2;
+
 const PHASES_PHASE2_PLUS = new Set(['PHASE2', 'PHASE3', 'PHASE4']);
+
+function buildCtQuery(params) {
+    // Percent-encode values (space -> %20). The v2 API's aggFilters/filter.advanced
+    // expressions were verified to accept this encoding.
+    return Object.entries(params)
+        .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+        .join('&');
+}
+
+// Fetch up to CT_MAX_PAGES pages, following nextPageToken. Returns the accumulated
+// studies, the server-reported total (countTotal), and whether more pages remained
+// beyond the cap. On a non-200 FIRST page, returns { ok: false, status } so the caller
+// can fall back. Later-page failures just stop pagination with what was collected.
+async function fetchCtPages(baseParams, signal) {
+    const studies = [];
+    let total = null;
+    let pageToken = null;
+    let morePages = false;
+    for (let page = 0; page < CT_MAX_PAGES; page++) {
+        const params = { ...baseParams, pageSize: String(CT_PAGE_SIZE), countTotal: 'true' };
+        if (pageToken) params.pageToken = pageToken;
+        const resp = await fetch(`${CT_API_BASE}?${buildCtQuery(params)}`, {
+            headers: { 'Accept': 'application/json', 'User-Agent': 'variant-search-tool/1.0' },
+            signal
+        });
+        if (!resp.ok) {
+            if (page === 0) return { ok: false, status: resp.status, studies, total };
+            break;
+        }
+        const data = await resp.json();
+        if (total === null && typeof data.totalCount === 'number') total = data.totalCount;
+        const batch = data.studies || [];
+        studies.push(...batch);
+        pageToken = data.nextPageToken || null;
+        if (!pageToken || batch.length === 0) break;
+        if (page === CT_MAX_PAGES - 1) morePages = true;
+    }
+    return { ok: true, studies, total, morePages };
+}
 
 function isPhase2Plus(phases) {
     if (!Array.isArray(phases) || phases.length === 0) return false;
@@ -101,27 +145,40 @@ export default async function handler(req, res) {
 
     const searchTerm = safeTumorType ? `${safeGene} ${safeTumorType}` : safeGene;
 
-    // Use only query.term + pageSize — aggFilters and filter.overallStatus cause 400s
-    // with certain parameter combinations. All filtering is done server-side below.
-    const url = `${CT_API_BASE}?query.term=${encodeURIComponent(searchTerm)}&pageSize=1000`;
+    // Push the cheap, high-selectivity filters into the query so the page budget is
+    // spent on candidates that can actually pass: recruiting, interventional, phase
+    // 2/3/4, and a US location. (Verified against the live v2 API.) The remaining
+    // filters — treatment purpose and the gene word-boundary text check — run
+    // client-side below on the much smaller returned set.
+    const filteredParams = {
+        'query.term': searchTerm,
+        'filter.overallStatus': 'RECRUITING',
+        'aggFilters': 'studyType:int,phase:2 3 4',
+        'filter.advanced': 'AREA[LocationCountry]United States'
+    };
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 14000);
 
     try {
-        const response = await fetch(url, {
-            headers: { 'Accept': 'application/json', 'User-Agent': 'variant-search-tool/1.0' },
-            signal: controller.signal
-        });
-
-        if (!response.ok) {
-            const text = await response.text();
-            console.warn('ClinicalTrials.gov API error:', response.status, text.slice(0, 200));
-            return res.status(200).json({ error: `ClinicalTrials.gov returned ${response.status}`, studies: [], total: 0 });
+        let usedServerFilters = true;
+        let result = await fetchCtPages(filteredParams, controller.signal);
+        if (!result.ok) {
+            // A filter combination the API rejects should degrade, not break the card:
+            // fall back to the plain term query and rely on client-side filtering.
+            console.warn('ClinicalTrials.gov filtered query failed:', result.status, '— falling back to term-only');
+            usedServerFilters = false;
+            result = await fetchCtPages({ 'query.term': searchTerm }, controller.signal);
+            if (!result.ok) {
+                return res.status(200).json({ error: `ClinicalTrials.gov returned ${result.status}`, studies: [], total: 0 });
+            }
         }
 
-        const data = await response.json();
-        const allStudies = data.studies || [];
+        const allStudies = result.studies;
+        const serverMatchedTotal = result.total;
+        // True when more studies matched than we retrieved (only realistic in the
+        // unfiltered fallback path). Surfaced so the UI/AI never implies completeness.
+        const truncated = !!result.morePages;
 
         // Word-boundary check so "BRAF" doesn't match "CRAFT" or eGFR contexts
         const geneRegex = new RegExp(`\\b${safeGene}\\b`, 'i');
@@ -164,7 +221,10 @@ export default async function handler(req, res) {
         return res.status(200).json({
             total: studies.length,
             studies,
-            searchTerm
+            searchTerm,
+            server_filtered: usedServerFilters,
+            total_matched_before_client_filter: serverMatchedTotal,
+            truncated
         });
     } catch (e) {
         if (e.name === 'AbortError') {
