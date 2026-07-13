@@ -1615,6 +1615,27 @@ async function fetchOpenFdaDrugLabels(gene) {
     }
 }
 
+// The openFDA `indications_and_usage`/`purpose` full-label text dominates the AI
+// context for drug-rich genes — HER2/ERBB2 amplification measured ≈ 957 KB / ~219k
+// tokens, almost entirely openFDA. That risks Vercel's request ceiling, exceeds
+// some models' context windows, and is costly. Truncate those long free-text fields
+// for the AI payload (the opening states the biomarker-specific indication, which is
+// what matters) and cap the number of records. Returns a NEW object so the on-screen
+// openFDA card's data is left untouched.
+function condenseOpenFdaForAi(data, { maxRecords = 40, indChars = 1200, purposeChars = 400 } = {}) {
+    if (!data || !Array.isArray(data.results)) return data;
+    const truncate = (text, max) => (typeof text === 'string' && text.length > max)
+        ? `${text.slice(0, max)} …[truncated]`
+        : text;
+    const results = data.results.slice(0, maxRecords).map((r) => ({
+        ...r,
+        indications_and_usage: truncate(r.indications_and_usage, indChars),
+        purpose: truncate(r.purpose, purposeChars)
+    }));
+    const droppedRecords = Math.max(0, data.results.length - results.length);
+    return { ...data, results, ...(droppedRecords ? { results_truncated_for_ai: droppedRecords } : {}) };
+}
+
 async function fetchPubmedArticles(searchTerm, limit = 5) {
     if (!searchTerm) return { total: 0, articles: [] };
     const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
@@ -4431,8 +4452,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         ...geneOnlyAiExtras,
                         civic_api: civicData,
                         pubmed: pubmedData,
-                        openfda_drug_labels: openFdaData
+                        openfda_drug_labels: condenseOpenFdaForAi(openFdaData)
                     };
+                    // geneOnlyAiExtras may itself carry a full openFDA payload (from the
+                    // openFDA card); condense that copy too so the AI context stays bounded.
+                    if (supplementalContext.openfda) supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
                     return {
                         submitted_query: rawInput,
                         gene,
@@ -8588,6 +8612,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
                         fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
                     ]);
+                    // Condense the openFDA free-text (the dominant payload for drug-rich
+                    // genes) on the shallow supplemental copy, leaving the on-screen card data
+                    // intact. supplementalContext is a fresh object per run.
+                    if (supplementalContext && typeof supplementalContext === 'object') {
+                        if (supplementalContext.openfda_drug_labels) supplementalContext.openfda_drug_labels = condenseOpenFdaForAi(supplementalContext.openfda_drug_labels);
+                        if (supplementalContext.openfda) supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
+                    }
                     return {
                         submitted_variant: rawInput,
                         normalized_genomic_variant: gVariant,

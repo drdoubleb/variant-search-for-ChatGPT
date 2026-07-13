@@ -71,13 +71,17 @@ function parseUserKey(value) {
 // Per-request cost caps. These bound the token spend of any single call so an
 // individual request cannot run away regardless of caller. Rate limiting (per-IP
 // and a global daily ceiling) is a separate, complementary control. The context
-// clamp is deliberately generous: rich genes (BRAF, EGFR, HER2) assemble large
-// supplemental payloads, and truncating them would degrade the interpretation.
-// Cost is bounded by the rate limiter / Turnstile / BYO-key valve instead.
-const CONTEXT_MAX_CHARS = 200000;     // safety ceiling only; normal contexts pass untouched
+// clamp is deliberately generous: rich genes assemble very large supplemental
+// payloads — e.g. HER2/ERBB2 amplification measured at ~957 KB / ~219k tokens —
+// and truncating them would degrade the interpretation. Cost/volume is bounded by
+// the rate limiter / Turnstile / BYO-key valve instead. The body limit sits just
+// under Vercel's ~4.5 MB serverless request ceiling; contexts larger than this
+// can't be sent as one request regardless (see the openFDA trimming note in
+// buildContext on the frontend for the real lever on payload size).
+const CONTEXT_MAX_CHARS = 1500000;    // safety ceiling only; realistic contexts pass untouched
 const USER_NOTES_MAX_CHARS = 4000;    // free-text notes from the user
 const COMPLETION_MAX_TOKENS = 3000;   // bounded JSON output; caps generation length
-const MAX_BODY_BYTES = 512 * 1024;    // reject oversized POST bodies before any work
+const MAX_BODY_BYTES = 4 * 1024 * 1024; // ~4 MB, just under Vercel's request-body ceiling
 const ALLOWED_MODELS = new Set([
     'openai/gpt-5-mini',
     'openai/gpt-5.4-nano',
