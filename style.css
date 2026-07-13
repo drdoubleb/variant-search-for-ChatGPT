@@ -77,6 +77,33 @@ form button:hover {
     display: none;
 }
 
+/* Visually-hidden but available to screen readers (used for the search input label). */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Consistent, visible keyboard-focus indicator for interactive controls. Uses
+   :focus-visible so it only shows for keyboard/AT users, not on mouse clicks. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+    border-radius: 2px;
+}
+
 #resultSection h2 {
     margin-top: 0;
 }
