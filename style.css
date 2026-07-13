@@ -509,6 +509,60 @@ footer a:hover {
     opacity: 0.7;
 }
 
+/* Secondary action (e.g. Copy prompt) — lighter than the primary Run button */
+.ai-review-controls .ai-review-secondary-btn {
+    background: #eef2ff;
+    color: #3730a3;
+}
+.ai-review-controls .ai-review-secondary-btn:hover {
+    background: #e0e7ff;
+}
+
+/* Optional bring-your-own OpenRouter key */
+.ai-review-key {
+    margin: 0.25rem 0 0.5rem;
+    font-size: 0.85rem;
+}
+.ai-review-key > summary {
+    cursor: pointer;
+    color: #4f46e5;
+    font-weight: 600;
+    padding: 0.15rem 0;
+}
+.ai-review-key-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.4rem 0 0.3rem;
+}
+.ai-review-key-row input[type="password"] {
+    flex: 1 1 240px;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 0.9rem;
+}
+.ai-review-key-remember {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.82rem;
+    color: #4b5563;
+    white-space: nowrap;
+}
+.ai-review-key-note {
+    font-size: 0.78rem;
+    color: #6b7280;
+    line-height: 1.4;
+}
+
+/* Turnstile widget mount point (empty unless a site key is configured) */
+.ai-review-turnstile:not(:empty) {
+    margin: 0.5rem 0;
+}
+
 .ai-review-notes {
     display: flex;
     flex-direction: column;

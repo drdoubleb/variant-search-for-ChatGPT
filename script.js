@@ -1661,12 +1661,17 @@ const OPENROUTER_MODEL_OPTIONS = [
     'qwen/qwen3-32b'
 ];
 
-async function fetchAiReview(context, model) {
+async function fetchAiReview(context, model, extra = {}) {
     const endpoint = getConfiguredApiEndpoint('AI_REVIEW_API_ENDPOINT', '/api/ai-review');
+    const payload = { model, context };
+    // Optional bring-your-own OpenRouter key and Cloudflare Turnstile token. Both are
+    // omitted when empty so the backend uses the owner key / skips verification.
+    if (extra.apiKey) payload.openrouter_api_key = extra.apiKey;
+    if (extra.turnstileToken) payload.turnstile_token = extra.turnstileToken;
     const res = await fetchWithTimeout(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, context })
+        body: JSON.stringify(payload)
     }, API_TIMEOUT_MS.aiReview);
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.error) {
@@ -1674,6 +1679,285 @@ async function fetchAiReview(context, model) {
         throw new Error(`${data?.error || `AI review request failed (${res.status})`}${detail}`);
     }
     return data;
+}
+
+// Fetch the fully assembled prompt from the backend without calling any model.
+// Powers the "Copy prompt" button so users can paste it into their own LLM.
+async function fetchAiReviewPrompt(context, model) {
+    const endpoint = getConfiguredApiEndpoint('AI_REVIEW_API_ENDPOINT', '/api/ai-review');
+    const res = await fetchWithTimeout(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, context, mode: 'prompt' })
+    }, API_TIMEOUT_MS.aiReview);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.error) {
+        throw new Error(data?.error || `Prompt request failed (${res.status})`);
+    }
+    return data.prompt || '';
+}
+
+// sessionStorage helpers for the optional BYO OpenRouter key. Stored only for the
+// current tab (cleared when it closes) so returning users don't re-paste each lookup.
+const AI_REVIEW_KEY_STORAGE = 'aiReviewOpenRouterKey';
+function getStoredUserKey() {
+    try { return sessionStorage.getItem(AI_REVIEW_KEY_STORAGE) || ''; } catch { return ''; }
+}
+function setStoredUserKey(value) {
+    try {
+        if (value) sessionStorage.setItem(AI_REVIEW_KEY_STORAGE, value);
+        else sessionStorage.removeItem(AI_REVIEW_KEY_STORAGE);
+    } catch { /* storage unavailable — ignore */ }
+}
+
+// Lazily load the Cloudflare Turnstile script, only when a site key is configured.
+let _turnstileScriptPromise = null;
+function loadTurnstileScript() {
+    if (window.turnstile) return Promise.resolve();
+    if (_turnstileScriptPromise) return _turnstileScriptPromise;
+    _turnstileScriptPromise = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        s.async = true;
+        s.defer = true;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('Failed to load Turnstile'));
+        document.head.appendChild(s);
+    });
+    return _turnstileScriptPromise;
+}
+
+// Build the shared "Optional AI Review" card. Both the gene-only and full-variant
+// flows use this so the model picker, notes, BYO-key field, copy-prompt button,
+// Turnstile widget, context inspector, and run handler are defined once.
+// `buildContext` is an async callback returning the context object to send.
+function createAiReviewCard({ container, idSuffix, introText, loadingText, buildContext }) {
+    const aiCard = document.createElement('div');
+    aiCard.className = 'card ai-review-card';
+    aiCard.setAttribute('data-card', 'optional-ai-review'); // mirrors applyCardTheme()
+    const aiTitle = document.createElement('h3');
+    aiTitle.textContent = 'Optional AI Review';
+    aiCard.appendChild(aiTitle);
+
+    const aiContent = document.createElement('div');
+    aiContent.className = 'card-content ai-review-content';
+
+    const aiIntro = document.createElement('p');
+    aiIntro.className = 'ai-review-intro';
+    aiIntro.textContent = introText;
+    aiContent.appendChild(aiIntro);
+
+    const controls = document.createElement('div');
+    controls.className = 'ai-review-controls';
+
+    const modelLabel = document.createElement('label');
+    modelLabel.textContent = 'Model';
+    modelLabel.setAttribute('for', `aiReviewModelSelect${idSuffix}`);
+    controls.appendChild(modelLabel);
+
+    const modelSelect = document.createElement('select');
+    modelSelect.id = `aiReviewModelSelect${idSuffix}`;
+    OPENROUTER_MODEL_OPTIONS.forEach((modelName) => {
+        const opt = document.createElement('option');
+        opt.value = modelName;
+        opt.textContent = modelName;
+        modelSelect.appendChild(opt);
+    });
+    controls.appendChild(modelSelect);
+
+    const runButton = document.createElement('button');
+    runButton.type = 'button';
+    runButton.textContent = 'Run AI review';
+    controls.appendChild(runButton);
+
+    const copyPromptButton = document.createElement('button');
+    copyPromptButton.type = 'button';
+    copyPromptButton.className = 'ai-review-secondary-btn';
+    copyPromptButton.textContent = 'Copy prompt';
+    copyPromptButton.title = 'Copy the exact prompt so you can paste it into your own LLM';
+    controls.appendChild(copyPromptButton);
+
+    aiContent.appendChild(controls);
+
+    const notesWrap = document.createElement('div');
+    notesWrap.className = 'ai-review-notes';
+    const notesLabel = document.createElement('label');
+    notesLabel.setAttribute('for', `aiReviewNotes${idSuffix}`);
+    notesLabel.textContent = 'Any additional notes for AI review';
+    notesWrap.appendChild(notesLabel);
+    const notesInput = document.createElement('textarea');
+    notesInput.id = `aiReviewNotes${idSuffix}`;
+    notesInput.rows = 3;
+    notesInput.placeholder = 'Optional — extra clinical context, prior therapies, specific questions, etc.';
+    notesWrap.appendChild(notesInput);
+    aiContent.appendChild(notesWrap);
+
+    // Optional bring-your-own OpenRouter key (collapsed by default).
+    const keyDetails = document.createElement('details');
+    keyDetails.className = 'ai-review-key';
+    const keySummary = document.createElement('summary');
+    keySummary.textContent = 'Use your own OpenRouter API key (optional)';
+    keyDetails.appendChild(keySummary);
+    const keyRow = document.createElement('div');
+    keyRow.className = 'ai-review-key-row';
+    const keyInput = document.createElement('input');
+    keyInput.type = 'password';
+    keyInput.id = `aiReviewKey${idSuffix}`;
+    keyInput.autocomplete = 'off';
+    keyInput.placeholder = 'sk-or-...';
+    keyInput.value = getStoredUserKey();
+    keyRow.appendChild(keyInput);
+    const rememberWrap = document.createElement('label');
+    rememberWrap.className = 'ai-review-key-remember';
+    const rememberChk = document.createElement('input');
+    rememberChk.type = 'checkbox';
+    rememberChk.checked = Boolean(getStoredUserKey());
+    rememberWrap.appendChild(rememberChk);
+    rememberWrap.appendChild(document.createTextNode(' Remember in this tab'));
+    keyRow.appendChild(rememberWrap);
+    keyDetails.appendChild(keyRow);
+    const keyNote = document.createElement('div');
+    keyNote.className = 'ai-review-key-note';
+    keyNote.textContent = 'Your key is sent only with your own review request and, if remembered, stored only in this browser tab (cleared when it closes). Requests using your own key are not rate-limited by this site.';
+    keyDetails.appendChild(keyNote);
+    if (getStoredUserKey()) keyDetails.open = true;
+    aiContent.appendChild(keyDetails);
+
+    // Turnstile widget mount point — only used when a site key is configured.
+    const turnstileHost = document.createElement('div');
+    turnstileHost.className = 'ai-review-turnstile';
+    aiContent.appendChild(turnstileHost);
+    let currentTurnstileToken = '';
+    let turnstileWidgetId = null;
+    if (window.TURNSTILE_SITE_KEY) {
+        loadTurnstileScript().then(() => {
+            if (!window.turnstile) return;
+            try {
+                turnstileWidgetId = window.turnstile.render(turnstileHost, {
+                    sitekey: window.TURNSTILE_SITE_KEY,
+                    callback: (token) => { currentTurnstileToken = token; },
+                    'expired-callback': () => { currentTurnstileToken = ''; },
+                    'error-callback': () => { currentTurnstileToken = ''; }
+                });
+            } catch { /* rendering failed — treat as no challenge */ }
+        }).catch(() => { /* script blocked — backend skips when no secret set */ });
+    }
+
+    const aiContextInspector = document.createElement('details');
+    aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
+    const aiContextInspectorSummary = document.createElement('summary');
+    aiContextInspectorSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;list-style:revert;font-size:0.79rem;';
+    aiContextInspectorSummary.textContent = 'Context sent to AI (populated after run)';
+    aiContextInspector.appendChild(aiContextInspectorSummary);
+    const aiContextPre = document.createElement('pre');
+    aiContextPre.style.cssText = 'font-size:0.73rem;white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e5e7eb;padding:8px;border-radius:4px;margin-top:4px;max-height:400px;overflow-y:auto;color:#374151;';
+    aiContextPre.textContent = 'Run AI review to populate this section.';
+    aiContextInspector.appendChild(aiContextPre);
+    aiContent.appendChild(aiContextInspector);
+
+    // Collapsible prompt output — filled by "Copy prompt" and shown for manual copy
+    // when the clipboard API is unavailable/blocked.
+    const promptDetails = document.createElement('details');
+    promptDetails.className = 'ai-review-prompt-view';
+    promptDetails.style.cssText = 'margin:2px 0;font-size:0.80rem;';
+    const promptSummary = document.createElement('summary');
+    promptSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;font-size:0.79rem;';
+    promptSummary.textContent = 'Full prompt (for your own LLM)';
+    promptDetails.appendChild(promptSummary);
+    const promptTextarea = document.createElement('textarea');
+    promptTextarea.readOnly = true;
+    promptTextarea.rows = 8;
+    promptTextarea.style.cssText = 'width:100%;box-sizing:border-box;font:inherit;font-size:0.73rem;line-height:1.4;background:#f8fafc;border:1px solid #e5e7eb;border-radius:4px;padding:8px;margin-top:4px;color:#374151;';
+    promptTextarea.placeholder = 'Click "Copy prompt" to populate.';
+    promptDetails.appendChild(promptTextarea);
+    aiContent.appendChild(promptDetails);
+
+    const aiOutput = document.createElement('div');
+    aiOutput.className = 'ai-review-output';
+    aiContent.appendChild(aiOutput);
+    aiCard.appendChild(aiContent);
+    if (container) container.appendChild(aiCard);
+
+    const persistKey = () => {
+        const key = (keyInput.value || '').trim();
+        if (rememberChk.checked && key) setStoredUserKey(key);
+        else setStoredUserKey('');
+    };
+
+    copyPromptButton.addEventListener('click', async () => {
+        copyPromptButton.disabled = true;
+        const prev = copyPromptButton.textContent;
+        copyPromptButton.textContent = 'Building…';
+        try {
+            const aiContext = await buildContext((notesInput.value || '').trim());
+            aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
+            aiContextInspectorSummary.textContent = 'Context sent to AI';
+            const prompt = await fetchAiReviewPrompt(aiContext, modelSelect.value);
+            promptTextarea.value = prompt;
+            let copied = false;
+            try {
+                await navigator.clipboard.writeText(prompt);
+                copied = true;
+            } catch { /* clipboard blocked — fall back to manual copy below */ }
+            if (copied) {
+                copyPromptButton.textContent = 'Copied!';
+            } else {
+                promptDetails.open = true;
+                promptTextarea.focus();
+                promptTextarea.select();
+                copyPromptButton.textContent = 'Copy from box below';
+            }
+        } catch (err) {
+            copyPromptButton.textContent = 'Prompt failed';
+            promptDetails.open = true;
+            promptTextarea.value = `Unable to build prompt: ${err.message}`;
+        } finally {
+            setTimeout(() => { copyPromptButton.textContent = prev; }, 2000);
+            copyPromptButton.disabled = false;
+        }
+    });
+
+    runButton.addEventListener('click', async () => {
+        runButton.disabled = true;
+        const previousText = runButton.textContent;
+        runButton.textContent = 'Running…';
+        aiOutput.innerHTML = `<div class="ai-review-loading">${loadingText}</div>`;
+        try {
+            const userKey = (keyInput.value || '').trim();
+            persistKey();
+            // Require a Turnstile token only when a site key is configured and the user
+            // is spending the owner key (BYO-key requests bypass the challenge).
+            let turnstileToken = '';
+            if (window.TURNSTILE_SITE_KEY && !userKey) {
+                turnstileToken = currentTurnstileToken;
+                if (!turnstileToken) throw new Error('Please complete the verification challenge above, then run again.');
+            }
+            const aiContext = await buildContext((notesInput.value || '').trim());
+            aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
+            aiContextInspectorSummary.textContent = 'Context sent to AI';
+            const data = await fetchAiReview(aiContext, modelSelect.value, {
+                apiKey: userKey || undefined,
+                turnstileToken: turnstileToken || undefined
+            });
+            renderAiReview(data.review, aiOutput);
+            // Turnstile tokens are single-use; reset so a follow-up run gets a fresh one.
+            if (window.turnstile && turnstileWidgetId != null) {
+                try { window.turnstile.reset(turnstileWidgetId); } catch { /* ignore */ }
+                currentTurnstileToken = '';
+            }
+        } catch (err) {
+            aiOutput.innerHTML = '';
+            const errorEl = document.createElement('div');
+            errorEl.className = 'ai-review-error';
+            errorEl.textContent = `AI review unavailable: ${err.message}`;
+            aiOutput.appendChild(errorEl);
+        } finally {
+            runButton.disabled = false;
+            runButton.textContent = previousText;
+        }
+    });
+
+    return aiCard;
 }
 
 function appendListOrEmpty(parent, values, emptyText) {
@@ -4117,137 +4401,51 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             }
 
-            // ── Card: Optional AI Review ───────────────────────────────────
-            {
-                const aiCard = document.createElement('div');
-                aiCard.className = 'card ai-review-card';
-                const aiTitle = document.createElement('h3');
-                aiTitle.textContent = 'Optional AI Review';
-                applyCardTheme(aiCard, 'Optional AI Review');
-                aiCard.appendChild(aiTitle);
-
-                const aiContent = document.createElement('div');
-                aiContent.className = 'card-content ai-review-content';
-
-                const aiIntro = document.createElement('p');
-                aiIntro.className = 'ai-review-intro';
-                aiIntro.textContent = 'Send the retrieved gene-level data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.';
-                aiContent.appendChild(aiIntro);
-
-                const controls = document.createElement('div');
-                controls.className = 'ai-review-controls';
-
-                const modelLabel = document.createElement('label');
-                modelLabel.textContent = 'Model';
-                modelLabel.setAttribute('for', 'aiReviewModelSelectGene');
-                controls.appendChild(modelLabel);
-
-                const modelSelect = document.createElement('select');
-                modelSelect.id = 'aiReviewModelSelectGene';
-                OPENROUTER_MODEL_OPTIONS.forEach((modelName) => {
-                    const opt = document.createElement('option');
-                    opt.value = modelName;
-                    opt.textContent = modelName;
-                    modelSelect.appendChild(opt);
-                });
-                controls.appendChild(modelSelect);
-
-                const runButton = document.createElement('button');
-                runButton.type = 'button';
-                runButton.textContent = 'Run AI review';
-                controls.appendChild(runButton);
-                aiContent.appendChild(controls);
-
-                const notesWrap = document.createElement('div');
-                notesWrap.className = 'ai-review-notes';
-                const notesLabel = document.createElement('label');
-                notesLabel.setAttribute('for', 'aiReviewNotesGene');
-                notesLabel.textContent = 'Any additional notes for AI review';
-                notesWrap.appendChild(notesLabel);
-                const notesInput = document.createElement('textarea');
-                notesInput.id = 'aiReviewNotesGene';
-                notesInput.rows = 3;
-                notesInput.placeholder = 'Optional — extra clinical context, prior therapies, specific questions, etc.';
-                notesWrap.appendChild(notesInput);
-                aiContent.appendChild(notesWrap);
-
-                const aiContextInspector = document.createElement('details');
-                aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
-                const aiContextInspectorSummary = document.createElement('summary');
-                aiContextInspectorSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;list-style:revert;font-size:0.79rem;';
-                aiContextInspectorSummary.textContent = 'Context sent to AI (populated after run)';
-                aiContextInspector.appendChild(aiContextInspectorSummary);
-                const aiContextPre = document.createElement('pre');
-                aiContextPre.style.cssText = 'font-size:0.73rem;white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e5e7eb;padding:8px;border-radius:4px;margin-top:4px;max-height:400px;overflow-y:auto;color:#374151;';
-                aiContextPre.textContent = 'Run AI review to populate this section.';
-                aiContextInspector.appendChild(aiContextPre);
-                aiContent.appendChild(aiContextInspector);
-
-                const aiOutput = document.createElement('div');
-                aiOutput.className = 'ai-review-output';
-                aiContent.appendChild(aiOutput);
-                aiCard.appendChild(aiContent);
-                if (cardsContainer) cardsContainer.appendChild(aiCard);
-
-                runButton.addEventListener('click', async () => {
-                    runButton.disabled = true;
-                    const previousText = runButton.textContent;
-                    runButton.textContent = 'Running…';
-                    aiOutput.innerHTML = '<div class="ai-review-loading">Gathering gene-level context for AI review…</div>';
-                    try {
-                        // Supplemental context for gene-only mode: skip coordinate-dependent calls
-                        const [fdaRecords, bbkbTherapies, clinicalTrialData] = await Promise.all([
-                            fetchFdaCompanionDiagnostics(gene).catch(() => []),
-                            fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] })),
-                            fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }))
-                        ]);
-                        const pubmedTerm = altType ? `${gene} ${altType}` : gene;
-                        // Prefer the PubMed card's already-fetched data over re-fetching.
-                        // Re-fetching alongside the card increases NCBI concurrency and can
-                        // drop abstracts when efetch hits the rate limit.
-                        const cachedPubmed = geneOnlyAiExtras.pubmed;
-                        const pubmedPromise = (cachedPubmed && Array.isArray(cachedPubmed.articles) && cachedPubmed.articles.length > 0)
-                            ? Promise.resolve({ total: cachedPubmed.total ?? cachedPubmed.articles.length, articles: cachedPubmed.articles })
-                            : fetchPubmedArticles(pubmedTerm, 5).catch(() => ({ total: 0, articles: [] }));
-                        const [pubmedData, civicData, openFdaData] = await Promise.all([
-                            pubmedPromise,
-                            fetchCivicApiData(gene, '').catch(() => null),
-                            fetchOpenFdaDrugLabels(gene).catch(() => null)
-                        ]);
-                        const supplementalContext = {
-                            ...geneOnlyAiExtras,
-                            civic_api: civicData,
-                            pubmed: pubmedData,
-                            openfda_drug_labels: openFdaData
-                        };
-                        const userNotes = (notesInput.value || '').trim();
-                        const aiContext = {
-                            submitted_query: rawInput,
-                            gene,
-                            alteration_type: altType,
-                            tumor_type: tumorType,
-                            user_notes: userNotes || undefined,
-                            fda_companion_diagnostics_records: fdaRecords,
-                            bbkb_biomarker_therapies: bbkbTherapies,
-                            clinical_trials: clinicalTrialData,
-                            supplemental_card_data: supplementalContext
-                        };
-                        aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
-                        aiContextInspectorSummary.textContent = 'Context sent to AI';
-                        const data = await fetchAiReview(aiContext, modelSelect.value);
-                        renderAiReview(data.review, aiOutput);
-                    } catch (err) {
-                        aiOutput.innerHTML = '';
-                        const errorEl = document.createElement('div');
-                        errorEl.className = 'ai-review-error';
-                        errorEl.textContent = `AI review unavailable: ${err.message}`;
-                        aiOutput.appendChild(errorEl);
-                    } finally {
-                        runButton.disabled = false;
-                        runButton.textContent = previousText;
-                    }
-                });
-            }
+            // ── Card: Optional AI Review (gene-only mode) ──────────────────
+            createAiReviewCard({
+                container: cardsContainer,
+                idSuffix: 'Gene',
+                introText: 'Send the retrieved gene-level data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
+                loadingText: 'Gathering gene-level context for AI review…',
+                buildContext: async (userNotes) => {
+                    // Supplemental context for gene-only mode: skip coordinate-dependent calls
+                    const [fdaRecords, bbkbTherapies, clinicalTrialData] = await Promise.all([
+                        fetchFdaCompanionDiagnostics(gene).catch(() => []),
+                        fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] })),
+                        fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }))
+                    ]);
+                    const pubmedTerm = altType ? `${gene} ${altType}` : gene;
+                    // Prefer the PubMed card's already-fetched data over re-fetching.
+                    // Re-fetching alongside the card increases NCBI concurrency and can
+                    // drop abstracts when efetch hits the rate limit.
+                    const cachedPubmed = geneOnlyAiExtras.pubmed;
+                    const pubmedPromise = (cachedPubmed && Array.isArray(cachedPubmed.articles) && cachedPubmed.articles.length > 0)
+                        ? Promise.resolve({ total: cachedPubmed.total ?? cachedPubmed.articles.length, articles: cachedPubmed.articles })
+                        : fetchPubmedArticles(pubmedTerm, 5).catch(() => ({ total: 0, articles: [] }));
+                    const [pubmedData, civicData, openFdaData] = await Promise.all([
+                        pubmedPromise,
+                        fetchCivicApiData(gene, '').catch(() => null),
+                        fetchOpenFdaDrugLabels(gene).catch(() => null)
+                    ]);
+                    const supplementalContext = {
+                        ...geneOnlyAiExtras,
+                        civic_api: civicData,
+                        pubmed: pubmedData,
+                        openfda_drug_labels: openFdaData
+                    };
+                    return {
+                        submitted_query: rawInput,
+                        gene,
+                        alteration_type: altType,
+                        tumor_type: tumorType,
+                        user_notes: userNotes || undefined,
+                        fda_companion_diagnostics_records: fdaRecords,
+                        bbkb_biomarker_therapies: bbkbTherapies,
+                        clinical_trials: clinicalTrialData,
+                        supplemental_card_data: supplementalContext
+                    };
+                }
+            });
 
             return; // Skip the variant annotation pipeline
         }
@@ -8378,155 +8576,68 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // Optional AI review card (manual trigger; sends current annotation context to OpenRouter via backend proxy).
-            {
-                const aiCard = document.createElement('div');
-                aiCard.className = 'card ai-review-card';
-                const aiTitle = document.createElement('h3');
-                aiTitle.textContent = 'Optional AI Review';
-                applyCardTheme(aiCard, 'Optional AI Review');
-                aiCard.appendChild(aiTitle);
-
-                const aiContent = document.createElement('div');
-                aiContent.className = 'card-content ai-review-content';
-
-                const aiIntro = document.createElement('p');
-                aiIntro.className = 'ai-review-intro';
-                aiIntro.textContent = 'Send the retrieved variant data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.';
-                aiContent.appendChild(aiIntro);
-
-                const controls = document.createElement('div');
-                controls.className = 'ai-review-controls';
-
-                const modelLabel = document.createElement('label');
-                modelLabel.textContent = 'Model';
-                modelLabel.setAttribute('for', 'aiReviewModelSelect');
-                controls.appendChild(modelLabel);
-
-                const modelSelect = document.createElement('select');
-                modelSelect.id = 'aiReviewModelSelect';
-                OPENROUTER_MODEL_OPTIONS.forEach((modelName) => {
-                    const opt = document.createElement('option');
-                    opt.value = modelName;
-                    opt.textContent = modelName;
-                    modelSelect.appendChild(opt);
-                });
-                controls.appendChild(modelSelect);
-
-                const runButton = document.createElement('button');
-                runButton.type = 'button';
-                runButton.textContent = 'Run AI review';
-                controls.appendChild(runButton);
-
-                aiContent.appendChild(controls);
-
-                const notesWrap = document.createElement('div');
-                notesWrap.className = 'ai-review-notes';
-                const notesLabel = document.createElement('label');
-                notesLabel.setAttribute('for', 'aiReviewNotes');
-                notesLabel.textContent = 'Any additional notes for AI review';
-                notesWrap.appendChild(notesLabel);
-                const notesInput = document.createElement('textarea');
-                notesInput.id = 'aiReviewNotes';
-                notesInput.rows = 3;
-                notesInput.placeholder = 'Optional — extra clinical context, prior therapies, specific questions, etc.';
-                notesWrap.appendChild(notesInput);
-                aiContent.appendChild(notesWrap);
-
-                const aiContextInspector = document.createElement('details');
-                aiContextInspector.style.cssText = 'margin:6px 0 2px;font-size:0.80rem;';
-                const aiContextInspectorSummary = document.createElement('summary');
-                aiContextInspectorSummary.style.cssText = 'cursor:pointer;color:#9ca3af;padding:2px 0;list-style:revert;font-size:0.79rem;';
-                aiContextInspectorSummary.textContent = 'Context sent to AI (populated after run)';
-                aiContextInspector.appendChild(aiContextInspectorSummary);
-                const aiContextPre = document.createElement('pre');
-                aiContextPre.style.cssText = 'font-size:0.73rem;white-space:pre-wrap;word-break:break-word;background:#f8fafc;border:1px solid #e5e7eb;padding:8px;border-radius:4px;margin-top:4px;max-height:400px;overflow-y:auto;color:#374151;';
-                aiContextPre.textContent = 'Run AI review to populate this section.';
-                aiContextInspector.appendChild(aiContextPre);
-                aiContent.appendChild(aiContextInspector);
-
-                const aiOutput = document.createElement('div');
-                aiOutput.className = 'ai-review-output';
-                aiContent.appendChild(aiOutput);
-                aiCard.appendChild(aiContent);
-                cardsContainer.appendChild(aiCard);
-
-                runButton.addEventListener('click', async () => {
-                    runButton.disabled = true;
-                    const previousText = runButton.textContent;
-                    runButton.textContent = 'Running…';
-                    aiOutput.innerHTML = '<div class="ai-review-loading">Gathering FDA, trial, and annotation context for AI review…</div>';
-                    try {
-                        const [fdaRecords, bbkbTherapies, clinicalTrialData, supplementalContext] = await Promise.all([
-                            aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
-                            aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null),
-                            aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
-                            fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
-                        ]);
-                        const userNotes = (notesInput.value || '').trim();
-                        const aiContext = {
-                            submitted_variant: rawInput,
-                            normalized_genomic_variant: gVariant,
-                            tumor_type: tumorType,
-                            user_notes: userNotes || undefined,
-                            gene: aiReviewGene,
-                            genes: geneNames,
-                            selected_variant_term: aiReviewSearchVariantTerm,
-                            cdna: aiReviewCdna,
-                            protein: aiReviewProtein,
-                            summary_rows: summaryRows,
-                            details: detailsData,
-                            transcripts: transcriptsList,
-                            fda_companion_diagnostics_records: fdaRecords,
-                            bbkb_biomarker_therapies: bbkbTherapies,
-                            clinical_trials: clinicalTrialData,
-                            supplemental_card_data: supplementalContext,
-                            myvariant_annotation: (() => {
-                                if (!annotation) return null;
-                                const { clinvar, civic, gnomad_exome, dbsnp } = annotation;
-                                // Use dedicated API results when available; fall back to myvariant.info
-                                // only when the dedicated call failed or returned no data.
-                                const clinvarOk = supplementalContext?.clinvar_variant_record && !supplementalContext.clinvar_variant_record.error;
-                                const civicOk = supplementalContext?.civic_api?.gene != null;
-                                const gnomadOk = supplementalContext?.gnomad_v4?.status === 'found';
-                                const trimmed = {};
-                                if (!clinvarOk && clinvar) trimmed.clinvar = clinvar;
-                                if (!civicOk && civic) trimmed.civic = civic;
-                                if (!gnomadOk && gnomad_exome) trimmed.gnomad_exome = gnomad_exome;
-                                if (dbsnp) {
-                                    // Drop noisy fields that don't help variant interpretation:
-                                    // - gene.rnas: ~15 transcript entries that all report the reference
-                                    //   SPDI (e.g. c.818=), not the variant itself.
-                                    // - citations: bare PMID list with no titles/abstracts.
-                                    const { citations: _dbsnpCitations, gene: dbsnpGene, ...dbsnpRest } = dbsnp;
-                                    let trimmedGene = dbsnpGene;
-                                    if (dbsnpGene && typeof dbsnpGene === 'object') {
-                                        const { rnas: _dbsnpRnas, ...geneRest } = dbsnpGene;
-                                        trimmedGene = geneRest;
-                                    }
-                                    trimmed.dbsnp = trimmedGene !== undefined
-                                        ? { ...dbsnpRest, gene: trimmedGene }
-                                        : dbsnpRest;
+            createAiReviewCard({
+                container: cardsContainer,
+                idSuffix: '',
+                introText: 'Send the retrieved variant data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
+                loadingText: 'Gathering FDA, trial, and annotation context for AI review…',
+                buildContext: async (userNotes) => {
+                    const [fdaRecords, bbkbTherapies, clinicalTrialData, supplementalContext] = await Promise.all([
+                        aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
+                        aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null),
+                        aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
+                        fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
+                    ]);
+                    return {
+                        submitted_variant: rawInput,
+                        normalized_genomic_variant: gVariant,
+                        tumor_type: tumorType,
+                        user_notes: userNotes || undefined,
+                        gene: aiReviewGene,
+                        genes: geneNames,
+                        selected_variant_term: aiReviewSearchVariantTerm,
+                        cdna: aiReviewCdna,
+                        protein: aiReviewProtein,
+                        summary_rows: summaryRows,
+                        details: detailsData,
+                        transcripts: transcriptsList,
+                        fda_companion_diagnostics_records: fdaRecords,
+                        bbkb_biomarker_therapies: bbkbTherapies,
+                        clinical_trials: clinicalTrialData,
+                        supplemental_card_data: supplementalContext,
+                        myvariant_annotation: (() => {
+                            if (!annotation) return null;
+                            const { clinvar, civic, gnomad_exome, dbsnp } = annotation;
+                            // Use dedicated API results when available; fall back to myvariant.info
+                            // only when the dedicated call failed or returned no data.
+                            const clinvarOk = supplementalContext?.clinvar_variant_record && !supplementalContext.clinvar_variant_record.error;
+                            const civicOk = supplementalContext?.civic_api?.gene != null;
+                            const gnomadOk = supplementalContext?.gnomad_v4?.status === 'found';
+                            const trimmed = {};
+                            if (!clinvarOk && clinvar) trimmed.clinvar = clinvar;
+                            if (!civicOk && civic) trimmed.civic = civic;
+                            if (!gnomadOk && gnomad_exome) trimmed.gnomad_exome = gnomad_exome;
+                            if (dbsnp) {
+                                // Drop noisy fields that don't help variant interpretation:
+                                // - gene.rnas: ~15 transcript entries that all report the reference
+                                //   SPDI (e.g. c.818=), not the variant itself.
+                                // - citations: bare PMID list with no titles/abstracts.
+                                const { citations: _dbsnpCitations, gene: dbsnpGene, ...dbsnpRest } = dbsnp;
+                                let trimmedGene = dbsnpGene;
+                                if (dbsnpGene && typeof dbsnpGene === 'object') {
+                                    const { rnas: _dbsnpRnas, ...geneRest } = dbsnpGene;
+                                    trimmedGene = geneRest;
                                 }
-                                return Object.keys(trimmed).length > 0 ? trimmed : null;
-                            })(),
-                            ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
-                        };
-                        aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
-                        aiContextInspectorSummary.textContent = 'Context sent to AI';
-                        const data = await fetchAiReview(aiContext, modelSelect.value);
-                        renderAiReview(data.review, aiOutput);
-                    } catch (err) {
-                        aiOutput.innerHTML = '';
-                        const errorEl = document.createElement('div');
-                        errorEl.className = 'ai-review-error';
-                        errorEl.textContent = `AI review unavailable: ${err.message}`;
-                        aiOutput.appendChild(errorEl);
-                    } finally {
-                        runButton.disabled = false;
-                        runButton.textContent = previousText;
-                    }
-                });
-            }
+                                trimmed.dbsnp = trimmedGene !== undefined
+                                    ? { ...dbsnpRest, gene: trimmedGene }
+                                    : dbsnpRest;
+                            }
+                            return Object.keys(trimmed).length > 0 ? trimmed : null;
+                        })(),
+                        ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
+                    };
+                }
+            });
 
             // Show cards and hide legacy tables for a cleaner view
             cardsContainer.classList.remove('hidden');
