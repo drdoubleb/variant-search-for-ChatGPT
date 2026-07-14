@@ -3,8 +3,12 @@
 // This module is intentionally graceful: if the Upstash environment variables are
 // not set (or the optional @upstash packages are not installed), every check
 // returns { ok: true, skipped: true } so the endpoint keeps working with no rate
-// limiting rather than failing. Enable it by setting, in the deployment env:
-//   UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
+// limiting rather than failing. Enable it by providing an Upstash Redis REST URL +
+// token via either:
+//   - the canonical UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN, or
+//   - any Vercel/Upstash Marketplace pair <PREFIX>_REST_API_URL / <PREFIX>_REST_API_TOKEN
+//     (e.g. STORAGE_REST_API_URL / STORAGE_REST_API_TOKEN, KV_REST_API_URL / ...),
+//     which the integration injects automatically. See resolveRedisRestEnv().
 // Optional overrides (defaults in parens):
 //   AI_RL_IP_PER_MIN (12), AI_RL_IP_PER_DAY (120), AI_RL_GLOBAL_PER_DAY (1500)
 //
@@ -21,10 +25,28 @@ function retryAfterSeconds(result) {
     return Math.max(1, Math.ceil((reset - Date.now()) / 1000));
 }
 
+// Resolve the Upstash Redis REST URL + token from the environment, accepting both the
+// canonical UPSTASH_REDIS_REST_* names and the prefixed names the Vercel Marketplace
+// integration injects (<PREFIX>_REST_API_URL / <PREFIX>_REST_API_TOKEN, any prefix).
+function resolveRedisRestEnv() {
+    const env = process.env;
+    if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
+        return { url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN };
+    }
+    // Find any "<PREFIX>_REST_API_URL" with a matching read-write "<PREFIX>_REST_API_TOKEN".
+    // (Skip *_URL like KV_URL, which is a redis:// connection string, not the REST URL.)
+    for (const key of Object.keys(env)) {
+        if (!/_REST_API_URL$/.test(key) || !env[key]) continue;
+        const tokenKey = key.replace(/_REST_API_URL$/, '_REST_API_TOKEN');
+        if (env[tokenKey]) return { url: env[key], token: env[tokenKey] };
+    }
+    return null;
+}
+
 async function buildLimiters() {
-    const url = process.env.UPSTASH_REDIS_REST_URL;
-    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-    if (!url || !token) return null; // not configured → disabled
+    const creds = resolveRedisRestEnv();
+    if (!creds) return null; // not configured → disabled
+    const { url, token } = creds;
 
     // Import lazily so the endpoint runs even when these optional deps are absent.
     const { Ratelimit } = await import('@upstash/ratelimit');

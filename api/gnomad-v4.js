@@ -42,6 +42,11 @@ query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
 }
 `;
 
+// Map a single GRCh37 position to GRCh38 via Ensembl. NOTE: this lifts only the start
+// coordinate (pos..pos) and the caller reuses the original ref/alt verbatim, so the
+// resulting variant ID is reliable for SNVs but not necessarily for indels/MNVs, whose
+// ref allele spans multiple bases and whose GRCh38 representation can differ. It also
+// takes mappings[0] without validating strand/length.
 async function liftoverHg19ToHg38(chrom, pos) {
     const c = String(chrom).replace(/^chr/i, '');
     const p = parseInt(pos, 10);
@@ -107,7 +112,16 @@ export default async function handler(req, res) {
     }
 
     const c = String(chrom).replace(/^chr/i, '');
-    const variantId = `${c}-${pos38}-${ref.toUpperCase()}-${alt.toUpperCase()}`;
+    const refU = String(ref).toUpperCase();
+    const altU = String(alt).toUpperCase();
+    const variantId = `${c}-${pos38}-${refU}-${altU}`;
+
+    // Flag non-SNV lookups: the position-only liftover + verbatim ref/alt can produce an
+    // inexact GRCh38 ID for indels/MNVs, so a not-found result is not conclusive for them.
+    const isSnv = /^[ACGT]$/.test(refU) && /^[ACGT]$/.test(altU);
+    const caveat = isSnv
+        ? undefined
+        : 'Liftover mapped the start position only and reused the ref/alt alleles; for indels/MNVs the GRCh38 variant ID may be inexact, so a not-found result is not conclusive.';
 
     // Step 2: query gnomAD v4
     const result = await gnomadPost('GnomadVariant', VARIANT_QUERY, {
@@ -121,6 +135,7 @@ export default async function handler(req, res) {
             message: `gnomAD API HTTP ${result.status}`,
             grch38Id: variantId,
             detail: result.text.slice(0, 500),
+            ...(caveat ? { caveat } : {}),
         });
     }
 
@@ -132,17 +147,19 @@ export default async function handler(req, res) {
             status: 'api_error',
             message: body.errors.map(e => e.message).join('; '),
             grch38Id: variantId,
+            ...(caveat ? { caveat } : {}),
         });
     }
 
     const variant = body.data && body.data.variant;
     if (!variant) {
-        return res.status(200).json({ status: 'not_found', grch38Id: variantId });
+        return res.status(200).json({ status: 'not_found', grch38Id: variantId, ...(caveat ? { caveat } : {}) });
     }
 
     return res.status(200).json({
         status: 'found',
         grch38Id: variantId,
+        ...(caveat ? { caveat } : {}),
         data: {
             variant_id: variant.variant_id,
             chrom: variant.chrom,

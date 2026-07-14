@@ -3078,8 +3078,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // Monotonic search counter, shared across submits, for the overlapping-search guard.
+    let searchSeq = 0;
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
+        // Guard against overlapping searches. Each submit takes the next sequence
+        // number; any render/append that runs after a newer submit started is stale and
+        // bails via isCurrentSearch(). Without this, a slow earlier search can resolve
+        // after a newer one and overwrite the newer results with stale cards.
+        const mySeq = ++searchSeq;
+        const isCurrentSearch = () => mySeq === searchSeq;
         // Reset any previous gene hint.  Without resetting, a prior search that
         // included a gene symbol could incorrectly influence the next query.
         geneHintGlobal = null;
@@ -5116,7 +5124,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 detailsContainer.appendChild(detailsEl);
             });
 
-            // Build and display cards summarising key annotations
+            // Build and display cards summarising key annotations. Bail if a newer
+            // search started while this one's annotation was being fetched — otherwise
+            // this stale run would clear and rebuild over the newer results.
+            if (!isCurrentSearch()) return;
             const cardsContainer = document.getElementById('cardsContainer');
             cardsContainer.innerHTML = '';
             // Helper to extract field from summaryRows
@@ -5873,6 +5884,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (variantId && /^\d+$/.test(variantId)) {
                     try {
                         const cvData = await fetchClinvarVariant(variantId);
+                        if (!isCurrentSearch()) return; // a newer search superseded this one
                         aiReviewExtras.clinvar_variant_record = cvData;
                         if (cvData) {
                             // If significance is still unresolved (no MyVariant rcv and the
@@ -7120,6 +7132,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         genomic: tp53Genomic || '',
                         debug: true
                     });
+                    if (!isCurrentSearch()) return; // a newer search superseded this one
                     // Strip the `debug` field (dataset fetch attempts, column
                     // listings, etc.) from the AI payload — it's only useful for the
                     // local "Debug info" pane below.
