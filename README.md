@@ -103,6 +103,8 @@ Callers may supply their own OpenRouter key as `openrouter_api_key` in the POST 
 
 Send `{ "mode": "prompt", "context": { ... } }` to receive the fully assembled prompt (`{ prompt, model }`) without calling any model — this powers the "copy prompt" button so users can paste it into their own LLM. It requires no key and incurs no cost (origin-checked only).
 
+Because a person pasting the prompt into a general chat LLM wants the readable answer (not the strict JSON the site parses into cards), this mode appends an output-format override to the end of the shared prompt template instructing the model to disregard the JSON directive and instead produce a Markdown-formatted, human-readable interpretation covering the same fields and tiering rules. There is still only one prompt template (`api/ai-review-prompt.js`); the site's own "Run AI review" continues to request JSON.
+
 ### Optional dependencies
 
 Rate limiting uses [`@upstash/ratelimit`](https://github.com/upstash/ratelimit-js) and `@upstash/redis` (declared in `package.json`). They are imported lazily and only when the `UPSTASH_*` env vars are present, so deployments that don't enable rate limiting don't need them at runtime.
