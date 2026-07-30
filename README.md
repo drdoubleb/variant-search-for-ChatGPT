@@ -166,3 +166,44 @@ strand complementation). Indels have no comparable alleles and their coordinates
 differ between HGVS and ClinVar's own representation, so they are matched on the
 c. notation in the record title instead, normalised so that the user's
 `c.2319_2321delAAT` and ClinVar's `c.2319_2321del` compare equal.
+
+## Resolving c. and p. queries to a genomic position
+
+The Ensembl variant recoder is the primary route from a non-genomic query to a
+genomic coordinate, but it does not cover everything, and the fallbacks matter.
+
+**cDNA (c.) queries.** When the recoder is unavailable or returns no usable
+candidate, the app falls back to Ensembl VEP, which resolves gene-level cDNA HGVS
+(`TSC2:c.4952delA`) that the recoder can miss. VEP's response carries the genomic
+location, so `buildGenomicHgvsFromVep` turns it into a g. string and the lookup
+keeps a real coordinate. Previously only the consequence was read off that
+response, so `g.` kept echoing the user's own query and every coordinate-derived
+card stayed dark even though the variant had been resolved.
+
+**Protein (p.) queries.** These are fundamentally harder, and for two shapes they
+are impossible:
+
+- Frameshifts are rejected outright — *"Frameshifts are not supported for HGVS
+  protein input"*. `p.N1651Mfs*21` can arise from many different indels.
+- A delins spanning several residues has no unique coding change either
+  (`p.L773_I774delinsF` → *"Could not determine nucleotide change from peptide
+  change"*), in single- or three-letter form, against a gene or a protein
+  accession.
+
+Simple substitutions (`p.Val600Glu`) do resolve, so those are unaffected.
+
+What *is* determined by protein notation is the codon. Rather than failing the
+whole lookup, `resolveProteinCodonRegion` maps the residue range to GRCh37
+coordinates via the gene's canonical translation (Ensembl `/lookup/symbol` then
+`/map/translation`), and the lookup continues with `gVariant` set to a bare span
+such as `chr16:g.2136834_2136836`. `parseGenomicHgvs` reads that as type `region`:
+position-based cards (UCSC, ClinVar region search, nearby variants, gene-level
+CIViC/OncoKB/FDA/trials/PubMed) work, while allele-based ones (VCF line, gnomAD
+v4.1, SpliceAI) correctly report nothing. The Variant card labels the line
+**Codon region (hg19)** and states which residues resolved and why the exact
+nucleotide change is unavailable. A residue beyond the end of the canonical
+protein is rejected rather than silently mapped to the wrong locus.
+
+Queries that cannot even be resolved to a codon fail with a message naming the
+reason and pointing at c./g. notation, instead of the previous bare
+"Variant not found via Ensembl Variant Recoder".
