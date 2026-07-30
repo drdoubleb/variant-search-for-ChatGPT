@@ -144,9 +144,16 @@ is often absent too. Coordinates are therefore resolved in two stages:
    left-alignment the lookup misses. Events wider than 1 kb are skipped, as they
    are not represented as ref/alt strings by those resources anyway.
 
-The resolution runs once per lookup and is shared by the gnomAD v2 link, the
-gnomAD v4.1 query, the SpliceAI card and the AI review context. Cards render
-immediately and upgrade in place when the alleles land.
+The resolution runs once per lookup and is shared by the Variant card's
+**VCF (hg19)** line, the gnomAD v2 link, the gnomAD v4.1 query, the SpliceAI card
+and the AI review context. Cards render immediately and upgrade in place when the
+alleles land.
+
+The Variant card shows the resolved `CHROM-POS-REF-ALT` next to the g. notation,
+since that is the form gnomAD, SpliceAI and most VCF-derived tools index by. When
+left-alignment moved the position it is marked `(left-aligned)` with a tooltip, so
+a coordinate that disagrees with the 3'-shifted g. notation above it does not read
+as a bug.
 
 `api/gnomad-v4.js` lifts only the anchor position GRCh37→GRCh38 and reuses the
 alleles, which is exact for SNVs but can land an indel a few bases off how gnomAD

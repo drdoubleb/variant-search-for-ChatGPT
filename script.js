@@ -5924,6 +5924,34 @@ document.addEventListener('DOMContentLoaded', () => {
                     return span;
                 };
                 content.appendChild(makeLine('g.', gVariant));
+                // VCF-style CHROM-POS-REF-ALT (GRCh37) — the form gnomAD, SpliceAI and
+                // most VCF-derived tools index by, and the one to paste into them.
+                // Resolved asynchronously because an indel's alleles are read off the
+                // reference; rendered as a placeholder so the line keeps its position.
+                const vcfLine = document.createElement('span');
+                vcfLine.innerHTML = '<strong>VCF (hg19):</strong> <span style="color:#9ca3af;">resolving…</span>';
+                content.appendChild(vcfLine);
+                getResolvedVcfAlleles().then((alleles) => {
+                    if (!alleles || !alleles.ref || !alleles.alt) {
+                        vcfLine.innerHTML = '<strong>VCF (hg19):</strong> N/A';
+                        return;
+                    }
+                    const vcfId = `${alleles.chrom}-${alleles.pos}-${alleles.ref}-${alleles.alt}`;
+                    vcfLine.innerHTML = `<strong>VCF (hg19):</strong> ${escapeHtml(vcfId)}`;
+                    // Only flag the shift when the position actually moved — otherwise the
+                    // caveat reads as a warning about a variant that has nothing to warn about.
+                    const gStart = parseGenomicHgvs(gVariant)?.start;
+                    if (alleles.source === 'reference' && gStart !== undefined && Number(alleles.pos) !== gStart) {
+                        // Explain the coordinate mismatch a reader would otherwise take
+                        // for a bug: HGVS shifts indels 3′, VCF left-aligns them.
+                        vcfLine.title = 'Left-aligned against the GRCh37 reference. HGVS places an indel at its 3′-most position while VCF (and gnomAD) use the 5′-most one, so this position can differ from the g. notation above.';
+                        const note = document.createElement('span');
+                        note.style.cssText = 'font-size:0.75rem;color:#6b7280;';
+                        note.textContent = '(left-aligned)';
+                        vcfLine.appendChild(document.createTextNode(' '));
+                        vcfLine.appendChild(note);
+                    }
+                });
                 content.appendChild(makeLine('Gene', geneNames));
                 // Determine canonical cDNA and protein from transcriptsList. If not available, fall back to first values.
                 let canonicalEntryForDisplay = null;
