@@ -17,12 +17,58 @@ function complementBase(b) {
     return { A: 'T', T: 'A', C: 'G', G: 'C' }[String(b || '').toUpperCase()] || '';
 }
 
-function findExactClinvarRegionMatch(variants, tuple) {
+// Normalise a cDNA HGVS string for comparison across sources. Strips any accession
+// prefix and the optionally spelled-out reference bases, so the user's
+// "c.2319_2321delAAT" and ClinVar's "c.2319_2321del" compare equal. Inserted bases
+// are kept, because insAA and insTT are genuinely different variants.
+function normalizeCdnaForMatch(cdna) {
+    let s = String(cdna || '').trim().toLowerCase().replace(/\s+/g, '');
+    const colon = s.lastIndexOf(':');
+    if (colon !== -1) s = s.slice(colon + 1);
+    if (!/^[cn]\./.test(s)) return '';
+    s = s.replace(/^[cn]\./, 'c.');
+    s = s.replace(/del[acgt]+(?=ins)/, 'del');
+    s = s.replace(/(del|dup|inv)[acgt]+$/, '$1');
+    return s;
+}
+
+// Locate the ClinVar region-pull entry that corresponds to the exact queried
+
+// ClinVar itself has an entry — the per-variant lookup otherwise shows "N/A".
+//
+// variants: array of region-pull records ({ id, title, variationName, pos, germline }).
+// tuple:    queried variant ({ pos, ref, alt }) from buildVariantCoordinateTuple.
+//
+// Matching is intentionally conservative: only single-nucleotide substitutions
+// are recovered, and the substitution bases in the ClinVar title must match the
+// queried alleles (allowing for transcript-strand complementation on minus-strand
+// genes). When two SNVs share a position (e.g. G>C and G>A) the allele check
+// disambiguates; if no entry's alleles match, no fallback is applied.
+//
+// cdnaForms: optional list of the queried variant's cDNA HGVS strings. Indels have
+// no ref/alt to compare, and their genomic coordinates differ between HGVS (3'-shifted)
+// and ClinVar's own representation, so they are matched on the c. notation in the
+// record title instead — which is exactly how a user would recognise the record.
+function findExactClinvarRegionMatch(variants, tuple, cdnaForms) {
     if (!Array.isArray(variants) || !tuple || !tuple.pos) return null;
     const pos = Number(tuple.pos);
     const ref = String(tuple.ref || '').toUpperCase();
     const alt = String(tuple.alt || '').toUpperCase();
-    if (!/^[ACGT]$/.test(ref) || !/^[ACGT]$/.test(alt)) return null;
+    if (!/^[ACGT]$/.test(ref) || !/^[ACGT]$/.test(alt)) {
+        // Non-SNV: fall back to cDNA-notation matching when forms were supplied.
+        const wanted = new Set(
+            (Array.isArray(cdnaForms) ? cdnaForms : [cdnaForms])
+                .map(normalizeCdnaForMatch)
+                .filter(Boolean)
+        );
+        if (wanted.size === 0) return null;
+        for (const v of variants) {
+            const text = [v.title, v.variationName].filter(Boolean).join(' ');
+            const tokens = text.match(/c\.[A-Za-z0-9_>+*\-]+/gi) || [];
+            if (tokens.some((t) => wanted.has(normalizeCdnaForMatch(t)))) return v;
+        }
+        return null;
+    }
 
     const refC = complementBase(ref);
     const altC = complementBase(alt);
@@ -134,9 +180,40 @@ const minusStrandRegion = [
 check('matches across strand complement (genomic G>A ↔ coding C>T)',
     findExactClinvarRegionMatch(minusStrandRegion, { pos: '7577120', ref: 'G', alt: 'A' })?.id === '12345');
 
-// Indels are not recovered (allele matching is unreliable for them).
-check('does not attempt recovery for indels',
+// Indels carry no comparable ref/alt, so they are recovered from the c. notation
+// in the record title instead. Without cDNA forms there is nothing to match on.
+check('indel with no cDNA forms supplied → null',
     findExactClinvarRegionMatch(ctnnb1Region, { pos: '41266103', ref: 'G', alt: 'GG' }) === null);
+
+// TSC2 c.2319_2321delAAT: the recoder normalises this to chr16:g.2122948_2122950del,
+// which has no alleles at all. ClinVar titles it "c.2319_2321del" (bases dropped).
+const tsc2Region = [
+    { id: '821088', pos: 2122948, title: 'NM_000548.5(TSC2):c.2319A>G (p.Leu773=)', variationName: '', germline: 'Benign/Likely benign' },
+    { id: '700001', pos: 2122948, title: 'NM_000548.5(TSC2):c.2319_2321del (p.Leu773_Ile774delinsPhe)', variationName: '', germline: 'Likely pathogenic' },
+];
+check('recovers a deletion by cDNA notation, ignoring spelled-out bases',
+    findExactClinvarRegionMatch(tsc2Region, { pos: '2122948', ref: null, alt: null },
+        ['c.2319_2321delAAT'])?.id === '700001');
+check('accepts an accession-prefixed cDNA form',
+    findExactClinvarRegionMatch(tsc2Region, { pos: '2122948', ref: null, alt: null },
+        ['NM_000548.5:c.2319_2321del'])?.id === '700001');
+check('a different deletion at the same locus does not match',
+    findExactClinvarRegionMatch(tsc2Region, { pos: '2122948', ref: null, alt: null },
+        ['c.2319_2320del']) === null);
+check('insertions are distinguished by their inserted bases',
+    findExactClinvarRegionMatch(
+        [{ id: '1', pos: 100, title: 'NM_1(X):c.100_101insAA', variationName: '', germline: '' }],
+        { pos: '100', ref: null, alt: null }, ['c.100_101insTT']) === null);
+
+// normalizeCdnaForMatch itself.
+check('strips deleted bases', normalizeCdnaForMatch('c.2319_2321delAAT') === 'c.2319_2321del');
+check('strips duplicated bases', normalizeCdnaForMatch('NM_000548.5:c.100_102dupCTG') === 'c.100_102dup');
+check('keeps inserted bases', normalizeCdnaForMatch('c.100_101insAA') === 'c.100_101insaa');
+check('strips the deleted side of a delins only',
+    normalizeCdnaForMatch('c.100_102delAATinsG') === 'c.100_102delinsg');
+check('accepts n. notation from non-coding transcripts',
+    normalizeCdnaForMatch('ENST00000463808.1:n.353_355del') === 'c.353_355del');
+check('rejects protein notation', normalizeCdnaForMatch('p.Val600Glu') === '');
 
 // Guard inputs.
 check('null variants → null', findExactClinvarRegionMatch(null, { pos: '1', ref: 'A', alt: 'C' }) === null);
