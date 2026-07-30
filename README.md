@@ -115,3 +115,54 @@ The AI review payload also includes a `supplemental_card_data` object populated 
 ## SpliceAI Lookup proxy
 
 The SpliceAI card uses `api/spliceai.js` as a lightweight proxy to the Broad Institute SpliceAI Lookup API. The proxy accepts variants in `chr-pos-ref-alt` format and forwards interactive-use requests with hg, distance, mask, and Gencode (`bc`) parameters. Returned scores are displayed in the SpliceAI card and included in the AI review payload under `supplemental_card_data.spliceai_lookup`.
+
+## Genomic coordinates and VCF alleles
+
+Several cards need more than a gene and a protein change: the UCSC link and the
+ClinVar region pull need a genomic position, while gnomAD, SpliceAI and the
+gnomAD variant pages need VCF-style `chr-pos-ref-alt` alleles.
+
+Only substitutions carry their alleles in the notation. A multi-base indel comes
+back from the Ensembl variant recoder as a bare span — `TSC2 c.2319_2321delAAT`
+normalises to `chr16:g.2122948_2122950del`, with no REF or ALT anywhere in the
+string — and MyVariant.info does not index every such variant, so its `vcf` block
+is often absent too. Coordinates are therefore resolved in two stages:
+
+1. **`parseGenomicHgvs` / `buildVariantCoordinateTuple`** parse every genomic HGVS
+   form (`sub`, `del`, `dup`, `ins`, `inv`, `delins`, and the `REF>-` / `->ALT`
+   spellings the SPDI converter emits) into a chromosome plus a start/end span.
+   Alleles are reported as `null` rather than guessed. Position-only consumers —
+   the UCSC hg19 link, the ClinVar region search and nearby-variant plot, the
+   gnomAD region view — work off this alone.
+2. **`resolveVcfAlleles`** fills in the alleles for allele-dependent consumers,
+   preferring what the notation already carries, then MyVariant's `vcf` block, and
+   finally reading the bases off the GRCh37 reference (Ensembl
+   `/sequence/region`, ±60 bp) and anchoring them VCF-style on the preceding base.
+   The result is then **left-aligned**, because HGVS shifts indels 3′ while VCF —
+   and therefore gnomAD — indexes the 5′-most representation. CFTR F508del is
+   `g.117199646_117199648del` in HGVS but `7-117199644-ATCT-A` in gnomAD; without
+   left-alignment the lookup misses. Events wider than 1 kb are skipped, as they
+   are not represented as ref/alt strings by those resources anyway.
+
+The resolution runs once per lookup and is shared by the Variant card's
+**VCF (hg19)** line, the gnomAD v2 link, the gnomAD v4.1 query, the SpliceAI card
+and the AI review context. Cards render immediately and upgrade in place when the
+alleles land.
+
+The Variant card shows the resolved `CHROM-POS-REF-ALT` next to the g. notation,
+since that is the form gnomAD, SpliceAI and most VCF-derived tools index by. When
+left-alignment moved the position it is marked `(left-aligned)` with a tooltip, so
+a coordinate that disagrees with the 3'-shifted g. notation above it does not read
+as a bug.
+
+`api/gnomad-v4.js` lifts only the anchor position GRCh37→GRCh38 and reuses the
+alleles, which is exact for SNVs but can land an indel a few bases off how gnomAD
+indexes it. When the constructed ID misses for a non-SNV, the proxy scans a small
+region around the lifted position for a record carrying the same alleles before
+reporting `not_found`; a match is reported with a `matchedVia` note.
+
+ClinVar recovery from the region pull matches SNVs on position plus alleles (with
+strand complementation). Indels have no comparable alleles and their coordinates
+differ between HGVS and ClinVar's own representation, so they are matched on the
+c. notation in the record title instead, normalised so that the user's
+`c.2319_2321delAAT` and ClinVar's `c.2319_2321del` compare equal.

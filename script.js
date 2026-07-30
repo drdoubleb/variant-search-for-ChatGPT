@@ -89,7 +89,8 @@ const API_TIMEOUT_MS = {
     clinicalTrials: 20000,
     spliceai: 25000,
     aiReview: 60000,
-    openFda: 12000
+    openFda: 12000,
+    ensemblSequence: 8000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -122,9 +123,75 @@ const isGenomicVariant = (variant) => {
 };
 
 
-// Build a SpliceAI lookup tuple from either raw user input (preferred) or a normalised g. variant.
-// Returns an object { chrom, pos, ref, alt } when enough information is available, else null.
-function buildSpliceAiLookupTuple(rawInput, gVariant) {
+// Parse a genomic HGVS string into a structural descriptor.
+//
+// Covers every g. form the app can produce or receive, not just substitutions:
+//   chr7:g.140453136A>T            → { type: 'sub',    start: 140453136, end: 140453136 }
+//   chr16:g.2122948A>-             → { type: 'del',    start: 2122948,   end: 2122948   }
+//   chr16:g.2122948_2122950del     → { type: 'del',    start: 2122948,   end: 2122950   }
+//   chr16:g.2122948_2122950delAAT  → { type: 'del', refSeq: 'AAT' }
+//   chr7:g.55242465_55242479del    → { type: 'del' }
+//   chr2:g.29443695_29443696dup    → { type: 'dup' }
+//   chr4:g.55593603_55593604insTT  → { type: 'ins' }
+//   chr7:g.140453136_140453137delinsAA → { type: 'delins', altSeq: 'AA' }
+//   chr3:g.10183694_10183700inv    → { type: 'inv' }
+//
+// Returns null when the string is not a recognisable genomic HGVS descriptor.
+// `refSeq`/`altSeq` are only populated when the notation spells the bases out;
+// callers that need the actual alleles fill the gaps from a reference sequence
+// (see resolveVcfAlleles) rather than assuming they are present.
+function parseGenomicHgvs(gVariant) {
+    if (!gVariant) return null;
+    const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.+)$/i);
+    if (!m) return null;
+    const chrom = `chr${m[1].toUpperCase()}`;
+    const start = Number(m[2]);
+    const explicitEnd = m[3] ? Number(m[3]) : null;
+    const suffix = m[4].trim();
+    const mk = (type, end, refSeq, altSeq) => ({
+        chrom,
+        start,
+        end: Number.isFinite(end) ? end : start,
+        type,
+        refSeq: refSeq || null,
+        altSeq: altSeq || null
+    });
+
+    // Substitution — including the "REF>-" / "->ALT" forms that the SPDI converter
+    // emits for single-base deletions and insertions.
+    let s = suffix.match(/^([A-Za-z-]+)>([A-Za-z-]+)$/);
+    if (s) {
+        const ref = s[1].toUpperCase();
+        const alt = s[2].toUpperCase();
+        if (ref === '-' && alt !== '-') return mk('ins', start, null, alt);
+        if (alt === '-' && ref !== '-') return mk('del', start + ref.length - 1, ref, null);
+        if (ref === '-' || alt === '-') return null;
+        return mk(ref.length === 1 && alt.length === 1 ? 'sub' : 'delins', explicitEnd ?? (start + ref.length - 1), ref, alt);
+    }
+    // delins — must be tested before plain "del" so "delinsAA" is not read as a deletion.
+    s = suffix.match(/^del([A-Za-z]*)ins([A-Za-z]+)$/i);
+    if (s) return mk('delins', explicitEnd ?? start, s[1] ? s[1].toUpperCase() : null, s[2].toUpperCase());
+    s = suffix.match(/^del([A-Za-z]*)$/i);
+    if (s) return mk('del', explicitEnd ?? start, s[1] ? s[1].toUpperCase() : null, null);
+    s = suffix.match(/^dup([A-Za-z]*)$/i);
+    if (s) return mk('dup', explicitEnd ?? start, s[1] ? s[1].toUpperCase() : null, null);
+    s = suffix.match(/^ins([A-Za-z]+)$/i);
+    if (s) return mk('ins', explicitEnd ?? start, null, s[1].toUpperCase());
+    s = suffix.match(/^inv([A-Za-z]*)$/i);
+    if (s) return mk('inv', explicitEnd ?? start, s[1] ? s[1].toUpperCase() : null, null);
+    return null;
+}
+
+// Build a genomic coordinate tuple from either raw user input (preferred) or a
+// normalised g. variant. Returns { chrom, pos, ref, alt, start, end, type } when
+// enough information is available, else null.
+//
+// `ref`/`alt` are null for notations that do not spell the alleles out (plain
+// del/dup/inv). Position data is still returned in that case, so coordinate-only
+// consumers — the UCSC link, the ClinVar region pull, the nearby-variant plot —
+// keep working for indels; allele-dependent consumers resolve the bases against
+// the reference sequence via resolveVcfAlleles().
+function buildVariantCoordinateTuple(rawInput, gVariant) {
     const parseTokenInput = (raw) => {
         if (!raw) return null;
         const toks = String(raw).trim().split(/\s+/).filter(Boolean);
@@ -143,32 +210,193 @@ function buildSpliceAiLookupTuple(rawInput, gVariant) {
         if (!/^[0-9XYMT]+$/.test(chrom)) return null;
         if (!/^\d+$/.test(pos)) return null;
         if (!/^[A-Za-z-]+$/.test(ref) || !/^[A-Za-z-]+$/.test(alt)) return null;
-        return { chrom: `chr${chrom}`, pos, ref, alt };
+        const startNum = Number(pos);
+        return {
+            chrom: `chr${chrom}`, pos, ref, alt,
+            start: startNum, end: startNum + Math.max(ref.length, 1) - 1,
+            type: ref.length === 1 && alt.length === 1 ? 'sub' : 'delins'
+        };
     };
-    const parseSimpleGenomic = (gv) => {
-        if (!gv) return null;
-        const m = String(gv).match(/^chr([0-9XYMT]+):g\.(\d+)([A-Za-z-]+)>([A-Za-z-]+)$/i);
-        if (!m) return null;
-        return { chrom: `chr${m[1].toUpperCase()}`, pos: m[2], ref: m[3].toUpperCase(), alt: m[4].toUpperCase() };
+    // Parse any genomic HGVS form (sub / del / dup / ins / inv / delins).
+    const parseHgvs = (gv) => {
+        const desc = parseGenomicHgvs(gv);
+        if (!desc) return null;
+        return {
+            chrom: desc.chrom,
+            pos: String(desc.start),
+            ref: desc.type === 'sub' ? desc.refSeq : null,
+            alt: desc.type === 'sub' ? desc.altSeq : null,
+            start: desc.start,
+            end: desc.end,
+            type: desc.type
+        };
     };
-    // Parses delins notation (MNVs/complex indels) to extract position; ref is unavailable.
-    const parseDelins = (gv) => {
-        if (!gv) return null;
-        const m = String(gv).match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?delins([A-Za-z]+)$/i);
-        if (!m) return null;
-        return { chrom: `chr${m[1].toUpperCase()}`, pos: m[2], ref: null, alt: m[4].toUpperCase() };
-    };
-    return parseTokenInput(rawInput) || parseSimpleGenomic(gVariant) || parseDelins(gVariant) || null;
+    return parseTokenInput(rawInput) || parseHgvs(gVariant) || null;
+}
+
+function reverseComplementSeq(seq) {
+    const comp = { A: 'T', T: 'A', C: 'G', G: 'C', N: 'N' };
+    return String(seq || '').toUpperCase().split('').reverse().map((b) => comp[b] || 'N').join('');
+}
+
+// Fetch GRCh37 reference bases for an inclusive 1-based interval.
+async function fetchGrch37ReferenceSequence(chrom, start, end) {
+    const c = String(chrom || '').replace(/^chr/i, '');
+    if (!c || !Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+    const url = `https://grch37.rest.ensembl.org/sequence/region/human/${c}:${start}..${end}?content-type=text/plain`;
+    const res = await fetchWithTimeout(url, { headers: { 'Accept': 'text/plain' } }, API_TIMEOUT_MS.ensemblSequence);
+    if (!res.ok) throw new Error(`Ensembl sequence request failed (${res.status})`);
+    const seq = (await res.text()).trim().toUpperCase();
+    if (!/^[ACGTN]+$/.test(seq) || seq.length !== end - start + 1) {
+        throw new Error('Unexpected Ensembl sequence payload');
+    }
+    return seq;
+}
+
+// Turn an HGVS g. descriptor into anchored VCF-style alleles using a reference
+// window. `windowStart` is the 1-based coordinate of seq[0].
+//
+// HGVS describes indels by the affected span and shifts them 3'; VCF (and therefore
+// gnomAD, SpliceAI and every VCF-derived resource) anchors them on the preceding
+// base. Without this conversion an indel has no ref/alt at all, which is why the
+// allele-dependent cards go blank for anything more complex than a substitution.
+function vcfAllelesFromGenomicHgvs(desc, windowStart, seq) {
+    if (!desc || !seq) return null;
+    const baseAt = (p) => seq[p - windowStart] || '';
+    const sliceAt = (a, b) => seq.slice(a - windowStart, b - windowStart + 1);
+    const { start, end, type } = desc;
+    switch (type) {
+        case 'sub': {
+            const ref = desc.refSeq || baseAt(start);
+            if (!ref || !desc.altSeq) return null;
+            return { pos: start, ref, alt: desc.altSeq };
+        }
+        case 'delins': {
+            const ref = sliceAt(start, end) || desc.refSeq;
+            if (!ref || !desc.altSeq) return null;
+            return { pos: start, ref, alt: desc.altSeq };
+        }
+        case 'del': {
+            const deleted = sliceAt(start, end);
+            const anchor = baseAt(start - 1);
+            if (!deleted || !anchor) return null;
+            return { pos: start - 1, ref: anchor + deleted, alt: anchor };
+        }
+        case 'dup': {
+            // The duplicated copy is inserted immediately after `end`.
+            const duplicated = sliceAt(start, end);
+            const anchor = baseAt(end);
+            if (!duplicated || !anchor) return null;
+            return { pos: end, ref: anchor, alt: anchor + duplicated };
+        }
+        case 'ins': {
+            // g.START_ENDins uses START as the base preceding the insertion point.
+            const anchor = baseAt(start);
+            if (!anchor || !desc.altSeq) return null;
+            return { pos: start, ref: anchor, alt: anchor + desc.altSeq };
+        }
+        case 'inv': {
+            const ref = sliceAt(start, end);
+            if (!ref) return null;
+            return { pos: start, ref, alt: reverseComplementSeq(ref) };
+        }
+        default:
+            return null;
+    }
+}
+
+// Left-align VCF alleles against the reference (the bcftools/vt normalisation).
+// gnomAD stores the 5'-most representation while HGVS uses the 3'-most, so an
+// indel in a repeat looks like a different variant unless it is normalised —
+// e.g. CFTR F508del is g.117199646_117199648del in HGVS but 117199644 ATCT>A in
+// gnomAD. Returns the input unchanged when the reference window runs out.
+function leftNormalizeVcfAlleles(pos, ref, alt, windowStart, seq) {
+    let p = Number(pos);
+    let r = String(ref || '').toUpperCase();
+    let a = String(alt || '').toUpperCase();
+    if (!Number.isFinite(p) || !r || !a) return { pos, ref, alt };
+    // Bounded so a malformed window can never spin here.
+    for (let i = 0; i < 500; i++) {
+        if (r.length > 0 && a.length > 0 && r[r.length - 1] === a[a.length - 1]) {
+            r = r.slice(0, -1);
+            a = a.slice(0, -1);
+            continue;
+        }
+        if (r.length === 0 || a.length === 0) {
+            const prevBase = seq && seq[p - 1 - windowStart];
+            if (!prevBase) break;
+            r = prevBase + r;
+            a = prevBase + a;
+            p -= 1;
+            continue;
+        }
+        break;
+    }
+    // A fully consumed allele means we walked off the window; keep the input.
+    if (!r || !a) return { pos, ref, alt };
+    return { pos: p, ref: r, alt: a };
+}
+
+// Widest indel we will try to express as VCF alleles. Larger events are structural
+// and are not represented as ref/alt strings by gnomAD or SpliceAI anyway.
+const MAX_VCF_ALLELE_SPAN = 1000;
+// Padding fetched on each side of the variant so left-alignment has room to shift.
+const VCF_NORMALIZATION_PAD = 60;
+
+// Resolve GRCh37 VCF-style alleles for the queried variant.
+//
+// Order of preference:
+//   1. alleles already present in the tuple (raw token input, or a substitution)
+//   2. MyVariant.info's `vcf` block, when the variant is indexed there
+//   3. the reference sequence, for indels that carry no alleles in their notation
+//
+// Returns { chrom, pos, ref, alt, source } or null. Never throws.
+async function resolveVcfAlleles(rawInput, gVariant, annotation) {
+    const tuple = buildVariantCoordinateTuple(rawInput, gVariant);
+    if (!tuple || !tuple.chrom) return null;
+    const chrom = tuple.chrom.replace(/^chr/i, '');
+    if (tuple.ref && tuple.alt && tuple.ref !== '-' && tuple.alt !== '-') {
+        return { chrom, pos: String(tuple.pos), ref: tuple.ref, alt: tuple.alt, source: 'notation' };
+    }
+    const vcfData = annotation && annotation.vcf;
+    const vcfRef = vcfData && String(vcfData.ref || '').toUpperCase();
+    const vcfAlt = vcfData && String(vcfData.alt || '').toUpperCase();
+    if (vcfRef && vcfAlt && /^[ACGTN]+$/.test(vcfRef) && /^[ACGTN]+$/.test(vcfAlt)) {
+        const vcfPos = vcfData.position ?? vcfData.pos ?? tuple.pos;
+        return { chrom, pos: String(vcfPos), ref: vcfRef, alt: vcfAlt, source: 'myvariant' };
+    }
+    const desc = parseGenomicHgvs(gVariant);
+    if (!desc) return null;
+    if (desc.end - desc.start > MAX_VCF_ALLELE_SPAN) return null;
+    const windowStart = Math.max(1, desc.start - VCF_NORMALIZATION_PAD);
+    const windowEnd = desc.end + VCF_NORMALIZATION_PAD;
+    try {
+        const seq = await fetchGrch37ReferenceSequence(chrom, windowStart, windowEnd);
+        if (!seq) return null;
+        const anchored = vcfAllelesFromGenomicHgvs(desc, windowStart, seq);
+        if (!anchored) return null;
+        const normalized = leftNormalizeVcfAlleles(anchored.pos, anchored.ref, anchored.alt, windowStart, seq);
+        return { chrom, pos: String(normalized.pos), ref: normalized.ref, alt: normalized.alt, source: 'reference' };
+    } catch (err) {
+        console.warn('VCF allele resolution failed', err);
+        return null;
+    }
 }
 
 // Build a gnomAD variant-browser URL from either raw token input (preferred) or
 // a simple genomic substitution HGVS string.
 // vcfData: optional annotation.vcf object {ref, alt, position} from myvariant.info —
 // used to recover REF for MNVs where the delins gVariant notation drops the reference.
-function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData) {
+// resolvedAlleles: optional { chrom, pos, ref, alt } from resolveVcfAlleles(), which
+// recovers VCF alleles for indels whose HGVS notation does not spell them out.
+function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData, resolvedAlleles) {
+    if (resolvedAlleles && resolvedAlleles.chrom && resolvedAlleles.pos && resolvedAlleles.ref && resolvedAlleles.alt) {
+        const { chrom, pos, ref, alt } = resolvedAlleles;
+        return `https://gnomad.broadinstitute.org/variant/${chrom}-${pos}-${ref}-${alt}?dataset=gnomad_r2_1`;
+    }
     // Raw token input (e.g. "10 89692913 PTEN G GG") is preferred because it
     // preserves REF/ALT for indels even when gVariant is normalised to ins/delins.
-    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+    const tuple = buildVariantCoordinateTuple(rawInput, gVariant);
     if (tuple) {
         const chrom = tuple.chrom.replace(/^chr/i, '');
         const ref = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
@@ -176,10 +404,11 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData) {
         if (ref && alt) {
             return `https://gnomad.broadinstitute.org/variant/${chrom}-${tuple.pos}-${ref}-${alt}?dataset=gnomad_r2_1`;
         }
-        // No REF available even from vcfData — fall back to a region view so the button still appears.
-        const posNum = Number(tuple.pos);
-        const altLen = (alt || '').length || 1;
-        return `https://gnomad.broadinstitute.org/region/${chrom}-${posNum}-${posNum + altLen - 1}?dataset=gnomad_r2_1`;
+        // No alleles available — fall back to a region view spanning the variant so
+        // the button still appears (and, for an indel, actually covers the event).
+        const startNum = Number(tuple.start ?? tuple.pos);
+        const endNum = Number(tuple.end ?? tuple.pos);
+        return `https://gnomad.broadinstitute.org/region/${chrom}-${startNum}-${Math.max(startNum, endNum)}?dataset=gnomad_r2_1`;
     }
     // Fallback: use annotation/gVariant only for simple substitutions.
     const source = annotationId || gVariant || '';
@@ -188,8 +417,9 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData) {
     return `https://gnomad.broadinstitute.org/variant/${m[1]}-${m[2]}-${m[3].toUpperCase()}-${m[4].toUpperCase()}?dataset=gnomad_r2_1`;
 }
 
-// Build a UCSC Genome Browser link (hg19/GRCh37) centered on a 20-nt window
-// around the variant location (10 upstream, 9 downstream).
+// Build a UCSC Genome Browser link (hg19/GRCh37) centered on the variant, with a
+// minimum 20-nt window (10 upstream, 9 downstream) that widens to keep a
+// multi-base event and 10 nt of flank in view.
 function buildUcscHg19Url(rawInput, gVariant, annotation) {
     const toUcscChrom = (chrom) => {
         if (!chrom) return '';
@@ -204,9 +434,14 @@ function buildUcscHg19Url(rawInput, gVariant, annotation) {
         const s = Number(start);
         const e = Number(end);
         if (!Number.isFinite(s) || !Number.isFinite(e)) return null;
-        const center = Math.round((Math.min(s, e) + Math.max(s, e)) / 2);
-        const winStart = Math.max(1, center - 10);
-        const winEnd = winStart + 19;
+        const lo = Math.min(s, e);
+        const hi = Math.max(s, e);
+        const center = Math.round((lo + hi) / 2);
+        let winStart = Math.max(1, center - 10);
+        let winEnd = winStart + 19;
+        // Widen for multi-base events so the whole span plus flanks stays visible.
+        if (lo - 10 < winStart) winStart = Math.max(1, lo - 10);
+        if (hi + 10 > winEnd) winEnd = hi + 10;
         return { start: winStart, end: winEnd };
     };
 
@@ -219,14 +454,15 @@ function buildUcscHg19Url(rawInput, gVariant, annotation) {
         return `https://genome.ucsc.edu/cgi-bin/hgTracks?${qs.toString()}`;
     };
 
-    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+    const tuple = buildVariantCoordinateTuple(rawInput, gVariant);
     if (tuple && tuple.chrom && tuple.pos) {
         const ucscChrom = toUcscChrom(tuple.chrom);
-        const pos = Number(tuple.pos);
-        const win = toTwentyNtWindow(pos);
-        if (ucscChrom && Number.isFinite(pos) && win) {
+        const spanStart = Number(tuple.start ?? tuple.pos);
+        const spanEnd = Number(tuple.end ?? tuple.pos);
+        const win = toTwentyNtWindow(spanStart, spanEnd);
+        if (ucscChrom && Number.isFinite(spanStart) && Number.isFinite(spanEnd) && win) {
             const region = `${ucscChrom}:${win.start}-${win.end}`;
-            const highlightRegion = `${ucscChrom}:${pos}-${pos}`;
+            const highlightRegion = `${ucscChrom}:${Math.min(spanStart, spanEnd)}-${Math.max(spanStart, spanEnd)}`;
             return buildUcscUrl(region, highlightRegion);
         }
     }
@@ -849,26 +1085,59 @@ function complementBase(b) {
     return { A: 'T', T: 'A', C: 'G', G: 'C' }[String(b || '').toUpperCase()] || '';
 }
 
+// Normalise a cDNA HGVS string for comparison across sources. Strips any accession
+// prefix and the optionally spelled-out reference bases, so the user's
+// "c.2319_2321delAAT" and ClinVar's "c.2319_2321del" compare equal. Inserted bases
+// are kept, because insAA and insTT are genuinely different variants.
+function normalizeCdnaForMatch(cdna) {
+    let s = String(cdna || '').trim().toLowerCase().replace(/\s+/g, '');
+    const colon = s.lastIndexOf(':');
+    if (colon !== -1) s = s.slice(colon + 1);
+    if (!/^[cn]\./.test(s)) return '';
+    s = s.replace(/^[cn]\./, 'c.');
+    s = s.replace(/del[acgt]+(?=ins)/, 'del');
+    s = s.replace(/(del|dup|inv)[acgt]+$/, '$1');
+    return s;
+}
+
 // Locate the ClinVar region-pull entry that corresponds to the exact queried
 // variant (same genomic position and substitution). This is used as a fallback
 // when MyVariant.info carries no `clinvar` block for the variant even though
 // ClinVar itself has an entry — the per-variant lookup otherwise shows "N/A".
 //
 // variants: array of region-pull records ({ id, title, variationName, pos, germline }).
-// tuple:    queried variant ({ pos, ref, alt }) from buildSpliceAiLookupTuple.
+// tuple:    queried variant ({ pos, ref, alt }) from buildVariantCoordinateTuple.
 //
 // Matching is intentionally conservative: only single-nucleotide substitutions
 // are recovered, and the substitution bases in the ClinVar title must match the
 // queried alleles (allowing for transcript-strand complementation on minus-strand
 // genes). When two SNVs share a position (e.g. G>C and G>A) the allele check
 // disambiguates; if no entry's alleles match, no fallback is applied.
-function findExactClinvarRegionMatch(variants, tuple) {
+//
+// cdnaForms: optional list of the queried variant's cDNA HGVS strings. Indels have
+// no ref/alt to compare, and their genomic coordinates differ between HGVS (3'-shifted)
+// and ClinVar's own representation, so they are matched on the c. notation in the
+// record title instead — which is exactly how a user would recognise the record.
+function findExactClinvarRegionMatch(variants, tuple, cdnaForms) {
     if (!Array.isArray(variants) || !tuple || !tuple.pos) return null;
     const pos = Number(tuple.pos);
     const ref = String(tuple.ref || '').toUpperCase();
     const alt = String(tuple.alt || '').toUpperCase();
-    // Only attempt recovery for simple SNVs, where allele matching is reliable.
-    if (!/^[ACGT]$/.test(ref) || !/^[ACGT]$/.test(alt)) return null;
+    if (!/^[ACGT]$/.test(ref) || !/^[ACGT]$/.test(alt)) {
+        // Non-SNV: fall back to cDNA-notation matching when forms were supplied.
+        const wanted = new Set(
+            (Array.isArray(cdnaForms) ? cdnaForms : [cdnaForms])
+                .map(normalizeCdnaForMatch)
+                .filter(Boolean)
+        );
+        if (wanted.size === 0) return null;
+        for (const v of variants) {
+            const text = [v.title, v.variationName].filter(Boolean).join(' ');
+            const tokens = text.match(/c\.[A-Za-z0-9_>+*\-]+/gi) || [];
+            if (tokens.some((t) => wanted.has(normalizeCdnaForMatch(t)))) return v;
+        }
+        return null;
+    }
 
     const refC = complementBase(ref);
     const altC = complementBase(alt);
@@ -2091,8 +2360,12 @@ function renderAiReview(review, targetEl) {
 }
 
 
-function buildSpliceAiApiVariant(rawInput, gVariant, annotation) {
-    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+// resolvedAlleles: optional { chrom, pos, ref, alt } from resolveVcfAlleles().
+function buildSpliceAiApiVariant(rawInput, gVariant, annotation, resolvedAlleles) {
+    if (resolvedAlleles && resolvedAlleles.chrom && resolvedAlleles.pos && resolvedAlleles.ref && resolvedAlleles.alt) {
+        return `chr${String(resolvedAlleles.chrom).replace(/^chr/i, '')}-${resolvedAlleles.pos}-${resolvedAlleles.ref}-${resolvedAlleles.alt}`;
+    }
+    const tuple = buildVariantCoordinateTuple(rawInput, gVariant);
     const vcfData = annotation && annotation.vcf;
     if (!tuple) return '';
     const chrom = tuple.chrom.replace(/^chr/i, 'chr');
@@ -4901,6 +5174,20 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (geneName) {
                             annotation.dbnsfp = { genename: geneName };
                         }
+                        // MyVariant.info has nothing for this variant, so the summary would
+                        // show "Effect: N/A" — common for indels it does not index. VEP knows
+                        // the consequence for any variant the recoder could resolve, so ask it
+                        // rather than leaving the field blank.
+                        if (isGenomicVariant(gVariant)) {
+                            try {
+                                const vepRes = await fetchVepHgvsHg19(gVariant);
+                                if (vepRes && vepRes.mostSevere) {
+                                    annotation.cadd = Object.assign({}, annotation.cadd, { consequence: vepRes.mostSevere });
+                                }
+                            } catch (vepEffectErr) {
+                                console.log('[DEBUG] VEP consequence lookup for minimal annotation failed:', vepEffectErr);
+                            }
+                        }
                     }
                 } else if (!isProteinVariant) {
                     // Attempt a free-text MyVariant lookup for non-protein variants
@@ -5027,6 +5314,19 @@ document.addEventListener('DOMContentLoaded', () => {
             let detailsData = buildDetailsData(annotation, rawInput, gVariant);
             const detailsContainer = document.getElementById('detailsContainer');
             const aiReviewExtras = {};
+
+            // GRCh37 VCF-style alleles for this lookup, resolved once and shared by
+            // every allele-dependent consumer (gnomAD v2 link, gnomAD v4 API, SpliceAI,
+            // AI review context). For indels whose HGVS notation carries no alleles
+            // this reads the reference sequence, so the promise is memoised here rather
+            // than re-derived per card.
+            let vcfAllelesPromise = null;
+            const getResolvedVcfAlleles = () => {
+                if (!vcfAllelesPromise) {
+                    vcfAllelesPromise = resolveVcfAlleles(rawInput, gVariant, annotation).catch(() => null);
+                }
+                return vcfAllelesPromise;
+            };
 
             // Attempt to fetch extended COSMIC data from a custom API if configured.
             const COSMIC_ENDPOINT = window.COSMIC_API_ENDPOINT || null;
@@ -5624,6 +5924,34 @@ document.addEventListener('DOMContentLoaded', () => {
                     return span;
                 };
                 content.appendChild(makeLine('g.', gVariant));
+                // VCF-style CHROM-POS-REF-ALT (GRCh37) — the form gnomAD, SpliceAI and
+                // most VCF-derived tools index by, and the one to paste into them.
+                // Resolved asynchronously because an indel's alleles are read off the
+                // reference; rendered as a placeholder so the line keeps its position.
+                const vcfLine = document.createElement('span');
+                vcfLine.innerHTML = '<strong>VCF (hg19):</strong> <span style="color:#9ca3af;">resolving…</span>';
+                content.appendChild(vcfLine);
+                getResolvedVcfAlleles().then((alleles) => {
+                    if (!alleles || !alleles.ref || !alleles.alt) {
+                        vcfLine.innerHTML = '<strong>VCF (hg19):</strong> N/A';
+                        return;
+                    }
+                    const vcfId = `${alleles.chrom}-${alleles.pos}-${alleles.ref}-${alleles.alt}`;
+                    vcfLine.innerHTML = `<strong>VCF (hg19):</strong> ${escapeHtml(vcfId)}`;
+                    // Only flag the shift when the position actually moved — otherwise the
+                    // caveat reads as a warning about a variant that has nothing to warn about.
+                    const gStart = parseGenomicHgvs(gVariant)?.start;
+                    if (alleles.source === 'reference' && gStart !== undefined && Number(alleles.pos) !== gStart) {
+                        // Explain the coordinate mismatch a reader would otherwise take
+                        // for a bug: HGVS shifts indels 3′, VCF left-aligns them.
+                        vcfLine.title = 'Left-aligned against the GRCh37 reference. HGVS places an indel at its 3′-most position while VCF (and gnomAD) use the 5′-most one, so this position can differ from the g. notation above.';
+                        const note = document.createElement('span');
+                        note.style.cssText = 'font-size:0.75rem;color:#6b7280;';
+                        note.textContent = '(left-aligned)';
+                        vcfLine.appendChild(document.createTextNode(' '));
+                        vcfLine.appendChild(note);
+                    }
+                });
                 content.appendChild(makeLine('Gene', geneNames));
                 // Determine canonical cDNA and protein from transcriptsList. If not available, fall back to first values.
                 let canonicalEntryForDisplay = null;
@@ -5815,15 +6143,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 let recoveredSignificance = '';    // germline classification recovered from the region pull
                 let recoveredFromRegion = false;
                 {
-                    const recoveryTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+                    const recoveryTuple = buildVariantCoordinateTuple(rawInput, gVariant);
                     const haveNumericVariantId = variantId && /^\d+$/.test(variantId);
+                    // cDNA forms used to recognise indel records, which carry no
+                    // comparable ref/alt: the user's own c. notation plus every
+                    // transcript's c. notation we resolved for this variant.
+                    const recoveryCdnaForms = [
+                        typeof targetCdnaGlobal !== 'undefined' ? targetCdnaGlobal : '',
+                        ...(Array.isArray(transcriptsList) ? transcriptsList.map((t) => t && t.cDNA) : [])
+                    ].filter(Boolean);
                     if (!haveNumericVariantId && sigSummary.length === 0
                         && recoveryTuple && recoveryTuple.chrom && recoveryTuple.pos) {
                         try {
                             const chrR = recoveryTuple.chrom.replace(/^chr/i, '');
                             const posR = Number(recoveryTuple.pos);
                             prefetchedNearby = await fetchClinvarRegionVariants(chrR, posR, 30);
-                            const match = findExactClinvarRegionMatch(prefetchedNearby.variants, recoveryTuple);
+                            const match = findExactClinvarRegionMatch(prefetchedNearby.variants, recoveryTuple, recoveryCdnaForms);
                             if (match && match.id && /^\d+$/.test(String(match.id))) {
                                 variantId = String(match.id);
                                 clinVarLink = `https://www.ncbi.nlm.nih.gov/clinvar/variation/${variantId}/`;
@@ -5969,7 +6304,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             let fallbackVariants = (prefetchedNearby && prefetchedNearby.variants) || [];
                             if (protMatches.length === 0 && fallbackVariants.length === 0) {
                                 try {
-                                    const tup = buildSpliceAiLookupTuple(rawInput, gVariant);
+                                    const tup = buildVariantCoordinateTuple(rawInput, gVariant);
                                     if (tup && tup.chrom && tup.pos) {
                                         prefetchedNearby = await fetchClinvarRegionVariants(tup.chrom.replace(/^chr/i, ''), Number(tup.pos), 30);
                                         fallbackVariants = prefetchedNearby.variants || [];
@@ -6075,7 +6410,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 linkEl.textContent = 'View on ClinVar';
                 content.appendChild(linkEl);
                 // Nearby ClinVar variants (±30 bp, GRCh37).
-                const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+                const tuple = buildVariantCoordinateTuple(rawInput, gVariant);
                 if (tuple && tuple.chrom && tuple.pos) {
                     const chr = tuple.chrom.replace(/^chr/i, '');
                     const posNum = Number(tuple.pos);
@@ -6607,15 +6942,23 @@ document.addEventListener('DOMContentLoaded', () => {
                     noV2.textContent = 'No v2.1.1 data.';
                     content.appendChild(noV2);
                 }
-                // Link to gnomAD v2
-                if (gnomadLink) {
-                    const linkEl = document.createElement('a');
-                    linkEl.href = gnomadLink;
-                    linkEl.target = '_blank';
-                    linkEl.rel = 'noopener noreferrer';
-                    linkEl.textContent = 'View on gnomAD (v2.1.1)';
-                    content.appendChild(linkEl);
-                }
+                // Link to gnomAD v2. Rendered synchronously from whatever the notation
+                // gives us (variant page, or a region view for an indel), then upgraded
+                // to the exact variant page once the reference-derived alleles land.
+                const gnomadLinkEl = document.createElement('a');
+                gnomadLinkEl.target = '_blank';
+                gnomadLinkEl.rel = 'noopener noreferrer';
+                gnomadLinkEl.textContent = 'View on gnomAD (v2.1.1)';
+                gnomadLinkEl.href = gnomadLink || '';
+                if (!gnomadLink) gnomadLinkEl.style.display = 'none';
+                content.appendChild(gnomadLinkEl);
+                getResolvedVcfAlleles().then((alleles) => {
+                    if (!alleles) return;
+                    const upgraded = buildGnomadVariantUrl(rawInput, gVariant, annotation && annotation._id, annotation && annotation.vcf, alleles);
+                    if (!upgraded) return;
+                    gnomadLinkEl.href = upgraded;
+                    gnomadLinkEl.style.display = '';
+                });
                 // Add details for v2 population data if available
                 if ((exomeStats && exomeStats.popData && exomeStats.popData.length > 0) || (genomeStats && genomeStats.popData && genomeStats.popData.length > 0)) {
                     const detailsEl = document.createElement('details');
@@ -6696,24 +7039,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 cardsContainer.appendChild(card);
 
                 // Async: query gnomAD v4 API (liftover done server-side), populate v4Section
-                (() => {
-                    const vcfData = annotation && annotation.vcf;
-                    const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
-                    let chromCoord = null, pos37Coord = null, refCoord = null, altCoord = null;
-                    if (tuple) {
-                        chromCoord = tuple.chrom.replace(/^chr/i, '');
-                        pos37Coord = tuple.pos;
-                        refCoord = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
-                        altCoord = tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
-                    }
+                (async () => {
+                    const showV4Msg = (msg) => {
+                        v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${escapeHtml(msg)}</div>`;
+                    };
+                    // Indels arrive as "g.START_ENDdel"-style notation with no alleles;
+                    // resolveVcfAlleles() reads them off the reference and left-aligns
+                    // them, which is the representation gnomAD indexes by.
+                    const alleles = await getResolvedVcfAlleles();
+                    const chromCoord = alleles && alleles.chrom;
+                    const pos37Coord = alleles && alleles.pos;
+                    const refCoord = alleles && alleles.ref;
+                    const altCoord = alleles && alleles.alt;
                     if (!chromCoord || !pos37Coord || !refCoord || !altCoord) {
                         v4Loading.textContent = 'gnomAD v4.1: insufficient coordinate data.';
                         return;
                     }
-                    const showV4Msg = (msg) => {
-                        v4Section.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">${escapeHtml(msg)}</div>`;
-                    };
-                    fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
+                    return fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
                         // Drop sex-stratified (_XX/_XY) and 1000 Genomes (1KG:*)
                         // subpopulations from the populations arrays — matches the UI
                         // filter and avoids dumping ~100 redundant rows into the AI payload.
@@ -6741,12 +7083,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         aiReviewExtras.gnomad_v4 = condensedV4;
                         if (!result) { showV4Msg('gnomAD v4.1 unavailable.'); return; }
                         const { status, data: v4data, grch38Id, message, detail } = result;
+                        const grch37Id = `${chromCoord}-${pos37Coord}-${refCoord}-${altCoord}`;
                         if (status === 'liftover_failed') {
                             showV4Msg(`GRCh37→GRCh38 liftover failed for ${chromCoord}:${pos37Coord}.`);
                             return;
                         }
                         if (status === 'not_found') {
-                            showV4Msg(`Not found in gnomAD v4.1${grch38Id ? ` (queried: ${grch38Id})` : ''}.`);
+                            showV4Msg(`Not found in gnomAD v4.1 (queried: ${grch38Id || grch37Id}${grch38Id ? `, from GRCh37 ${grch37Id}` : ''}).`);
                             return;
                         }
                         if (status === 'api_error' || status === 'error') {
@@ -6842,7 +7185,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     }).catch(() => {
                         showV4Msg('gnomAD v4.1 unavailable.');
                     });
-                })();
+                })().catch(() => {
+                    v4Section.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">gnomAD v4.1 unavailable.</div>';
+                });
             }
             // Card: Predictors
             {
@@ -7426,10 +7771,16 @@ document.addEventListener('DOMContentLoaded', () => {
             let aiReviewCdna = '';
             let aiReviewProtein = '';
 
-            const getAiReviewVariantCoordinates = () => {
-                const tuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+            const getAiReviewVariantCoordinates = async () => {
+                const tuple = buildVariantCoordinateTuple(rawInput, gVariant);
                 const vcfData = annotation && annotation.vcf;
                 if (tuple) {
+                    // Prefer reference-resolved alleles so indels carry a usable
+                    // ref/alt into the gnomAD/SpliceAI parts of the AI payload.
+                    const alleles = await getResolvedVcfAlleles();
+                    if (alleles && alleles.ref && alleles.alt) {
+                        return { chrom: alleles.chrom, pos37: alleles.pos, ref: alleles.ref, alt: alleles.alt };
+                    }
                     return {
                         chrom: tuple.chrom.replace(/^chr/i, ''),
                         pos37: tuple.pos,
@@ -7455,7 +7806,7 @@ document.addEventListener('DOMContentLoaded', () => {
             };
 
             const fetchAiReviewSupplementalContext = async () => {
-                const coords = getAiReviewVariantCoordinates();
+                const coords = await getAiReviewVariantCoordinates();
                 const clinvarVariantId = annotation?.clinvar?.variant_id && /^\d+$/.test(String(annotation.clinvar.variant_id))
                     ? String(annotation.clinvar.variant_id)
                     : '';
@@ -7475,7 +7826,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                     return term ? fetchPubmedArticles(term, 5) : Promise.resolve({ total: 0, articles: [] });
                 };
-                const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation);
+                const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation, await getResolvedVcfAlleles());
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
                     ['clinvar_variant_record', clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)],
@@ -7647,16 +7998,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 const clinicalQuery = encodeURIComponent(`clinical significance of ${firstGene} ${searchVariantTerm}`.trim());
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
                 const clinicalUrl = `https://www.google.com/search?q=${clinicalQuery}`;
-                const spliceTuple = buildSpliceAiLookupTuple(rawInput, gVariant);
+                const spliceTuple = buildVariantCoordinateTuple(rawInput, gVariant);
                 // Recover REF from annotation.vcf for MNVs where delins notation drops the reference.
                 const spliceRef = (spliceTuple && spliceTuple.ref) || (annotation && annotation.vcf && String(annotation.vcf.ref || '').toUpperCase()) || null;
                 const spliceAlt = (spliceTuple && spliceTuple.alt) || (annotation && annotation.vcf && String(annotation.vcf.alt || '').toUpperCase()) || null;
                 const spliceVariantText = (spliceTuple && spliceRef && spliceAlt) ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceRef} ${spliceAlt}` : '';
                 // SpliceAI lookup defaults to hg38 when hg is omitted. Most MyVariant coordinates
                 // we surface in this app are hg19/GRCh37, so explicitly request hg=37.
-                const spliceAiUrl = spliceVariantText
-                    ? `https://spliceailookup.broadinstitute.org/#variant=${encodeURIComponent(spliceVariantText)}&hg=37`
-                    : 'https://spliceailookup.broadinstitute.org/#hg=37';
+                const buildSpliceAiPageUrl = (variantText) => (variantText
+                    ? `https://spliceailookup.broadinstitute.org/#variant=${encodeURIComponent(variantText)}&hg=37`
+                    : 'https://spliceailookup.broadinstitute.org/#hg=37');
+                const spliceAiUrl = buildSpliceAiPageUrl(spliceVariantText);
 
                 const card = document.createElement('div');
                 card.className = 'card';
@@ -7683,34 +8035,48 @@ document.addEventListener('DOMContentLoaded', () => {
                 const spliceLinkLine = document.createElement('span');
                 spliceLinkLine.innerHTML = `<a href="${spliceAiUrl}" target="_blank" rel="noopener noreferrer">Open SpliceAI lookup 🔍</a>`;
                 spliceContent.appendChild(spliceLinkLine);
-                const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation);
-                if (spliceVariantText) {
-                    const spliceHint = document.createElement('span');
-                    spliceHint.style.fontSize = '0.85rem';
-                    spliceHint.style.color = '#4a5f73';
-                    spliceHint.textContent = `SpliceAI query: ${spliceVariantText}`;
-                    spliceContent.appendChild(spliceHint);
-                } else {
-                    const spliceHint = document.createElement('span');
-                    spliceHint.style.fontSize = '0.85rem';
-                    spliceHint.style.color = '#4a5f73';
-                    spliceHint.textContent = 'No explicit chr/pos/ref/alt tuple detected; opening SpliceAI home page.';
-                    spliceContent.appendChild(spliceHint);
-                }
+                let spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation);
+                const spliceHint = document.createElement('span');
+                spliceHint.style.fontSize = '0.85rem';
+                spliceHint.style.color = '#4a5f73';
+                spliceHint.textContent = spliceVariantText
+                    ? `SpliceAI query: ${spliceVariantText}`
+                    : 'Resolving genomic alleles for the SpliceAI query…';
+                spliceContent.appendChild(spliceHint);
                 const spliceResultsDiv = document.createElement('div');
                 spliceResultsDiv.style.cssText = 'margin-top:0.45rem;';
-                if (spliceApiVariant) {
+                const showSpliceLoading = () => {
+                    spliceResultsDiv.innerHTML = '';
                     const loading = document.createElement('div');
                     loading.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
                     loading.textContent = 'Loading SpliceAI scores…';
                     spliceResultsDiv.appendChild(loading);
-                }
+                };
+                if (spliceApiVariant) showSpliceLoading();
                 spliceContent.appendChild(spliceResultsDiv);
                 spliceCard.appendChild(spliceContent);
                 cardsContainer.appendChild(spliceCard);
 
-                if (spliceApiVariant) {
-                    fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }).then((spliceData) => {
+                // Indels reach here with no ref/alt in their notation. Resolve them off
+                // the reference so the SpliceAI query — and the deep link — work for
+                // anything more complex than a substitution.
+                const spliceReady = getResolvedVcfAlleles().then((alleles) => {
+                    if (spliceApiVariant || !alleles) {
+                        if (!spliceApiVariant && !spliceVariantText) {
+                            spliceHint.textContent = 'No chr/pos/ref/alt tuple could be resolved; opening SpliceAI home page.';
+                        }
+                        return;
+                    }
+                    const resolvedText = `chr${alleles.chrom} ${alleles.pos} ${alleles.ref} ${alleles.alt}`;
+                    spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation, alleles);
+                    spliceHint.textContent = `SpliceAI query: ${resolvedText}`;
+                    spliceLinkLine.innerHTML = `<a href="${buildSpliceAiPageUrl(resolvedText)}" target="_blank" rel="noopener noreferrer">Open SpliceAI lookup 🔍</a>`;
+                    if (spliceApiVariant) showSpliceLoading();
+                });
+
+                spliceReady.then(() => {
+                    if (!spliceApiVariant) return;
+                    return fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }).then((spliceData) => {
                         aiReviewExtras.spliceai_lookup = spliceData;
                         spliceResultsDiv.innerHTML = '';
                         const data = spliceData?.data || {};
@@ -7777,7 +8143,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         aiReviewExtras.spliceai_lookup = { error: err.message || 'SpliceAI unavailable', variant: spliceApiVariant };
                         spliceResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">SpliceAI scores unavailable.</div>';
                     });
-                }
+                });
 
                 // Card: PubMed
                 {

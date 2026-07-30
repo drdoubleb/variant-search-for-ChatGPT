@@ -42,6 +42,24 @@ query GnomadVariant($variantId: String!, $dataset: DatasetId!) {
 }
 `;
 
+// Region query used as an indel fallback. The position-only liftover can land a
+// multi-base variant a few bases away from how gnomAD indexes it, so when the exact
+// ID misses we scan a small window for a record carrying the same alleles.
+const REGION_QUERY = `
+query GnomadRegion($chrom: String!, $start: Int!, $stop: Int!) {
+  region(chrom: $chrom, start: $start, stop: $stop, reference_genome: GRCh38) {
+    variants(dataset: gnomad_r4) {
+      variant_id
+      pos
+      ref
+      alt
+      genome { ac an af populations { id ac an } }
+      exome { ac an af populations { id ac an } }
+    }
+  }
+}
+`;
+
 // Map a single GRCh37 position to GRCh38 via Ensembl. NOTE: this lifts only the start
 // coordinate (pos..pos) and the caller reuses the original ref/alt verbatim, so the
 // resulting variant ID is reliable for SNVs but not necessarily for indels/MNVs, whose
@@ -121,7 +139,7 @@ export default async function handler(req, res) {
     const isSnv = /^[ACGT]$/.test(refU) && /^[ACGT]$/.test(altU);
     const caveat = isSnv
         ? undefined
-        : 'Liftover mapped the start position only and reused the ref/alt alleles; for indels/MNVs the GRCh38 variant ID may be inexact, so a not-found result is not conclusive.';
+        : 'Liftover mapped the start position only and reused the ref/alt alleles. For indels/MNVs the GRCh38 variant ID may be inexact; a nearby-region scan for the same alleles runs when the exact ID misses, but a not-found result is still not fully conclusive.';
 
     // Step 2: query gnomAD v4
     const result = await gnomadPost('GnomadVariant', VARIANT_QUERY, {
@@ -151,15 +169,38 @@ export default async function handler(req, res) {
         });
     }
 
-    const variant = body.data && body.data.variant;
+    let variant = body.data && body.data.variant;
+    let matchedVia;
+
+    // Step 3 (non-SNVs only): the exact ID missed, which for an indel may just mean
+    // the liftover shifted the anchor. Scan a window around the lifted position for a
+    // record with identical alleles before reporting "not found".
+    if (!variant && !isSnv) {
+        const span = Math.max(refU.length, altU.length);
+        const start = Math.max(1, pos38 - span - 5);
+        const stop = pos38 + span + 5;
+        const regionResult = await gnomadPost('GnomadRegion', REGION_QUERY, { chrom: c, start, stop });
+        if (regionResult.ok) {
+            let regionBody;
+            try { regionBody = JSON.parse(regionResult.text); } catch { regionBody = {}; }
+            const candidates = regionBody?.data?.region?.variants || [];
+            const hit = candidates.find(v => String(v.ref).toUpperCase() === refU && String(v.alt).toUpperCase() === altU);
+            if (hit) {
+                variant = { ...hit, chrom: c };
+                matchedVia = `region scan ${c}:${start}-${stop} (exact ID ${variantId} not indexed)`;
+            }
+        }
+    }
+
     if (!variant) {
         return res.status(200).json({ status: 'not_found', grch38Id: variantId, ...(caveat ? { caveat } : {}) });
     }
 
     return res.status(200).json({
         status: 'found',
-        grch38Id: variantId,
+        grch38Id: variant.variant_id || variantId,
         ...(caveat ? { caveat } : {}),
+        ...(matchedVia ? { matchedVia } : {}),
         data: {
             variant_id: variant.variant_id,
             chrom: variant.chrom,
