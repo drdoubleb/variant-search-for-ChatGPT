@@ -69,6 +69,11 @@ function appendQueryParams(endpoint, params) {
 let geneHintGlobal = null;
 let alterationTypeGlobal = null;
 let isGeneOnlyMode = false;
+// Set when a protein-level query could only be resolved as far as its codon
+// (frameshifts and multi-residue delins do not determine a nucleotide change).
+// Carries the residue range so the Variant card can say what was and was not
+// resolved. Reset at the start of every lookup.
+let codonOnlyResolutionGlobal = null;
 
 // Keep third-party API latency from blocking the UI for long periods.
 const API_TIMEOUT_MS = {
@@ -90,7 +95,8 @@ const API_TIMEOUT_MS = {
     spliceai: 25000,
     aiReview: 60000,
     openFda: 12000,
-    ensemblSequence: 8000
+    ensemblSequence: 8000,
+    ensemblLookup: 10000
 };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -142,7 +148,7 @@ const isGenomicVariant = (variant) => {
 // (see resolveVcfAlleles) rather than assuming they are present.
 function parseGenomicHgvs(gVariant) {
     if (!gVariant) return null;
-    const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.+)$/i);
+    const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.*)$/i);
     if (!m) return null;
     const chrom = `chr${m[1].toUpperCase()}`;
     const start = Number(m[2]);
@@ -156,6 +162,12 @@ function parseGenomicHgvs(gVariant) {
         refSeq: refSeq || null,
         altSeq: altSeq || null
     });
+
+    // A bare span with no event ("chr16:g.2136834_2136836") is a region, not a
+    // variant. Protein-only queries that cannot be resolved to a nucleotide change
+    // are represented this way so position-based cards still work while the
+    // allele-dependent ones correctly stay empty.
+    if (suffix === '') return mk('region', explicitEnd ?? start, null, null);
 
     // Substitution — including the "REF>-" / "->ALT" forms that the SPDI converter
     // emits for single-base deletions and insertions.
@@ -232,6 +244,42 @@ function buildVariantCoordinateTuple(rawInput, gVariant) {
         };
     };
     return parseTokenInput(rawInput) || parseHgvs(gVariant) || null;
+}
+
+// Build a GRCh37 genomic HGVS string from a VEP result object.
+//
+// VEP resolves gene-level cDNA HGVS ("TSC2:c.4952delA") that the variant recoder
+// can miss, and its response already carries the genomic location — but the app
+// used to read only the consequence off it, leaving the g. field showing the
+// user's own query and every coordinate-derived card dark.
+//
+// VEP's coordinate conventions: a deletion's start..end span the deleted bases; an
+// insertion is reported with start = end + 1 and a "-" reference.
+function buildGenomicHgvsFromVep(vepResult) {
+    if (!vepResult) return '';
+    const chrom = String(vepResult.seq_region_name || '').replace(/^chr/i, '').toUpperCase();
+    const start = Number(vepResult.start);
+    const end = Number(vepResult.end);
+    const alleles = String(vepResult.allele_string || '').split('/');
+    if (!/^[0-9XYMT]+$/.test(chrom) || !Number.isFinite(start) || !Number.isFinite(end)) return '';
+    const ref = String(alleles[0] || '').toUpperCase();
+    const alt = String(alleles[1] || '').toUpperCase();
+    if (!ref || !alt) return '';
+    if (ref === '-') {
+        // Insertion between `end` and `start` (VEP reports start = end + 1).
+        if (!/^[ACGTN]+$/.test(alt)) return '';
+        return `chr${chrom}:g.${end}_${start}ins${alt}`;
+    }
+    if (alt === '-') {
+        return start === end
+            ? `chr${chrom}:g.${start}del`
+            : `chr${chrom}:g.${start}_${end}del`;
+    }
+    if (!/^[ACGTN]+$/.test(ref) || !/^[ACGTN]+$/.test(alt)) return '';
+    if (ref.length === 1 && alt.length === 1) return `chr${chrom}:g.${start}${ref}>${alt}`;
+    return start === end
+        ? `chr${chrom}:g.${start}delins${alt}`
+        : `chr${chrom}:g.${start}_${end}delins${alt}`;
 }
 
 function reverseComplementSeq(seq) {
@@ -597,6 +645,86 @@ function normaliseProteinForCivicMatch(proteinChange) {
         .replace(/^p\./i, '')
         .toUpperCase()
         .replace(/[^A-Z0-9*_]/g, '');
+}
+
+// Parse the affected residue range out of a protein HGVS body.
+//
+// Handles single- and three-letter codes across substitutions, nonsense,
+// frameshifts, in-frame del/dup/ins/delins and extensions:
+//   p.N1651Mfs*21             -> { start: 1651, end: 1651 }
+//   p.Asn1651MetfsTer21       -> { start: 1651, end: 1651 }
+//   p.L773_I774delinsF        -> { start: 773,  end: 774  }
+//   p.Leu773_Ile774delinsPhe  -> { start: 773,  end: 774  }
+//   p.Lys18del                -> { start: 18,   end: 18   }
+// Returns null when no residue position can be read.
+function parseProteinResidueRange(proteinChange) {
+    const body = String(proteinChange || '').trim().replace(/^p\./i, '').replace(/[()]/g, '');
+    if (!body) return null;
+    // A range is written "<aa><pos>_<aa><pos>"; take the first and last positions.
+    const positions = body.match(/(?:[A-Za-z]{3}|[A-Za-z])(\d+)/g);
+    if (!positions || positions.length === 0) return null;
+    const nums = positions
+        .map((tok) => Number((tok.match(/(\d+)$/) || [])[1]))
+        .filter((n) => Number.isFinite(n) && n > 0);
+    if (nums.length === 0) return null;
+    // "fs*21" / "extTer5" trailing counts are lengths, not residue positions, and the
+    // regex above cannot match them (they have no preceding amino-acid token), so the
+    // remaining numbers are all genuine residue coordinates.
+    return { start: Math.min(...nums), end: Math.max(...nums) };
+}
+
+// Map a residue range on a gene's canonical protein to GRCh37 genomic coordinates.
+//
+// Protein notation does not determine a nucleotide change — a frameshift such as
+// p.N1651Mfs*21 can arise from many different indels, and Ensembl refuses these
+// outright ("Frameshifts are not supported for HGVS protein input"). What *is*
+// determined is the codon, so resolve that much and let the position-only cards
+// (UCSC, ClinVar region, nearby variants) work instead of failing the whole lookup.
+//
+// Returns { chrom, start, end, transcript, protein } or null. Never throws.
+async function resolveProteinCodonRegion(gene, startAa, endAa) {
+    const safeGene = String(gene || '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(safeGene)) return null;
+    if (!Number.isFinite(startAa) || !Number.isFinite(endAa) || startAa < 1 || endAa < startAa) return null;
+    try {
+        const lookupUrl = `https://grch37.rest.ensembl.org/lookup/symbol/homo_sapiens/${encodeURIComponent(safeGene)}?expand=1&content-type=application/json`;
+        const lookupRes = await fetchWithTimeout(lookupUrl, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.ensemblLookup);
+        if (!lookupRes.ok) return null;
+        const geneData = await lookupRes.json();
+        const transcripts = Array.isArray(geneData?.Transcript) ? geneData.Transcript : [];
+        const canonicalId = String(geneData?.canonical_transcript || '').split('.')[0];
+        const canonical = transcripts.find((t) => t?.id === canonicalId && t?.Translation)
+            || transcripts.find((t) => t?.is_canonical && t?.Translation)
+            || transcripts.find((t) => t?.Translation);
+        const translationId = canonical?.Translation?.id;
+        if (!translationId) return null;
+        // A residue past the end of the protein means the query does not belong to
+        // this transcript; mapping it would silently point at the wrong locus.
+        const proteinLength = Number(canonical.Translation.length);
+        if (Number.isFinite(proteinLength) && endAa > proteinLength) return null;
+
+        const mapUrl = `https://grch37.rest.ensembl.org/map/translation/${encodeURIComponent(translationId)}/${startAa}..${endAa}?content-type=application/json`;
+        const mapRes = await fetchWithTimeout(mapUrl, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.ensemblLookup);
+        if (!mapRes.ok) return null;
+        const mapData = await mapRes.json();
+        const mappings = Array.isArray(mapData?.mappings) ? mapData.mappings : [];
+        if (mappings.length === 0) return null;
+        // A residue range spanning an intron maps to several blocks; take the full extent.
+        const chrom = String(mappings[0].seq_region_name || '').replace(/^chr/i, '').toUpperCase();
+        const starts = mappings.map((m) => Number(m.start)).filter(Number.isFinite);
+        const ends = mappings.map((m) => Number(m.end)).filter(Number.isFinite);
+        if (!/^[0-9XYMT]+$/.test(chrom) || starts.length === 0 || ends.length === 0) return null;
+        return {
+            chrom: `chr${chrom}`,
+            start: Math.min(...starts),
+            end: Math.max(...ends),
+            transcript: canonical.id,
+            protein: translationId
+        };
+    } catch (err) {
+        console.warn('Protein codon-region resolution failed', err);
+        return null;
+    }
 }
 
 function findBestCivicEntryForProtein(entries, proteinChange) {
@@ -2581,7 +2709,12 @@ async function fetchVepHgvsHg19(variant) {
     // Extract transcript consequences list from the first result
     const first = data[0];
     const consequences = first.transcript_consequences || [];
-    return { vepData: data, consequences, mostSevere: first.most_severe_consequence || '' };
+    return {
+        vepData: data,
+        consequences,
+        mostSevere: first.most_severe_consequence || '',
+        gVariant: buildGenomicHgvsFromVep(first)
+    };
 }
 
 function parseProteinTargetFromQueryVariant(variantPart) {
@@ -3366,6 +3499,7 @@ document.addEventListener('DOMContentLoaded', () => {
         geneHintGlobal = null;
         alterationTypeGlobal = null;
         isGeneOnlyMode = false;
+        codonOnlyResolutionGlobal = null;
 
         // Normalise user input to improve variant parsing. Accept inputs like
         // "BRAF V600E", "braf:p.v600e", "BRAF:V600E" etc. by converting them
@@ -5177,16 +5311,18 @@ document.addEventListener('DOMContentLoaded', () => {
                         // MyVariant.info has nothing for this variant, so the summary would
                         // show "Effect: N/A" — common for indels it does not index. VEP knows
                         // the consequence for any variant the recoder could resolve, so ask it
-                        // rather than leaving the field blank.
-                        if (isGenomicVariant(gVariant)) {
-                            try {
-                                const vepRes = await fetchVepHgvsHg19(gVariant);
-                                if (vepRes && vepRes.mostSevere) {
-                                    annotation.cadd = Object.assign({}, annotation.cadd, { consequence: vepRes.mostSevere });
-                                }
-                            } catch (vepEffectErr) {
-                                console.log('[DEBUG] VEP consequence lookup for minimal annotation failed:', vepEffectErr);
+                        // rather than leaving the field blank. It also reports the genomic
+                        // location, which recovers g. when the recoder gave us no candidate.
+                        try {
+                            const vepRes = await fetchVepHgvsHg19(isGenomicVariant(gVariant) ? gVariant : query);
+                            if (vepRes && vepRes.mostSevere) {
+                                annotation.cadd = Object.assign({}, annotation.cadd, { consequence: vepRes.mostSevere });
                             }
+                            if (!isGenomicVariant(gVariant) && vepRes && vepRes.gVariant) {
+                                gVariant = vepRes.gVariant;
+                            }
+                        } catch (vepEffectErr) {
+                            console.log('[DEBUG] VEP consequence lookup for minimal annotation failed:', vepEffectErr);
                         }
                     }
                 } else if (!isProteinVariant) {
@@ -5236,11 +5372,24 @@ document.addEventListener('DOMContentLoaded', () => {
                                         // Build a minimal annotation using the first gene symbol from the VEP data. The dbnsfp
                                         // genename field is used for summary display. The _id is set to the original query.
                                         annotation = { _id: query };
+                                        // VEP resolved the variant, so it knows where it is. Without this
+                                        // the g. field keeps echoing the user's cDNA query and every
+                                        // coordinate-derived card (UCSC, ClinVar region, gnomAD, SpliceAI)
+                                        // stays dark even though the variant was successfully resolved.
+                                        if (!isGenomicVariant(gVariant) && vepRes.gVariant) {
+                                            gVariant = vepRes.gVariant;
+                                        }
                                         let geneSym = await resolveGeneSymbolFromVep(vepConsequences, recoderData);
                                         // If upstream sources still do not provide a usable gene symbol,
                                         // then use the optional user hint as the final fallback.
                                         if ((!geneSym || isChromosomeLikeGeneSymbol(geneSym)) && geneHintGlobal) {
                                             geneSym = geneHintGlobal;
+                                        }
+                                        // Last resort: a gene-prefixed query ("TSC2:c.4952delA") names the
+                                        // gene outright, which beats leaving the card blank.
+                                        if (!geneSym || isChromosomeLikeGeneSymbol(geneSym)) {
+                                            const queryGene = (query.match(/^([A-Za-z][A-Za-z0-9-]*)\s*:/) || [])[1];
+                                            if (queryGene && !isChromosomeLikeGeneSymbol(queryGene)) geneSym = queryGene.toUpperCase();
                                         }
                                         if (geneSym) {
                                             annotation.dbnsfp = { genename: geneSym };
@@ -5292,8 +5441,53 @@ document.addEventListener('DOMContentLoaded', () => {
                         throw new Error(errSearch.message || 'Variant not found');
                     }
                 } else {
-                    // No annotation and no recoder transcripts for a protein‑only variant
-                    throw new Error('Variant not found via Ensembl Variant Recoder');
+                    // Protein-only query the recoder could not resolve. This is not a
+                    // transient failure for a whole class of input: Ensembl rejects
+                    // frameshifts outright ("Frameshifts are not supported for HGVS
+                    // protein input") and cannot derive a nucleotide change for a
+                    // multi-residue delins — because none is determined. p.N1651Mfs*21
+                    // can arise from many different indels.
+                    //
+                    // The codon *is* determined, so resolve that much rather than failing
+                    // the lookup outright: the user still gets the right locus, the UCSC
+                    // link, ClinVar's variants in that region, and every gene-level card.
+                    // The allele-dependent cards stay empty, which is the honest answer.
+                    const proteinBody = (query.match(/p\.[^\s:]+/i) || [])[0] || '';
+                    const residues = parseProteinResidueRange(proteinBody);
+                    const geneForCodon = geneHintGlobal
+                        || (query.match(/^([A-Za-z][A-Za-z0-9-]*)\s*:/) || [])[1]
+                        || '';
+                    let codonRegion = null;
+                    if (residues && geneForCodon) {
+                        statusEl.textContent = 'Resolving codon position…';
+                        codonRegion = await resolveProteinCodonRegion(geneForCodon, residues.start, residues.end);
+                    }
+                    if (!codonRegion) {
+                        throw new Error(
+                            `Could not resolve ${query} to a genomic position. Protein notation does not `
+                            + 'determine a nucleotide change — Ensembl does not support frameshift protein '
+                            + 'input, and a delins spanning several residues has no unique coding change. '
+                            + 'Try the cDNA (c.) or genomic (g.) notation for this variant.'
+                        );
+                    }
+                    // A bare span, not a variant: parseGenomicHgvs reads this as type
+                    // 'region', so position-based cards light up and allele-based ones
+                    // correctly report nothing.
+                    gVariant = `chr${codonRegion.chrom.replace(/^chr/i, '')}:g.${codonRegion.start}_${codonRegion.end}`;
+                    codonOnlyResolutionGlobal = {
+                        proteinChange: proteinBody,
+                        residueStart: residues.start,
+                        residueEnd: residues.end,
+                        transcript: codonRegion.transcript,
+                        protein: codonRegion.protein
+                    };
+                    annotation = { _id: query };
+                    if (geneForCodon) annotation.dbnsfp = { genename: geneForCodon.toUpperCase() };
+                    transcriptsFromRecoder = [{
+                        transcript: codonRegion.transcript,
+                        cDNA: '',
+                        protein: proteinBody
+                    }];
                 }
             }
             // Display annotation
@@ -5331,7 +5525,8 @@ document.addEventListener('DOMContentLoaded', () => {
             // Attempt to fetch extended COSMIC data from a custom API if configured.
             const COSMIC_ENDPOINT = window.COSMIC_API_ENDPOINT || null;
             const COSMIC_META_URL = window.COSMIC_META_URL || null;
-            if (COSMIC_ENDPOINT) {
+            // A codon-region pseudo-variant is not an hgvsg COSMIC can match.
+            if (COSMIC_ENDPOINT && !codonOnlyResolutionGlobal) {
                 try {
                     const cosmicPromise = fetchWithTimeout(`${COSMIC_ENDPOINT}?hgvsg=${encodeURIComponent(gVariant)}`, {}, API_TIMEOUT_MS.cosmic);
                     const metaPromise = COSMIC_META_URL
@@ -5923,7 +6118,21 @@ document.addEventListener('DOMContentLoaded', () => {
                     span.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${value ? escapeHtml(value) : 'N/A'}`;
                     return span;
                 };
-                content.appendChild(makeLine('g.', gVariant));
+                if (codonOnlyResolutionGlobal) {
+                    // Not a variant coordinate — the span of the affected codon(s).
+                    content.appendChild(makeLine('Codon region (hg19)', gVariant));
+                    const codonNote = document.createElement('span');
+                    codonNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                    codonNote.textContent = `Resolved to residue ${codonOnlyResolutionGlobal.residueStart}`
+                        + (codonOnlyResolutionGlobal.residueEnd !== codonOnlyResolutionGlobal.residueStart
+                            ? `–${codonOnlyResolutionGlobal.residueEnd}` : '')
+                        + ` on ${codonOnlyResolutionGlobal.transcript} only. Protein notation does not determine the`
+                        + ' nucleotide change, so allele-based results (gnomAD, SpliceAI, an exact ClinVar record)'
+                        + ' are unavailable — enter the c. or g. notation for those.';
+                    content.appendChild(codonNote);
+                } else {
+                    content.appendChild(makeLine('g.', gVariant));
+                }
                 // VCF-style CHROM-POS-REF-ALT (GRCh37) — the form gnomAD, SpliceAI and
                 // most VCF-derived tools index by, and the one to paste into them.
                 // Resolved asynchronously because an indel's alleles are read off the
@@ -7052,7 +7261,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     const refCoord = alleles && alleles.ref;
                     const altCoord = alleles && alleles.alt;
                     if (!chromCoord || !pos37Coord || !refCoord || !altCoord) {
-                        v4Loading.textContent = 'gnomAD v4.1: insufficient coordinate data.';
+                        // A codon-only resolution has a position but no alleles by
+                        // definition; say so rather than implying a lookup problem.
+                        v4Loading.textContent = codonOnlyResolutionGlobal
+                            ? 'gnomAD v4.1: needs a specific allele — protein notation resolves only to the codon.'
+                            : 'gnomAD v4.1: insufficient coordinate data.';
                         return;
                     }
                     return fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
@@ -7309,7 +7522,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const gene = (geneNames || '').split(',')[0].trim();
                 let variantLink = '';
                 // Use genomic variant to construct hgvsg link if available
-                if (gVariant) {
+                if (gVariant && !codonOnlyResolutionGlobal) {
                     const m = String(gVariant).match(/^chr(\w+):g\.(.+)/);
                     if (m) {
                         const chrom = m[1];

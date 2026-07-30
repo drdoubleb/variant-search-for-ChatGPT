@@ -21,7 +21,7 @@
 
 function parseGenomicHgvs(gVariant) {
     if (!gVariant) return null;
-    const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.+)$/i);
+    const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.*)$/i);
     if (!m) return null;
     const chrom = `chr${m[1].toUpperCase()}`;
     const start = Number(m[2]);
@@ -35,6 +35,12 @@ function parseGenomicHgvs(gVariant) {
         refSeq: refSeq || null,
         altSeq: altSeq || null
     });
+
+    // A bare span with no event ("chr16:g.2136834_2136836") is a region, not a
+    // variant. Protein-only queries that cannot be resolved to a nucleotide change
+    // are represented this way so position-based cards still work while the
+    // allele-dependent ones correctly stay empty.
+    if (suffix === '') return mk('region', explicitEnd ?? start, null, null);
 
     // Substitution — including the "REF>-" / "->ALT" forms that the SPDI converter
     // emits for single-base deletions and insertions.
@@ -102,6 +108,42 @@ function buildVariantCoordinateTuple(rawInput, gVariant) {
         };
     };
     return parseTokenInput(rawInput) || parseHgvs(gVariant) || null;
+}
+
+// Build a GRCh37 genomic HGVS string from a VEP result object.
+//
+// VEP resolves gene-level cDNA HGVS ("TSC2:c.4952delA") that the variant recoder
+// can miss, and its response already carries the genomic location — but the app
+// used to read only the consequence off it, leaving the g. field showing the
+// user's own query and every coordinate-derived card dark.
+//
+// VEP's coordinate conventions: a deletion's start..end span the deleted bases; an
+// insertion is reported with start = end + 1 and a "-" reference.
+function buildGenomicHgvsFromVep(vepResult) {
+    if (!vepResult) return '';
+    const chrom = String(vepResult.seq_region_name || '').replace(/^chr/i, '').toUpperCase();
+    const start = Number(vepResult.start);
+    const end = Number(vepResult.end);
+    const alleles = String(vepResult.allele_string || '').split('/');
+    if (!/^[0-9XYMT]+$/.test(chrom) || !Number.isFinite(start) || !Number.isFinite(end)) return '';
+    const ref = String(alleles[0] || '').toUpperCase();
+    const alt = String(alleles[1] || '').toUpperCase();
+    if (!ref || !alt) return '';
+    if (ref === '-') {
+        // Insertion between `end` and `start` (VEP reports start = end + 1).
+        if (!/^[ACGTN]+$/.test(alt)) return '';
+        return `chr${chrom}:g.${end}_${start}ins${alt}`;
+    }
+    if (alt === '-') {
+        return start === end
+            ? `chr${chrom}:g.${start}del`
+            : `chr${chrom}:g.${start}_${end}del`;
+    }
+    if (!/^[ACGTN]+$/.test(ref) || !/^[ACGTN]+$/.test(alt)) return '';
+    if (ref.length === 1 && alt.length === 1) return `chr${chrom}:g.${start}${ref}>${alt}`;
+    return start === end
+        ? `chr${chrom}:g.${start}delins${alt}`
+        : `chr${chrom}:g.${start}_${end}delins${alt}`;
 }
 
 function reverseComplementSeq(seq) {
@@ -181,6 +223,32 @@ function leftNormalizeVcfAlleles(pos, ref, alt, windowStart, seq) {
     return { pos: p, ref: r, alt: a };
 }
 
+// Parse the affected residue range out of a protein HGVS body.
+//
+// Handles single- and three-letter codes across substitutions, nonsense,
+// frameshifts, in-frame del/dup/ins/delins and extensions:
+//   p.N1651Mfs*21             -> { start: 1651, end: 1651 }
+//   p.Asn1651MetfsTer21       -> { start: 1651, end: 1651 }
+//   p.L773_I774delinsF        -> { start: 773,  end: 774  }
+//   p.Leu773_Ile774delinsPhe  -> { start: 773,  end: 774  }
+//   p.Lys18del                -> { start: 18,   end: 18   }
+// Returns null when no residue position can be read.
+function parseProteinResidueRange(proteinChange) {
+    const body = String(proteinChange || '').trim().replace(/^p\./i, '').replace(/[()]/g, '');
+    if (!body) return null;
+    // A range is written "<aa><pos>_<aa><pos>"; take the first and last positions.
+    const positions = body.match(/(?:[A-Za-z]{3}|[A-Za-z])(\d+)/g);
+    if (!positions || positions.length === 0) return null;
+    const nums = positions
+        .map((tok) => Number((tok.match(/(\d+)$/) || [])[1]))
+        .filter((n) => Number.isFinite(n) && n > 0);
+    if (nums.length === 0) return null;
+    // "fs*21" / "extTer5" trailing counts are lengths, not residue positions, and the
+    // regex above cannot match them (they have no preceding amino-acid token), so the
+    // remaining numbers are all genuine residue coordinates.
+    return { start: Math.min(...nums), end: Math.max(...nums) };
+}
+
 // --- test harness ---------------------------------------------------------
 
 let passed = 0;
@@ -222,6 +290,12 @@ check('delins with spelled-out reference', eq(parseGenomicHgvs('chr7:g.140453136
     { chrom: 'chr7', start: 140453136, end: 140453137, type: 'delins', refSeq: 'TG', altSeq: 'AA' }));
 check('MNV substitution is a delins', eq(parseGenomicHgvs('chr7:g.140453136TG>AA'),
     { chrom: 'chr7', start: 140453136, end: 140453137, type: 'delins', refSeq: 'TG', altSeq: 'AA' }));
+check('bare span is a region, not a variant', eq(parseGenomicHgvs('chr16:g.2136834_2136836'),
+    { chrom: 'chr16', start: 2136834, end: 2136836, type: 'region', refSeq: null, altSeq: null }));
+check('bare position is a region', eq(parseGenomicHgvs('chr16:g.2136835'),
+    { chrom: 'chr16', start: 2136835, end: 2136835, type: 'region', refSeq: null, altSeq: null }));
+check('a region yields no VCF alleles',
+    vcfAllelesFromGenomicHgvs(parseGenomicHgvs('chr16:g.2136834_2136836'), 2136830, 'ACGTACGTACGT') === null);
 check('non-genomic input rejected', parseGenomicHgvs('TSC2:c.2319_2321delAAT') === null);
 check('empty input rejected', parseGenomicHgvs('') === null);
 
