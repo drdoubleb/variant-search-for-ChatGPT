@@ -1616,7 +1616,7 @@ async function fetchCivicApiData(geneName, proteinChange) {
 async function fetchBbkbBiomarkerTherapies(gene) {
     if (!gene) return { total_matched: 0, returned: 0, results: [] };
     const params = new URLSearchParams({ gene });
-    const url = `https://drdoubleb.com/BBKB/api/biomarker.php?${params}`;
+    const url = `https://www.drdoubleb.com/BBKB/api/biomarker.php?${params}`;
     let resp;
     try {
         resp = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.bbkb);
@@ -1640,7 +1640,7 @@ async function fetchBbkbBiomarkerTherapies(gene) {
 
 function renderBbkbBiomarkerTherapies(panel, gene, aiExtras) {
     const linkEl = document.createElement('a');
-    linkEl.href = 'https://drdoubleb.com/BBKB';
+    linkEl.href = 'https://www.drdoubleb.com/BBKB';
     linkEl.target = '_blank';
     linkEl.rel = 'noopener noreferrer';
     linkEl.textContent = 'BBKB biomarker–therapy database ↗';
@@ -1725,7 +1725,7 @@ function renderBbkbBiomarkerTherapies(panel, gene, aiExtras) {
 async function fetchFdaCompanionDiagnostics(gene) {
     if (!gene) return [];
     const params = new URLSearchParams({ gene });
-    const url = `https://drdoubleb.com/companion/gene_api.php?${params}`;
+    const url = `https://www.drdoubleb.com/companion/gene_api.php?${params}`;
     let resp;
     try {
         resp = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.fda);
@@ -4606,7 +4606,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // ── Card: Guidelines ───────────────────────────────────────────
             {
-                const GUIDELINES_BASE = 'https://drdoubleb.com/guidelines';
+                const GUIDELINES_BASE = 'https://www.drdoubleb.com/guidelines';
                 const guidelinesCard = document.createElement('div');
                 guidelinesCard.className = 'card';
                 const guidelinesTitle = document.createElement('h3');
@@ -8967,7 +8967,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             // Card: Guidelines
             {
-                const GUIDELINES_BASE = 'https://drdoubleb.com/guidelines';
+                const GUIDELINES_BASE = 'https://www.drdoubleb.com/guidelines';
                 const guidelinesCard = document.createElement('div');
                 guidelinesCard.className = 'card';
                 const guidelinesTitle = document.createElement('h3');
