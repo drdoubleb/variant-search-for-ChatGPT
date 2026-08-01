@@ -3,7 +3,7 @@
  *
  * The site's "Run AI review" needs strict JSON; the "Copy prompt" button needs a
  * human-readable Markdown write-up. These are two separate templates that share
- * their clinical guidance from api/ai-review-prompt-core.js. The tests below guard
+ * their clinical guidance from api/_ai-review-prompt-core.js. The tests below guard
  * the two ways that arrangement can break:
  *   1. Drift — someone edits the tiering rules in one prompt but not the other.
  *   2. Contradiction — the human prompt regains a JSON-output instruction (the
@@ -13,9 +13,9 @@
  * Run with: node tests/ai-review-prompt.test.js
  */
 
-import JSON_PROMPT from '../api/ai-review-prompt.js';
-import HUMAN_PROMPT from '../api/ai-review-prompt-human.js';
-import { CORE_GUIDANCE, SELF_CHECK, CONTEXT_BLOCK } from '../api/ai-review-prompt-core.js';
+import JSON_PROMPT from '../api/_ai-review-prompt.js';
+import HUMAN_PROMPT from '../api/_ai-review-prompt-human.js';
+import { CORE_GUIDANCE, SELF_CHECK, CONTEXT_BLOCK } from '../api/_ai-review-prompt-core.js';
 
 let passed = 0;
 let failed = 0;

@@ -111,9 +111,11 @@ The two prompts share their clinical guidance so they cannot drift apart:
 
 | File | Role |
 | --- | --- |
-| `api/ai-review-prompt-core.js` | **Shared clinical guidance** — AMP/ASCO/CAP tier definitions, hard tiering rules, controlled vocabularies, interpretation rules, and the self-check. Format-neutral: it never mentions JSON, schemas, or arrays. **Tiering and evidence edits go here** and take effect in both prompts. |
-| `api/ai-review-prompt.js` | Core + a **JSON** output-format section (the schema, field semantics). Used by "Run AI review". |
-| `api/ai-review-prompt-human.js` | Core + a **Markdown** output-format section (numbered sections for a reader). Used by "Copy prompt". |
+| `api/_ai-review-prompt-core.js` | **Shared clinical guidance** — AMP/ASCO/CAP tier definitions, hard tiering rules, controlled vocabularies, interpretation rules, and the self-check. Format-neutral: it never mentions JSON, schemas, or arrays. **Tiering and evidence edits go here** and take effect in both prompts. |
+| `api/_ai-review-prompt.js` | Core + a **JSON** output-format section (the schema, field semantics). Used by "Run AI review". |
+| `api/_ai-review-prompt-human.js` | Core + a **Markdown** output-format section (numbered sections for a reader). Used by "Copy prompt". |
+
+All three are underscore-prefixed because Vercel turns every non-underscore `.js` file in `api/` into a Serverless Function, and the Hobby plan caps a deployment at **12**. These are imported modules, not endpoints — same convention as `_ncbi.js`, `_ratelimit.js`, and `_turnstile.js`. `tests/vercel-function-count.test.js` enforces the budget and checks that every counted file really does default-export a handler, so a missing underscore fails locally instead of at deploy time.
 
 Earlier versions used one JSON template plus a trailing "disregard the JSON instructions" override for copy-prompt mode. The resulting self-contradiction confused weaker models, so each prompt is now internally consistent end to end. `tests/ai-review-prompt.test.js` enforces both properties: that the clinical core is byte-identical in the two prompts, and that the human prompt contains no JSON/schema instruction or override phrasing.
 

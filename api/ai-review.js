@@ -2,9 +2,9 @@
 // POST /api/ai-review
 // Requires OPENROUTER_API_KEY in the Vercel environment (unless the caller brings
 // their own key — see BYO-key below).
-// The prompt templates live in ./ai-review-prompt.js (JSON, for the site's own
-// review) and ./ai-review-prompt-human.js (Markdown, for the "copy prompt" button).
-// Both share their clinical guidance from ./ai-review-prompt-core.js — edit those
+// The prompt templates live in ./_ai-review-prompt.js (JSON, for the site's own
+// review) and ./_ai-review-prompt-human.js (Markdown, for the "copy prompt" button).
+// Both share their clinical guidance from ./_ai-review-prompt-core.js — edit those
 // files to tweak instructions without touching this handler.
 //
 // Abuse protections around the owner's OpenRouter key (all graceful — each layer
@@ -17,8 +17,8 @@
 // bypass Turnstile and the rate limiter. A `mode: 'prompt'` request returns the
 // assembled prompt without calling any model (for the "copy prompt" feature).
 
-import PROMPT_TEMPLATE from './ai-review-prompt.js';
-import HUMAN_PROMPT_TEMPLATE from './ai-review-prompt-human.js';
+import PROMPT_TEMPLATE from './_ai-review-prompt.js';
+import HUMAN_PROMPT_TEMPLATE from './_ai-review-prompt-human.js';
 import { checkRateLimits } from './_ratelimit.js';
 import { verifyTurnstile } from './_turnstile.js';
 
@@ -152,7 +152,7 @@ const SCHEMA = {
 };
 
 // Two self-contained prompts, assembled from the same clinical core (see
-// ./ai-review-prompt-core.js) but with their own output-format sections:
+// ./_ai-review-prompt-core.js) but with their own output-format sections:
 //   humanReadable: false → strict JSON, parsed into the site's result cards.
 //   humanReadable: true  → Markdown write-up, for the "copy prompt" button.
 // The human prompt is a separate template rather than the JSON one plus a

@@ -1,5 +1,10 @@
 // Shared clinical guidance for BOTH AI-review prompts.
 //
+// The leading underscore keeps Vercel from treating this file as a Serverless
+// Function — it is an imported module, not an HTTP endpoint. Same convention as
+// _ncbi.js / _ratelimit.js / _turnstile.js. It also matters for the deploy: the
+// Hobby plan caps a deployment at 12 functions (see tests/vercel-function-count.test.js).
+//
 // Two prompts are assembled from this file (see api/ai-review.js):
 //   - ai-review-prompt.js       → the site's "Run AI review" (strict JSON output)
 //   - ai-review-prompt-human.js → the "Copy prompt" button   (Markdown output)

@@ -1,9 +1,9 @@
 // JSON prompt — used by the site's own "Run AI review", whose response is parsed
 // into the result cards. The human-readable counterpart used by the "Copy prompt"
-// button lives in ./ai-review-prompt-human.js.
+// button lives in ./_ai-review-prompt-human.js.
 //
 // Both prompts share their clinical guidance verbatim from
-// ./ai-review-prompt-core.js. Only the OUTPUT FORMAT section below is specific to
+// ./_ai-review-prompt-core.js. Only the OUTPUT FORMAT section below is specific to
 // this prompt, so tiering/evidence edits belong in the core file, not here.
 //
 // Placeholders substituted at request time by api/ai-review.js:
@@ -15,7 +15,7 @@
 // string below, or escape them if you need to — they are special inside template
 // literals.
 
-import { CORE_GUIDANCE, SELF_CHECK, CONTEXT_BLOCK } from './ai-review-prompt-core.js';
+import { CORE_GUIDANCE, SELF_CHECK, CONTEXT_BLOCK } from './_ai-review-prompt-core.js';
 
 const OUTPUT_FORMAT = `Output format:
 

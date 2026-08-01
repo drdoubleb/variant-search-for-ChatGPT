@@ -1,16 +1,16 @@
 // Human-readable prompt — used by the "Copy prompt" button, so that what the user
 // pastes into their own LLM asks for a readable clinical write-up rather than the
 // strict JSON the site parses into cards. The JSON counterpart lives in
-// ./ai-review-prompt.js.
+// ./_ai-review-prompt.js.
 //
 // This prompt is fully self-contained and never mentions JSON output, schemas, or
 // arrays: earlier versions appended a "disregard the JSON instructions" override to
 // the JSON prompt, and the resulting contradiction confused weaker models. Keep it
 // that way — if you add a format instruction here, make sure nothing in
-// ./ai-review-prompt-core.js contradicts it.
+// ./_ai-review-prompt-core.js contradicts it.
 //
 // Both prompts share their clinical guidance verbatim from
-// ./ai-review-prompt-core.js. Only the OUTPUT FORMAT section below is specific to
+// ./_ai-review-prompt-core.js. Only the OUTPUT FORMAT section below is specific to
 // this prompt, so tiering/evidence edits belong in the core file, not here.
 //
 // Placeholders substituted at request time by api/ai-review.js:
@@ -21,7 +21,7 @@
 // string below, or escape them if you need to — they are special inside template
 // literals.
 
-import { CORE_GUIDANCE, SELF_CHECK, CONTEXT_BLOCK } from './ai-review-prompt-core.js';
+import { CORE_GUIDANCE, SELF_CHECK, CONTEXT_BLOCK } from './_ai-review-prompt-core.js';
 
 const OUTPUT_FORMAT = `Output format:
 
