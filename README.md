@@ -103,7 +103,21 @@ Callers may supply their own OpenRouter key as `openrouter_api_key` in the POST 
 
 Send `{ "mode": "prompt", "context": { ... } }` to receive the fully assembled prompt (`{ prompt, model }`) without calling any model — this powers the "copy prompt" button so users can paste it into their own LLM. It requires no key and incurs no cost (origin-checked only).
 
-Because a person pasting the prompt into a general chat LLM wants the readable answer (not the strict JSON the site parses into cards), this mode appends an output-format override to the end of the shared prompt template instructing the model to disregard the JSON directive and instead produce a Markdown-formatted, human-readable interpretation covering the same fields and tiering rules. There is still only one prompt template (`api/ai-review-prompt.js`); the site's own "Run AI review" continues to request JSON.
+Because a person pasting the prompt into a general chat LLM wants the readable answer (not the strict JSON the site parses into cards), this mode returns a **separate, self-contained prompt** that asks for a Markdown-formatted, human-readable interpretation covering the same fields and tiering rules. It does not mention JSON at all.
+
+#### Prompt file layout
+
+The two prompts share their clinical guidance so they cannot drift apart:
+
+| File | Role |
+| --- | --- |
+| `api/_ai-review-prompt-core.js` | **Shared clinical guidance** — AMP/ASCO/CAP tier definitions, hard tiering rules, controlled vocabularies, interpretation rules, and the self-check. Format-neutral: it never mentions JSON, schemas, or arrays. **Tiering and evidence edits go here** and take effect in both prompts. |
+| `api/_ai-review-prompt.js` | Core + a **JSON** output-format section (the schema, field semantics). Used by "Run AI review". |
+| `api/_ai-review-prompt-human.js` | Core + a **Markdown** output-format section (numbered sections for a reader). Used by "Copy prompt". |
+
+All three are underscore-prefixed because Vercel turns every non-underscore `.js` file in `api/` into a Serverless Function, and the Hobby plan caps a deployment at **12**. These are imported modules, not endpoints — same convention as `_ncbi.js`, `_ratelimit.js`, and `_turnstile.js`. `tests/vercel-function-count.test.js` enforces the budget and checks that every counted file really does default-export a handler, so a missing underscore fails locally instead of at deploy time.
+
+Earlier versions used one JSON template plus a trailing "disregard the JSON instructions" override for copy-prompt mode. The resulting self-contradiction confused weaker models, so each prompt is now internally consistent end to end. `tests/ai-review-prompt.test.js` enforces both properties: that the clinical core is byte-identical in the two prompts, and that the human prompt contains no JSON/schema instruction or override phrasing.
 
 ### Optional dependencies
 

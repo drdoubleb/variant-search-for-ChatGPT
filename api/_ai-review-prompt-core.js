@@ -1,15 +1,29 @@
-// AI review prompt template. Edit the string below freely — it is plain
-// text inside a template literal. Three placeholders are substituted at
-// request time by api/ai-review.js:
-//   {{USER_NOTES_SECTION}} — optional user notes block (or empty)
-//   {{SCHEMA_JSON}}        — JSON schema the model must conform to
-//   {{CONTEXT_JSON}}       — clamped variant context payload
+// Shared clinical guidance for BOTH AI-review prompts.
 //
-// Avoid using backticks (`), ${...}, or backslashes inside this string,
-// or escape them if you need to — they are special inside template
-// literals.
+// The leading underscore keeps Vercel from treating this file as a Serverless
+// Function — it is an imported module, not an HTTP endpoint. Same convention as
+// _ncbi.js / _ratelimit.js / _turnstile.js. It also matters for the deploy: the
+// Hobby plan caps a deployment at 12 functions (see tests/vercel-function-count.test.js).
+//
+// Two prompts are assembled from this file (see api/ai-review.js):
+//   - ai-review-prompt.js       → the site's "Run AI review" (strict JSON output)
+//   - ai-review-prompt-human.js → the "Copy prompt" button   (Markdown output)
+//
+// Everything that is about the SCIENCE (tiering definitions, evidence rules,
+// controlled vocabularies, self-check) lives here so the two prompts can never
+// drift apart. Everything that is about the OUTPUT FORMAT lives in the two
+// wrapper files. Nothing in this file may mention JSON, schemas, arrays, or any
+// other format-specific concept — if you find yourself writing one, it belongs
+// in a wrapper instead.
+//
+// One placeholder is substituted at request time by api/ai-review.js:
+//   {{USER_NOTES_SECTION}} — optional user notes block (or empty)
+//
+// Edit the strings below freely — they are plain text inside template literals.
+// Avoid using backticks, dollar-brace interpolation, or backslashes inside them,
+// or escape them if you need to — they are special inside template literals.
 
-export default `You are assisting with a research/education variant query website. Interpret the submitted cancer variant using only the provided context plus generally accepted oncology genetics knowledge. This is not medical advice; recommend confirmation in curated databases, current FDA labels, clinical guidelines, and trial eligibility criteria.
+export const CORE_GUIDANCE = `You are assisting with a research/education variant query website. Interpret the submitted cancer variant using only the provided context plus generally accepted oncology genetics knowledge. This is not medical advice; recommend confirmation in curated databases, current FDA labels, clinical guidelines, and trial eligibility criteria.
 
 AMP/ASCO/CAP somatic variant tiering summary:
 
@@ -58,14 +72,10 @@ Hard AMP tiering rules:
 
 {{USER_NOTES_SECTION}}
 
-Return ONLY valid JSON matching this schema; do not wrap it in markdown:
-
-{{SCHEMA_JSON}}
-
-Rules:
-- Pathogenicity must be exactly one of: Pathogenic, Likely Pathogenic, VUS, Likely Benign, Benign.
-- AMP tier must be exactly one of: Tier IA, Tier IB, Tier IIC, Tier IID, Tier IIE (tentative), Tier III, Tier IV.
-- Consider tumor_type when assigning AMP tier, therapies, resistance/lack-of-benefit evidence, and clinical trials.
+Interpretation rules:
+- The pathogenicity call must be exactly one of: Pathogenic, Likely Pathogenic, VUS, Likely Benign, Benign.
+- The AMP tier must be exactly one of: Tier IA, Tier IB, Tier IIC, Tier IID, Tier IIE (tentative), Tier III, Tier IV.
+- Consider the submitted tumor type when assigning AMP tier, therapies, resistance/lack-of-benefit evidence, and clinical trials.
 - A variant classified as Pathogenic or Likely Pathogenic must receive a minimum of Tier IIE — never Tier III or Tier IV. Tier III is only appropriate when oncogenicity itself is uncertain, meaning pathogenicity would be VUS or lower.
 - Work down from Tier IA: if any higher tier applies, use that tier. Use Tier IIE only after exhausting IA, IB, IIC, and IID.
 - Same-tumor FDA-approved therapeutic sensitivity, same-tumor FDA-recognized CDx evidence, same-tumor professional guideline evidence, or same-tumor resistance/lack-of-benefit evidence for FDA-approved therapy should be Tier IA.
@@ -74,17 +84,18 @@ Rules:
 - Do not assign Tier IIC when same-tumor FDA-approved or guideline-supported therapeutic, resistance, diagnostic, or prognostic evidence is present.
 - When Tier IIE is used, include a limitation stating it is tentative/emerging and should be verified against current reporting standards.
 - If evidence is insufficient for pathogenicity itself, use VUS and Tier III rather than over-calling.
-- fda_approved_therapies should include FDA-approved therapies relevant to the gene/variant/tumor context when supported; otherwise return an empty array and explain in summary/limitations.
-- resistance_or_lack_of_benefit should include therapies for which the variant predicts resistance, lack of benefit, exclusion, or negative selection in the submitted tumor type when supported; otherwise return an empty array.
-- Clinical trials should prioritize supplied recruiting Phase 2+ interventional US trials, if present, and explain relevance cautiously.
+- Report the FDA-approved therapies relevant to the gene/variant/tumor context when they are supported, each with its indication, biomarker context, and evidence. When none are supported, say so plainly rather than inventing one.
+- Report therapies for which the variant predicts resistance, lack of benefit, exclusion, or negative selection in the submitted tumor type when supported, each with its tumor type, biomarker context, and evidence. When none are supported, say so plainly.
+- For clinical trials, prioritize the supplied recruiting Phase 2+ interventional US trials, if present, and explain relevance cautiously. Report the NCT ID, title, phase, intervention, relevance, and URL for each.
+- Give a brief overall interpretation of the variant and its clinical significance, plus brief caveats and verification needs.`;
 
-Self-check before returning JSON:
-- If fda_approved_therapies is non-empty and at least one therapy matches the submitted tumor type and submitted biomarker, amp_tier should be Tier IA.
-- If resistance_or_lack_of_benefit is non-empty and at least one therapy is FDA-approved or guideline-supported in the submitted tumor type, amp_tier should be Tier IA.
-- If amp_tier is Tier IIC, confirm that there is no same-tumor FDA-approved therapy, same-tumor FDA-recognized CDx/therapy association, same-tumor professional guideline biomarker role, or same-tumor FDA/guideline-linked resistance role.
-- If the submitted tumor type is a solid tumor and any listed FDA-approved therapy has a tissue-agnostic / all-solid-tumor indication for the submitted biomarker, amp_tier should be Tier IA.
+export const SELF_CHECK = `Self-check before answering:
+- If you have identified one or more FDA-approved therapies and at least one matches the submitted tumor type and submitted biomarker, the AMP tier should be Tier IA.
+- If you have identified resistance or lack-of-benefit evidence and at least one such therapy is FDA-approved or guideline-supported in the submitted tumor type, the AMP tier should be Tier IA.
+- If you are about to assign Tier IIC, confirm that there is no same-tumor FDA-approved therapy, same-tumor FDA-recognized CDx/therapy association, same-tumor professional guideline biomarker role, or same-tumor FDA/guideline-linked resistance role.
+- If the submitted tumor type is a solid tumor and any FDA-approved therapy you have identified has a tissue-agnostic / all-solid-tumor indication for the submitted biomarker, the AMP tier should be Tier IA.
+- Confirm your response follows the output format described above, and only that format.`;
 
-Context JSON:
+export const CONTEXT_BLOCK = `Context JSON:
 
-{{CONTEXT_JSON}}
-`;
+{{CONTEXT_JSON}}`;
