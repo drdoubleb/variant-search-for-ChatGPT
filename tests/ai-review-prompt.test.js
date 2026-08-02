@@ -31,8 +31,17 @@ check('JSON prompt opens with the shared core', JSON_PROMPT.startsWith(CORE_GUID
 check('human prompt opens with the shared core', HUMAN_PROMPT.startsWith(CORE_GUIDANCE));
 check('JSON prompt includes the shared self-check', JSON_PROMPT.includes(SELF_CHECK));
 check('human prompt includes the shared self-check', HUMAN_PROMPT.includes(SELF_CHECK));
-check('JSON prompt ends with the context block', JSON_PROMPT.endsWith(CONTEXT_BLOCK));
-check('human prompt ends with the context block', HUMAN_PROMPT.endsWith(CONTEXT_BLOCK));
+check('JSON prompt includes the context block', JSON_PROMPT.includes(CONTEXT_BLOCK));
+check('human prompt includes the context block', HUMAN_PROMPT.includes(CONTEXT_BLOCK));
+
+// The context payload can be hundreds of thousands of tokens, so the output-format
+// reminder must come AFTER it — otherwise it is buried far from the end and weak
+// models drift into prose or truncate. Guard the ordering, not just the presence.
+for (const [label, prompt] of [['JSON', JSON_PROMPT], ['human', HUMAN_PROMPT]]) {
+    const afterContext = prompt.slice(prompt.indexOf(CONTEXT_BLOCK) + CONTEXT_BLOCK.length);
+    check(`${label} prompt restates the output format after the context`, afterContext.includes('Reminder — output format for this response:'));
+    check(`${label} prompt does not end on the context payload`, !prompt.endsWith(CONTEXT_BLOCK));
+}
 
 // Spot-check that the tiering substance really is in both, not just byte-equal
 // blobs — these are the rules most likely to be edited in one place only.
@@ -64,10 +73,20 @@ for (const [label, prompt] of [['JSON', JSON_PROMPT], ['human', HUMAN_PROMPT]]) 
 
 check('JSON prompt asks for strict JSON', JSON_PROMPT.includes('Return ONLY valid JSON matching this schema'));
 
+// Regression guard: the JSON directive must survive to the END of the prompt. The
+// first version of the split lost this — the shared self-check was made
+// format-neutral, so the last thing the model read was the context payload with no
+// JSON instruction after it, and weak models started returning prose or cut-off
+// arrays. Assert the tail still names JSON and the schema keys.
+const jsonTail = JSON_PROMPT.slice(JSON_PROMPT.indexOf(CONTEXT_BLOCK) + CONTEXT_BLOCK.length);
+check('JSON prompt tail names JSON', jsonTail.includes('single valid JSON object'));
+check('JSON prompt tail names schema keys', jsonTail.includes('amp_tier') && jsonTail.includes('limitations'));
+check('JSON prompt tail forbids code fences', jsonTail.includes('no markdown code fences'));
+
 // The human prompt must not mention JSON output at all. Its only legitimate use of
 // the word is the "Context JSON:" header on the supplied data payload, so strip the
-// context block before checking.
-const humanWithoutContext = HUMAN_PROMPT.slice(0, HUMAN_PROMPT.length - CONTEXT_BLOCK.length);
+// context block (which now sits mid-prompt) before checking.
+const humanWithoutContext = HUMAN_PROMPT.split(CONTEXT_BLOCK).join('');
 check('human prompt never mentions JSON outside the context block', !humanWithoutContext.includes('JSON'));
 check('human prompt never mentions a schema', !/schema/i.test(humanWithoutContext));
 check('human prompt asks for Markdown', HUMAN_PROMPT.includes('Use Markdown'));

@@ -39,4 +39,12 @@ Cover these sections, in this order:
 
 Keep the clinical caution and disclaimers throughout: this is for research and education only, it is not medical advice, and it must be verified against curated databases, current FDA labeling, clinical guidelines, and trial eligibility criteria before any clinical use.`;
 
-export default [CORE_GUIDANCE, OUTPUT_FORMAT, SELF_CHECK, CONTEXT_BLOCK].join('\n\n');
+// Repeated AFTER the context payload for the same reason as the JSON prompt: the
+// payload can run to hundreds of thousands of tokens, leaving the output-format
+// instruction far from the end. Phrased positively (write Markdown prose) rather
+// than as a prohibition, so this prompt still never mentions JSON at all.
+const FINAL_REMINDER = `Reminder — output format for this response:
+Write the answer as Markdown prose for a human reader, using the seven sections in the order given above.
+Do not return a machine-readable data structure. Keep each section concise.`;
+
+export default [CORE_GUIDANCE, OUTPUT_FORMAT, SELF_CHECK, CONTEXT_BLOCK, FINAL_REMINDER].join('\n\n');

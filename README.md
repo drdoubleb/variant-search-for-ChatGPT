@@ -90,10 +90,25 @@ The endpoint prompts OpenRouter for strict JSON containing pathogenicity, specif
 
 The proxy protects the owner's `OPENROUTER_API_KEY` from being drained by anonymous callers. Every layer is **graceful** — it stays off until its environment variables are set, so the site keeps working before you provision anything:
 
-- **Per-request caps (always on):** the completion is capped at `max_tokens` 3000, the context is clamped to 1,500,000 chars, user notes to 4,000 chars, and request bodies over ~4 MB (just under Vercel's serverless request-body ceiling) are rejected with `413`. These bound the cost of any single call. The context clamp is generous because rich genes assemble very large payloads (e.g. HER2/ERBB2 amplification ≈ 957 KB, almost all openFDA label text). To keep such payloads under the ceiling, the frontend caps the openFDA **record count** (first 40) for the AI query while keeping each record's **full** `indications_and_usage` text; when records are dropped, an `openfda_records_truncated` note is added to the context so the model knows the list was capped. Large contexts may still exceed some models' windows — prefer a large-window model.
+- **Per-request caps (always on):** the completion is capped at `max_tokens` 8000, the context is clamped to 1,500,000 chars, user notes to 4,000 chars, and request bodies over ~4 MB (just under Vercel's serverless request-body ceiling) are rejected with `413`. These bound the cost of any single call. The context clamp is generous because rich genes assemble very large payloads (e.g. HER2/ERBB2 amplification ≈ 957 KB, almost all openFDA label text). To keep such payloads under the ceiling, the frontend caps the openFDA **record count** (first 40) for the AI query while keeping each record's **full** `indications_and_usage` text; when records are dropped, an `openfda_records_truncated` note is added to the context so the model knows the list was capped. Large contexts may still exceed some models' windows — prefer a large-window model.
 - **Origin allowlist:** browser requests are restricted to the live site plus test hosts. Defaults: `https://drdoubleb.com`, `https://www.drdoubleb.com`, `https://variant-search-for-chat-gpt.vercel.app`, and `*.vercel.app` previews. Override with `AI_ALLOWED_ORIGINS` (comma-separated; `*` disables the check). Requests with no `Origin` header (curl, server-to-server) are allowed through to the other layers.
 - **Cloudflare Turnstile:** set `TURNSTILE_SECRET_KEY` to require a bot-challenge token (`turnstile_token` in the body) on owner-key requests. Unset → skipped.
 - **Rate limiting (Upstash Redis):** set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` to enable per-IP and a global daily circuit breaker. Defaults: `AI_RL_IP_PER_MIN` 12, `AI_RL_IP_PER_DAY` 120, `AI_RL_GLOBAL_PER_DAY` 1500. On limit, returns `429` (per-IP) or `503` (global daily) with a `Retry-After` header. Unset → skipped.
+
+### Why AI reviews fail, and the token budget
+
+`max_tokens` is shared with the model's **reasoning** tokens on reasoning models (`gpt-5-*`, `deepseek-v4-*`, `grok-*`). A model that thinks for 1,500 tokens has only the remainder left for the answer, so a low cap makes the JSON stop mid-array — or come back empty when reasoning consumes the whole budget. That is why the cap is 8000 rather than 3000, and why the same variant can succeed on one model and fail on another.
+
+The proxy now separates the causes instead of surfacing a raw parser message like `Expected ',' or ']' after array element in JSON at position 4348`:
+
+| Condition | Message |
+| --- | --- |
+| `finish_reason: 'length'` | ran out of output tokens — try another model or a smaller context |
+| empty content | spent its whole budget on internal reasoning |
+| no `{` in content | replied with text instead of JSON |
+| unbalanced `{...}` | JSON response was incomplete or malformed |
+
+Both prompts also **restate their output format after the context payload**. The payload can be hundreds of thousands of tokens, so a format instruction placed before it is far from the end; restating it last keeps weak models from drifting into prose. `tests/ai-review-response.test.js` covers the failure branches and `tests/ai-review-prompt.test.js` pins the ordering.
 
 ### Bring-your-own key (BYO-key)
 
