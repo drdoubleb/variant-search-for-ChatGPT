@@ -28,4 +28,16 @@ Return ONLY valid JSON matching this schema; do not wrap it in markdown:
 - "fda_approved_therapies", "resistance_or_lack_of_benefit", and "clinical_trials" are arrays. Where the interpretation rules above say to state plainly that nothing was identified, return an empty array for that field instead and explain in "summary" or "limitations".
 - "summary" is a brief string; "limitations" is an array of brief strings.`;
 
-export default [CORE_GUIDANCE, OUTPUT_FORMAT, SELF_CHECK, CONTEXT_BLOCK].join('\n\n');
+// Repeated AFTER the context payload, because that payload can run to hundreds of
+// thousands of tokens — without this, the output-format instruction is buried far
+// from the end and weak models drift into prose or truncate mid-array. The old
+// single-template prompt got this signal for free: its self-check was headed
+// "Self-check before returning JSON" and named schema fields, so JSON was the last
+// thing the model read. Making the self-check format-neutral removed that, so the
+// JSON reminder is restated here explicitly.
+const FINAL_REMINDER = `Reminder — output format for this response:
+Return the entire response as a single valid JSON object matching the schema given above, with the keys pathogenicity, amp_tier, amp_tier_rationale, fda_approved_therapies, resistance_or_lack_of_benefit, clinical_trials, summary, and limitations.
+Output nothing before or after the JSON object: no preamble, no explanation, no markdown code fences.
+Close every array and object. Keep the content concise so the response completes within the token limit rather than being cut off mid-array.`;
+
+export default [CORE_GUIDANCE, OUTPUT_FORMAT, SELF_CHECK, CONTEXT_BLOCK, FINAL_REMINDER].join('\n\n');

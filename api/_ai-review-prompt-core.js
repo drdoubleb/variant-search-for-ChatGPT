@@ -84,10 +84,11 @@ Interpretation rules:
 - Do not assign Tier IIC when same-tumor FDA-approved or guideline-supported therapeutic, resistance, diagnostic, or prognostic evidence is present.
 - When Tier IIE is used, include a limitation stating it is tentative/emerging and should be verified against current reporting standards.
 - If evidence is insufficient for pathogenicity itself, use VUS and Tier III rather than over-calling.
-- Report the FDA-approved therapies relevant to the gene/variant/tumor context when they are supported, each with its indication, biomarker context, and evidence. When none are supported, say so plainly rather than inventing one.
-- Report therapies for which the variant predicts resistance, lack of benefit, exclusion, or negative selection in the submitted tumor type when supported, each with its tumor type, biomarker context, and evidence. When none are supported, say so plainly.
-- For clinical trials, prioritize the supplied recruiting Phase 2+ interventional US trials, if present, and explain relevance cautiously. Report the NCT ID, title, phase, intervention, relevance, and URL for each.
-- Give a brief overall interpretation of the variant and its clinical significance, plus brief caveats and verification needs.`;
+- Report the FDA-approved therapies relevant to the gene/variant/tumor context when they are supported. When none are supported, say so plainly rather than inventing one.
+- Report therapies for which the variant predicts resistance, lack of benefit, exclusion, or negative selection in the submitted tumor type when supported. When none are supported, say so plainly.
+- For clinical trials, prioritize the supplied recruiting Phase 2+ interventional US trials, if present, and explain relevance cautiously.
+- Give a brief overall interpretation of the variant and its clinical significance, plus brief caveats and verification needs.
+- Be concise. Keep each rationale, evidence note, and relevance note to one or two sentences, and list only the most relevant therapies and trials. A long response risks being cut off before it is complete.`;
 
 export const SELF_CHECK = `Self-check before answering:
 - If you have identified one or more FDA-approved therapies and at least one matches the submitted tumor type and submitted biomarker, the AMP tier should be Tier IA.

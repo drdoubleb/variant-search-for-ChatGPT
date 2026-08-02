@@ -83,7 +83,14 @@ function parseUserKey(value) {
 // COUNT — see condenseOpenFdaForAi — while keeping each record's full text).
 const CONTEXT_MAX_CHARS = 1500000;    // safety ceiling only; realistic contexts pass untouched
 const USER_NOTES_MAX_CHARS = 4000;    // free-text notes from the user
-const COMPLETION_MAX_TOKENS = 3000;   // bounded JSON output; caps generation length
+// Bounds the generation length of a single call. This budget is shared with the
+// model's REASONING tokens on reasoning models (gpt-5-*, deepseek-v4-*, grok), so a
+// model that thinks for 1500 tokens had only 1500 left for the answer at the old
+// value of 3000 — the JSON then stopped mid-array and failed to parse, or the
+// content came back empty because reasoning consumed the whole budget. 8000 leaves
+// room for both. Cost per call is still bounded; volume is bounded by the rate
+// limiter / Turnstile / BYO-key valve.
+const COMPLETION_MAX_TOKENS = 8000;
 const MAX_BODY_BYTES = 4 * 1024 * 1024; // ~4 MB, just under Vercel's request-body ceiling
 const ALLOWED_MODELS = new Set([
     'openai/gpt-5-mini',
@@ -283,14 +290,44 @@ export default async function handler(req, res) {
             return res.status(502).json({ error: 'OpenRouter request failed', detail });
         }
 
-        const content = data?.choices?.[0]?.message?.content || '';
+        const choice = data?.choices?.[0] || {};
+        const content = choice?.message?.content || '';
+
+        // Distinguish "ran out of tokens" from "model ignored the format". Both used
+        // to surface as a raw JSON.parse error ("Expected ',' or ']' after array
+        // element..."), which pointed the user at nothing actionable. finish_reason
+        // 'length' means the generation was cut off — on reasoning models that is
+        // usually reasoning tokens eating the budget, not a bad prompt.
+        const truncated = choice.finish_reason === 'length' || choice.native_finish_reason === 'length';
+        if (truncated) {
+            return res.status(502).json({
+                error: 'The model ran out of output tokens before finishing its response. Try a different model, or a gene/variant with less supplemental context.',
+                detail: `finish_reason=length, max_tokens=${COMPLETION_MAX_TOKENS}`
+            });
+        }
+        if (!content.trim()) {
+            return res.status(502).json({
+                error: 'The model returned an empty response. This usually means it spent its whole token budget on internal reasoning. Try a different model.'
+            });
+        }
+
         let review;
         try {
             review = JSON.parse(content);
         } catch {
+            // Greedy match to the LAST closing brace. On a complete response with
+            // surrounding prose this recovers the object; on a cut-off response it
+            // yields unbalanced JSON, so report that plainly rather than leaking a
+            // parser message that reads like a prompt bug.
             const match = String(content).match(/\{[\s\S]*\}/);
-            if (!match) throw new Error('OpenRouter response did not contain JSON');
-            review = JSON.parse(match[0]);
+            if (!match) {
+                throw new Error('The model replied with text instead of JSON. Try a different model, or use "Copy prompt" to run it in your own LLM.');
+            }
+            try {
+                review = JSON.parse(match[0]);
+            } catch {
+                throw new Error('The model\'s JSON response was incomplete or malformed. Try running the review again, or pick a different model.');
+            }
         }
 
         return res.status(200).json({ model, review, usage: data.usage || null, used_user_key: usingUserKey });
