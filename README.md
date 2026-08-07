@@ -190,6 +190,45 @@ indexes it. When the constructed ID misses for a non-SNV, the proxy scans a smal
 region around the lifted position for a record carrying the same alleles before
 reporting `not_found`; a match is reported with a `matchedVia` note.
 
+Note that gnomAD reports an absent variant as a GraphQL *error* (`Variant not
+found`) rather than a null result, so that particular message is treated as
+absence rather than as an API failure — otherwise the region scan above is never
+reached and the card shows an error where "not found" belongs.
+
+### Liftover (`api/_liftover.js`)
+
+The GRCh38 coordinate is resolved in this order:
+
+1. **A caller-supplied `pos38`.** myvariant.info returns a GRCh38 start in
+   `dbnsfp.hg38` / `dbsnp.hg38` for most indexed variants, and the frontend
+   already holds that annotation, so it passes it to the proxy. This skips the
+   network round-trip entirely and is the common path.
+2. **Ensembl `/map`**, across two hosts — `rest.ensembl.org` and the
+   `grch37.rest.ensembl.org` mirror, which serves the same paths from a separate
+   deployment. Requests are *hedged*: the mirror starts once the primary has
+   failed or gone quiet for ~1.2s, and the first usable answer wins. A healthy
+   primary answers well inside that window, so the mirror is normally never hit.
+   The whole ladder works to a 6s deadline, below the 15s function budget it
+   shares with the gnomAD query.
+
+This replaced a single un-retried call to `rest.ensembl.org`. That host is a real
+single point of failure: during one outage it answered HTTP 500 or hung on every
+`/map` and `/vep` request for hours while `/info/ping` stayed green, and the card
+reported "liftover failed for 4:143094904" — a coordinate that maps fine, to
+4:142173751.
+
+Outcomes are also reported distinctly. `liftover_unavailable` means the provider
+could not be reached and retrying later will probably work; `liftover_failed`
+means Ensembl answered and the coordinate has no unambiguous GRCh38 equivalent.
+Collapsing the two blames the variant for someone else's downtime. Mappings are
+validated against the requested assembly and chromosome, and several disagreeing
+candidates count as no answer — the previous code took `mappings[0]` blind, which
+turns a patch/scaffold hit into a confident wrong coordinate.
+
+The client-side hg38→hg19 helper in `script.js` fails over across the same two
+hosts. It returns its input unchanged when conversion fails, so an outage there
+silently mislabels an hg38 coordinate as hg19 rather than erroring.
+
 ClinVar recovery from the region pull matches SNVs on position plus alleles (with
 strand complementation). Indels have no comparable alleles and their coordinates
 differ between HGVS and ClinVar's own representation, so they are matched on the
