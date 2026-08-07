@@ -1078,9 +1078,19 @@ async function fetchVariantRecoder(query) {
     return response.json();
 }
 
+// Ensembl REST hosts that serve the /map assembly-conversion endpoint. The
+// GRCh37 mirror is a separate deployment answering the same paths in both
+// directions, and it has stayed up through outages that took the main host's
+// /map and /vep endpoints down entirely — so it is worth trying before giving up.
+const ENSEMBL_MAP_HOSTS = ['https://rest.ensembl.org', 'https://grch37.rest.ensembl.org'];
+
 // Liftover a genomic variant from hg38 to hg19 using Ensembl REST API. If the
 // conversion fails or the variant is already hg19, returns the original
 // variant. Expects variant in form 'chr7:g.140753336A>T'.
+//
+// Returning the input unchanged on failure means callers proceed with an hg38
+// coordinate labelled hg19, so an outage on one host quietly degrades lookup
+// accuracy rather than erroring — hence the failover across hosts.
 async function liftoverHg38ToHg19(variant) {
     const m = variant.match(/^chr([\w]+):g\.(\d+)([A-Za-z-]+)>([A-Za-z-]+)/);
     if (!m) return variant;
@@ -1089,37 +1099,64 @@ async function liftoverHg38ToHg19(variant) {
     const ref = m[3];
     const alt = m[4];
     // Build URL for liftover using Ensembl map endpoint
-    const url = `https://rest.ensembl.org/map/human/GRCh38/${chrom}:${pos}..${pos}:1/GRCh37?content-type=application/json`;
-    try {
-        const res = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.liftover);
-        if (!res.ok) {
-            // If error (e.g. 400), just return original
+    const path = `/map/human/GRCh38/${chrom}:${pos}..${pos}:1/GRCh37?content-type=application/json`;
+    for (const host of ENSEMBL_MAP_HOSTS) {
+        try {
+            const res = await fetchWithTimeout(`${host}${path}`, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.liftover);
+            if (!res.ok) continue; // transient or host-specific — try the next host
+            const data = await res.json();
+            const mappings = (data && data.mappings) || [];
+            // Only accept a mapping that landed on the same chromosome in GRCh37;
+            // a segment can map to a patch or scaffold, and taking mappings[0]
+            // blind turns that into a confident wrong coordinate.
+            const mapped = mappings
+                .map((entry) => entry && entry.mapped)
+                .find((mp) => mp
+                    && String(mp.assembly || '').toUpperCase() === 'GRCH37'
+                    && String(mp.seq_region_name || '').replace(/^chr/i, '') === String(chrom).replace(/^chr/i, '')
+                    && Number.isInteger(mp.start) && mp.start > 0);
+            if (mapped) return `chr${chrom}:g.${mapped.start}${ref}>${alt}`;
+            // The host answered cleanly with nothing to offer; another host will
+            // not know better.
             return variant;
+        } catch (err) {
+            // Network error or timeout — fall through to the next host.
         }
-        const data = await res.json();
-        if (data && data.mappings && data.mappings.length > 0) {
-            const mapped = data.mappings[0].mapped;
-            if (mapped && mapped.start) {
-                const newPos = mapped.start;
-                return `chr${chrom}:g.${newPos}${ref}>${alt}`;
-            }
-        }
-    } catch (err) {
-        // console.warn('Liftover error', err);
     }
     return variant;
 }
 
 
 
+// Read a known GRCh38 start coordinate out of a myvariant.info annotation.
+// dbNSFP and dbSNP both carry one for variants they index, which lets the gnomAD
+// v4 proxy skip its Ensembl liftover — faster, and it keeps the card working when
+// Ensembl's assembly-mapping API is down.
+function extractHg38Start(annotation) {
+    if (!annotation) return null;
+    const candidates = [
+        annotation.hg38 && annotation.hg38.start,
+        annotation.dbnsfp && annotation.dbnsfp.hg38 && annotation.dbnsfp.hg38.start,
+        annotation.dbsnp && annotation.dbsnp.hg38 && annotation.dbsnp.hg38.start,
+    ];
+    for (const value of candidates) {
+        const n = Number.parseInt(value, 10);
+        if (Number.isInteger(n) && n > 0) return n;
+    }
+    return null;
+}
+
 // Fetch gnomAD v4.1 (GRCh38) data for a variant.
-// Liftover GRCh37→GRCh38 is done server-side by the proxy.
+// Liftover GRCh37→GRCh38 is done server-side by the proxy; pass pos38 when the
+// annotation already supplies the GRCh38 start so the proxy can skip it.
 // Returns { status, data?, grch38Id?, message? } or null on hard failure.
-async function fetchGnomadV4(chrom, pos37, ref, alt) {
+async function fetchGnomadV4(chrom, pos37, ref, alt, pos38) {
     const c = String(chrom).replace(/^chr/i, '');
     if (!c || !pos37 || !ref || !alt) return null;
     const endpoint = getConfiguredApiEndpoint('GNOMAD_V4_API_ENDPOINT', '/api/gnomad-v4');
     const params = new URLSearchParams({ chrom: c, pos37: String(pos37), ref: ref.toUpperCase(), alt: alt.toUpperCase() });
+    const hinted = Number.parseInt(pos38, 10);
+    if (Number.isInteger(hinted) && hinted > 0) params.set('pos38', String(hinted));
     const url = `${endpoint}?${params}`;
     try {
         const res = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.gnomadV4);
@@ -7268,7 +7305,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             : 'gnomAD v4.1: insufficient coordinate data.';
                         return;
                     }
-                    return fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord).then((result) => {
+                    // The annotation usually already carries the GRCh38 start; handing
+                    // it to the proxy avoids a liftover round-trip that can fail.
+                    const knownPos38 = extractHg38Start(annotation);
+                    return fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord, knownPos38).then((result) => {
                         // Drop sex-stratified (_XX/_XY) and 1000 Genomes (1KG:*)
                         // subpopulations from the populations arrays — matches the UI
                         // filter and avoids dumping ~100 redundant rows into the AI payload.
@@ -7297,8 +7337,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (!result) { showV4Msg('gnomAD v4.1 unavailable.'); return; }
                         const { status, data: v4data, grch38Id, message, detail } = result;
                         const grch37Id = `${chromCoord}-${pos37Coord}-${refCoord}-${altCoord}`;
+                        if (status === 'liftover_unavailable') {
+                            // Ensembl is down, not the variant's fault — say which,
+                            // so "try again later" reads as real advice.
+                            showV4Msg(`gnomAD v4.1 unavailable: the Ensembl liftover service is not responding, so ${chromCoord}:${pos37Coord} could not be converted to GRCh38. This is usually temporary — try again shortly.`);
+                            return;
+                        }
                         if (status === 'liftover_failed') {
-                            showV4Msg(`GRCh37→GRCh38 liftover failed for ${chromCoord}:${pos37Coord}.`);
+                            showV4Msg(`GRCh37→GRCh38 liftover failed: ${chromCoord}:${pos37Coord} has no unambiguous GRCh38 equivalent.`);
                             return;
                         }
                         if (status === 'not_found') {

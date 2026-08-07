@@ -1,10 +1,16 @@
 // Serverless proxy for the gnomAD v4 GraphQL API.
-// GET /api/gnomad-v4?chrom=7&pos37=140453136&ref=A&alt=T
+// GET /api/gnomad-v4?chrom=7&pos37=140453136&ref=A&alt=T[&pos38=140753336]
 // Performs GRCh37→GRCh38 liftover via Ensembl, then queries gnomAD v4.1.
 // Always returns HTTP 200 — errors go into the body so the card degrades cleanly.
+//
+// `pos38` is an optional hint: when the caller already knows the GRCh38 start
+// (myvariant.info returns one in dbnsfp.hg38 / dbsnp.hg38 for most indexed
+// variants) we use it and skip the Ensembl round-trip entirely. That makes the
+// common path faster and immune to Ensembl outages.
+
+import { liftoverPosition, normalizeChrom } from './_liftover.js';
 
 const GNOMAD_API = 'https://gnomad.broadinstitute.org/api';
-const ENSEMBL_REST = 'https://rest.ensembl.org';
 
 // gnomAD v4 variant query.
 // Notes from schema introspection:
@@ -60,34 +66,24 @@ query GnomadRegion($chrom: String!, $start: Int!, $stop: Int!) {
 }
 `;
 
-// Map a single GRCh37 position to GRCh38 via Ensembl. NOTE: this lifts only the start
-// coordinate (pos..pos) and the caller reuses the original ref/alt verbatim, so the
-// resulting variant ID is reliable for SNVs but not necessarily for indels/MNVs, whose
-// ref allele spans multiple bases and whose GRCh38 representation can differ. It also
-// takes mappings[0] without validating strand/length.
-async function liftoverHg19ToHg38(chrom, pos) {
-    const c = String(chrom).replace(/^chr/i, '');
-    const p = parseInt(pos, 10);
-    const url = `${ENSEMBL_REST}/map/human/GRCh37/${c}:${p}..${p}:1/GRCh38?content-type=application/json`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    try {
-        const res = await fetch(url, {
-            headers: { 'Accept': 'application/json' },
-            signal: controller.signal,
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        if (data && data.mappings && data.mappings.length > 0) {
-            const mapped = data.mappings[0].mapped;
-            if (mapped && mapped.start) return mapped.start;
-        }
-        return null;
-    } catch {
-        return null;
-    } finally {
-        clearTimeout(timer);
+// Resolve the GRCh38 start coordinate for a GRCh37 position.
+//
+// NOTE (unchanged by the liftover work): only the start coordinate is lifted, and
+// the caller reuses the original ref/alt verbatim, so the resulting variant ID is
+// reliable for SNVs but not necessarily for indels/MNVs, whose ref allele spans
+// multiple bases and whose GRCh38 representation can differ. The region-scan
+// fallback further down exists to cover that.
+//
+// Returns the same outcome shape as liftoverPosition().
+async function resolvePos38(chrom, pos37, pos38Hint) {
+    // Trust a well-formed caller-supplied GRCh38 start and skip Ensembl. This is
+    // the same coordinate the liftover would compute, sourced from the annotation
+    // the client already holds.
+    const hint = Number.parseInt(pos38Hint, 10);
+    if (Number.isInteger(hint) && hint > 0) {
+        return { ok: true, pos: hint, host: 'caller-supplied' };
     }
+    return liftoverPosition(chrom, pos37, { from: 'GRCh37', to: 'GRCh38' });
 }
 
 async function gnomadPost(operationName, query, variables) {
@@ -118,18 +114,29 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     if (req.method === 'OPTIONS') { res.status(204).end(); return; }
 
-    const { chrom, pos37, ref, alt } = req.query;
+    const { chrom, pos37, ref, alt, pos38: pos38Hint } = req.query;
     if (!chrom || !pos37 || !ref || !alt) {
         return res.status(200).json({ status: 'error', message: 'Missing required parameters: chrom, pos37, ref, alt' });
     }
 
-    // Step 1: liftover GRCh37 → GRCh38
-    const pos38 = await liftoverHg19ToHg38(chrom, pos37);
-    if (!pos38) {
-        return res.status(200).json({ status: 'liftover_failed', message: `Could not map ${chrom}:${pos37} to GRCh38` });
+    // Step 1: resolve the GRCh38 position (caller hint, else liftover).
+    // A provider outage and a genuinely unmappable coordinate get distinct
+    // statuses — reporting an Ensembl 500 as "liftover failed for <coord>" blames
+    // the variant for someone else's downtime and hides the fact that retrying
+    // later would work.
+    const lift = await resolvePos38(chrom, pos37, pos38Hint);
+    if (!lift.ok) {
+        return res.status(200).json({
+            status: lift.reason === 'unavailable' ? 'liftover_unavailable' : 'liftover_failed',
+            message: lift.reason === 'unavailable'
+                ? `Ensembl assembly-mapping API is unreachable, so ${chrom}:${pos37} could not be converted to GRCh38.`
+                : `Could not map ${chrom}:${pos37} to GRCh38`,
+            ...(lift.detail ? { detail: lift.detail } : {}),
+        });
     }
+    const pos38 = lift.pos;
 
-    const c = String(chrom).replace(/^chr/i, '');
+    const c = normalizeChrom(chrom);
     const refU = String(ref).toUpperCase();
     const altU = String(alt).toUpperCase();
     const variantId = `${c}-${pos38}-${refU}-${altU}`;
@@ -160,10 +167,18 @@ export default async function handler(req, res) {
     let body;
     try { body = JSON.parse(result.text); } catch { body = {}; }
 
-    if (body.errors && body.errors.length > 0) {
+    // gnomAD reports an absent variant as a GraphQL *error* ("Variant not found")
+    // alongside data.variant: null, not as a plain null. Treating that as an API
+    // error was wrong twice over: it showed "gnomAD v4.1 error: Variant not found"
+    // where the clean "Not found in gnomAD v4.1" belongs, and — because the check
+    // returned early — it made the indel region-scan below unreachable, which is
+    // precisely the fallback that covers a liftover landing an indel a few bases
+    // off. Absence is a normal answer here; keep going.
+    const errors = (body.errors || []).filter((e) => !/variant not found/i.test((e && e.message) || ''));
+    if (errors.length > 0) {
         return res.status(200).json({
             status: 'api_error',
-            message: body.errors.map(e => e.message).join('; '),
+            message: errors.map(e => e.message).join('; '),
             grch38Id: variantId,
             ...(caveat ? { caveat } : {}),
         });
