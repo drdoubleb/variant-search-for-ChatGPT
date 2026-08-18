@@ -77,9 +77,12 @@ let codonOnlyResolutionGlobal = null;
 
 // Keep third-party API latency from blocking the UI for long periods.
 const API_TIMEOUT_MS = {
-    myvariant: 7000,
-    recoder: 6000,
-    vep: 7000,
+    // The Ensembl GRCh37 mirror answers a warm query in well under a second but
+    // has been measured taking 40 s+ on a cold VEP query and returning 5xx in
+    // bursts. These deadlines are per attempt; fetchWithRetry adds the retries.
+    myvariant: 10000,
+    recoder: 12000,
+    vep: 20000,
     lookup: 4000,
     liftover: 4000,
     cosmic: 2500,
@@ -113,6 +116,369 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
         clearTimeout(timeoutId);
     }
 }
+
+// Turn a thrown fetch/HTTP error into a short phrase fit for the progress panel
+// and for user-facing error text: "HTTP 503", "timed out", "network error".
+function describeUpstreamFailure(err) {
+    if (!err) return 'failed';
+    if (err.status) return `HTTP ${err.status}`;
+    const msg = String(err.message || err);
+    if (/timed out after/i.test(msg)) return 'timed out';
+    if (/Failed to fetch|NetworkError|network error|load failed/i.test(msg)) return 'network error';
+    const m = msg.match(/\((\d{3})\)/);
+    if (m) return `HTTP ${m[1]}`;
+    return msg.length > 60 ? `${msg.slice(0, 57)}…` : msg;
+}
+
+/*
+ * Build the error shown when a lookup resolves to nothing.
+ *
+ * The old message was a single fixed string — "Variant not found. Please verify
+ * the genomic coordinate and reference allele." — printed no matter the cause.
+ * A GRCh37 Ensembl outage, a MyVariant timeout and a genuinely nonexistent
+ * variant all rendered as "your coordinate is wrong", which sends users to
+ * re-check input that was never the problem. Distinguish the two cases using
+ * the source health the progress panel recorded.
+ */
+function buildLookupFailureError() {
+    const failed = LookupProgress.failedSources();
+    if (LookupProgress.sawUpstreamOutage()) {
+        const err = new Error(
+            `Lookup could not complete: ${failed.join(', ')} did not respond. `
+            + 'This is an upstream outage, not necessarily a problem with your variant — please retry in a moment.'
+        );
+        err.upstreamOutage = true;
+        return err;
+    }
+    if (failed.length) {
+        return new Error(
+            `Lookup could not complete: ${failed.join(', ')} failed. Please retry in a moment.`
+        );
+    }
+    return new Error(
+        'No annotation found for this variant. The coordinate resolved, but none of the '
+        + 'annotation sources hold a record for it — check the reference allele and that the '
+        + 'position is GRCh37/hg19, which is the build this tool uses.'
+    );
+}
+
+// Collapse a comma-separated symbol list to its unique members, preserving order.
+function dedupeSymbolList(value) {
+    const seen = new Set();
+    return String(value || '')
+        .split(',')
+        .map((t) => t.trim())
+        .filter((t) => t && !seen.has(t.toUpperCase()) && seen.add(t.toUpperCase()))
+        .join(', ');
+}
+
+// selectCanonicalTranscript scores candidates and can throw on odd shapes; the
+// progress panel only needs a best-effort index, never an exception.
+function selectCanonicalTranscriptSafe(transcripts) {
+    try {
+        const idx = selectCanonicalTranscript(
+            transcripts.map((t) => ({ transcript: t.transcript, cDNA: t.cDNA, protein: t.protein, source: 'root' })),
+            typeof targetProtGlobal !== 'undefined' ? targetProtGlobal : null
+        );
+        return typeof idx === 'number' && idx >= 0 && idx < transcripts.length ? idx : 0;
+    } catch {
+        return 0;
+    }
+}
+
+// HTTP statuses that mean "the server is unwell", not "your request is wrong".
+// 429 is included because Ensembl rate-limits bursts and expects a retry.
+const RETRYABLE_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+// True when a thrown fetch error is a transport-level failure (DNS, reset,
+// TLS, our own AbortController timeout) rather than a rejected response.
+function isRetryableFetchError(err) {
+    const msg = String((err && err.message) || err || '');
+    return /timed out after|Failed to fetch|NetworkError|network error|load failed|ECONNRESET|terminated/i.test(msg);
+}
+
+/*
+ * fetchWithTimeout plus bounded retries with exponential backoff and jitter.
+ *
+ * The public annotation APIs this app depends on — grch37.rest.ensembl.org
+ * above all — intermittently return 500/503 and occasionally take tens of
+ * seconds to answer a cold query. A single attempt behind a 6-7 s deadline
+ * turns those blips into "variant not found", which is both wrong and
+ * unactionable. Retrying transport errors and 5xx costs a few seconds in the
+ * bad case and rescues the lookup outright in the common one.
+ *
+ * `onAttempt` reports each attempt to the progress panel so a slow lookup
+ * shows what it is waiting on instead of sitting on a frozen status line.
+ * The final failure is re-thrown with `.retryable` set, which lets the caller
+ * tell "the service is down" apart from "this variant does not exist".
+ */
+async function fetchWithRetry(url, options = {}, timeoutMs = 6000, retryOpts = {}) {
+    const attempts = Math.max(1, retryOpts.attempts ?? 3);
+    const baseDelayMs = retryOpts.baseDelayMs ?? 400;
+    const onAttempt = typeof retryOpts.onAttempt === 'function' ? retryOpts.onAttempt : null;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        if (onAttempt) onAttempt({ attempt, attempts });
+        try {
+            const res = await fetchWithTimeout(url, options, timeoutMs);
+            if (RETRYABLE_HTTP_STATUS.has(res.status) && attempt < attempts) {
+                lastErr = new Error(`Upstream returned ${res.status}`);
+                lastErr.retryable = true;
+                lastErr.status = res.status;
+            } else {
+                return res;
+            }
+        } catch (err) {
+            if (!isRetryableFetchError(err) || attempt === attempts) {
+                if (isRetryableFetchError(err)) err.retryable = true;
+                throw err;
+            }
+            lastErr = err;
+            lastErr.retryable = true;
+        }
+        // Exponential backoff with jitter so simultaneous cards do not retry in lockstep.
+        const delay = baseDelayMs * Math.pow(2, attempt - 1) * (0.7 + Math.random() * 0.6);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    throw lastErr || new Error('Request failed');
+}
+
+/*
+ * ── Lookup progress panel ───────────────────────────────────────────────────
+ *
+ * The lookup used to communicate through a single mutable line of text
+ * ("Processing…", "Converting variant…"), which hid two things that matter:
+ * what the tool actually resolved the input to, and which upstream source
+ * failed when nothing came back. A variant that is missing from MyVariant.info
+ * looked exactly like an Ensembl outage, and both looked like a typo.
+ *
+ * LookupProgress renders a compact pipeline instead: the resolved nomenclature
+ * up top, then one row per stage with its state, timing and retry count. It
+ * also records source health so the final error message can say "Ensembl is
+ * returning 503" rather than blaming the user's coordinate.
+ */
+const LookupProgress = (() => {
+    const STEP_LABELS = {
+        parse: 'Parse input',
+        recoder: 'Resolve nomenclature · Ensembl',
+        myvariant: 'Annotations · MyVariant.info',
+        vep: 'Consequences · Ensembl VEP',
+        evidence: 'Clinical evidence sources'
+    };
+    const STATE_ICON = { pending: '○', running: '◐', ok: '●', empty: '◍', warn: '▲', fail: '✕' };
+
+    let root = null;
+    let stepsEl = null;
+    let headerEl = null;
+    let resolvedEl = null;
+    const steps = new Map();
+    let startedAt = 0;
+    let active = false;
+
+    function ensureDom() {
+        if (root && document.body.contains(root)) return;
+        const status = document.getElementById('status');
+        if (!status || !status.parentNode) return;
+        root = document.createElement('section');
+        root.id = 'lookupProgress';
+        root.className = 'lookup-progress hidden';
+        root.setAttribute('aria-live', 'polite');
+
+        headerEl = document.createElement('div');
+        headerEl.className = 'lp-header';
+        root.appendChild(headerEl);
+
+        resolvedEl = document.createElement('div');
+        resolvedEl.className = 'lp-resolved hidden';
+        root.appendChild(resolvedEl);
+
+        stepsEl = document.createElement('ol');
+        stepsEl.className = 'lp-steps';
+        root.appendChild(stepsEl);
+
+        status.parentNode.insertBefore(root, status);
+    }
+
+    function renderHeader(state, text) {
+        if (!headerEl) return;
+        headerEl.className = `lp-header lp-${state}`;
+        headerEl.textContent = '';
+        const dot = document.createElement('span');
+        dot.className = 'lp-spinner';
+        dot.setAttribute('aria-hidden', 'true');
+        const label = document.createElement('span');
+        label.className = 'lp-header-text';
+        label.textContent = text;
+        headerEl.appendChild(dot);
+        headerEl.appendChild(label);
+        if (startedAt) {
+            const t = document.createElement('span');
+            t.className = 'lp-elapsed';
+            t.textContent = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+            headerEl.appendChild(t);
+        }
+    }
+
+    function renderStep(key) {
+        const step = steps.get(key);
+        if (!step || !stepsEl) return;
+        let li = stepsEl.querySelector(`[data-step="${key}"]`);
+        if (!li) {
+            li = document.createElement('li');
+            li.className = 'lp-step';
+            li.dataset.step = key;
+            stepsEl.appendChild(li);
+        }
+        li.className = `lp-step lp-${step.state}`;
+        li.textContent = '';
+
+        const icon = document.createElement('span');
+        icon.className = 'lp-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = STATE_ICON[step.state] || STATE_ICON.pending;
+
+        const name = document.createElement('span');
+        name.className = 'lp-name';
+        name.textContent = STEP_LABELS[key] || key;
+
+        const detail = document.createElement('span');
+        detail.className = 'lp-detail';
+        let detailText = step.detail || '';
+        if (step.state === 'running' && step.attempt > 1) {
+            detailText = `retry ${step.attempt} of ${step.attempts}…`;
+        }
+        detail.textContent = detailText;
+
+        const timing = document.createElement('span');
+        timing.className = 'lp-timing';
+        if (step.startedAt) {
+            const endedAt = step.endedAt || Date.now();
+            timing.textContent = `${((endedAt - step.startedAt) / 1000).toFixed(1)}s`;
+        }
+
+        li.appendChild(icon);
+        li.appendChild(name);
+        li.appendChild(detail);
+        li.appendChild(timing);
+    }
+
+    return {
+        start() {
+            ensureDom();
+            steps.clear();
+            startedAt = Date.now();
+            active = true;
+            if (!root) return;
+            if (stepsEl) stepsEl.textContent = '';
+            if (resolvedEl) { resolvedEl.textContent = ''; resolvedEl.classList.add('hidden'); }
+            root.classList.remove('hidden');
+            renderHeader('running', 'Looking up variant…');
+        },
+        // state: running | ok | empty | warn | fail
+        step(key, state, detail) {
+            if (!active) return;
+            ensureDom();
+            const prev = steps.get(key) || {};
+            steps.set(key, {
+                state,
+                detail: detail || '',
+                attempt: prev.attempt || 1,
+                attempts: prev.attempts || 1,
+                // Keep the original start so the timing shown spans every retry.
+                startedAt: prev.startedAt || Date.now(),
+                endedAt: state === 'running' ? null : Date.now(),
+                upstream: prev.upstream || false
+            });
+            renderStep(key);
+        },
+        // Do not overwrite a recorded failure with a softer state: a helper that
+        // swallows its own error and returns an empty list must not be reported
+        // as "no data" when the real answer is "the service is down".
+        stepUnlessFailed(key, state, detail) {
+            const prev = steps.get(key);
+            if (prev && prev.state === 'fail') return;
+            this.step(key, state, detail);
+        },
+        stateOf(key) {
+            const step = steps.get(key);
+            return step ? step.state : null;
+        },
+        attempt(key, attempt, attempts) {
+            if (!active) return;
+            const prev = steps.get(key);
+            if (!prev) return;
+            prev.attempt = attempt;
+            prev.attempts = attempts;
+            steps.set(key, prev);
+            renderStep(key);
+        },
+        // Show what the tool actually resolved the raw input to.
+        resolved({ input, genomic, cdna, protein, gene, consequence, assembly }) {
+            if (!active) return;
+            ensureDom();
+            if (!resolvedEl) return;
+            resolvedEl.textContent = '';
+            const rows = [
+                ['You entered', input],
+                ['Gene', gene],
+                [`Genomic (${assembly || 'GRCh37'})`, genomic],
+                ['Coding', cdna],
+                ['Protein', protein],
+                ['Effect', consequence]
+            ].filter(([, v]) => v);
+            if (!rows.length) return;
+            for (const [label, value] of rows) {
+                const row = document.createElement('div');
+                row.className = 'lp-resolved-row';
+                const k = document.createElement('span');
+                k.className = 'lp-key';
+                k.textContent = label;
+                const v = document.createElement('span');
+                v.className = 'lp-value';
+                v.textContent = value;
+                row.appendChild(k);
+                row.appendChild(v);
+                resolvedEl.appendChild(row);
+            }
+            resolvedEl.classList.remove('hidden');
+        },
+        finish(state, text) {
+            if (!active) return;
+            renderHeader(state, text);
+            for (const [key, step] of steps.entries()) {
+                if (step.state === 'running') {
+                    step.state = state === 'fail' ? 'fail' : 'warn';
+                    step.endedAt = Date.now();
+                    steps.set(key, step);
+                    renderStep(key);
+                }
+            }
+            active = false;
+        },
+        hide() {
+            active = false;
+            if (root) root.classList.add('hidden');
+        },
+        // Which upstream sources failed outright (as opposed to returning no data).
+        failedSources() {
+            const out = [];
+            for (const [key, step] of steps.entries()) {
+                if (step.state === 'fail') out.push(STEP_LABELS[key] || key);
+            }
+            return out;
+        },
+        sawUpstreamOutage() {
+            for (const step of steps.values()) {
+                if (step.state === 'fail' && step.upstream) return true;
+            }
+            return false;
+        },
+        markUpstreamOutage(key) {
+            const step = steps.get(key);
+            if (step) { step.upstream = true; steps.set(key, step); }
+        }
+    };
+})();
 
 // Chromosome-like placeholders (e.g. "CHR12") can appear in fallback annotations
 // and are not useful for user-facing search links.
@@ -194,6 +560,157 @@ function parseGenomicHgvs(gVariant) {
     return null;
 }
 
+/*
+ * ── Coordinate-row parsing ──────────────────────────────────────────────────
+ *
+ * Users paste variants straight out of spreadsheets, VCFs, MAFs and pipeline
+ * reports, so a "row" arrives in many shapes:
+ *
+ *   X  20148674  EIF1AX  T  TG          tab- or space-separated, gene in the middle
+ *   EIF1AX  X  20148674  T  TG          MAF column order (Hugo_Symbol first)
+ *   X,20148674,EIF1AX,T,TG              CSV paste
+ *   X  20148674  EIF1AX  T  TG  hg19    trailing build//extra columns
+ *   X  20148674  -  TG                  MAF-style insertion ("-" reference)
+ *
+ * Only the first shape used to parse. The rest fell through to the generic
+ * "GENE p.Change" branch at the end of normalizeVariantInput, which turned
+ * "EIF1AX X 20148674 T TG" into the nonsense query "EIF1AX:p.X" and then
+ * reported it as a variant that could not be found. Parsing the row properly —
+ * and refusing to guess when it is genuinely ambiguous — is the difference
+ * between a working lookup and a misleading error.
+ */
+
+// Tokens that carry no allele information and only ever confuse the parser.
+const COORDINATE_ROW_NOISE = /^(hg18|hg19|hg38|grch3[678]|b3[678]|chr|snp|snv|ins|del|indel|mnp|somatic|germline|het|hom|\+|\.)$/i;
+
+const isDnaAllele = (t) => /^(?:[ACGTN]+|-)$/i.test(String(t));
+const isChromToken = (t) => /^(?:chr)?(?:[0-9]{1,2}|X|Y|M|MT)$/i.test(String(t));
+
+// Split a pasted row on any plausible column separator: whitespace (spaces,
+// tabs, newlines), commas, semicolons or pipes. Surrounding quotes are stripped
+// because spreadsheet exports like to add them.
+function splitCoordinateRow(raw) {
+    return String(raw || '')
+        .trim()
+        // Strip thousands separators inside a coordinate ("20,148,674") before
+        // commas are treated as column separators. The grouping pattern is
+        // required so a genuine CSV row ("1,12345,A,T") is not welded together.
+        .replace(/\b\d{1,3}(?:,\d{3})+(?!\d)/g, (m) => m.replace(/,/g, ''))
+        .split(/[\s,;|]+/)
+        .map((t) => t.replace(/^["']+|["']+$/g, ''))
+        .filter(Boolean);
+}
+
+// True when the input looks like a pasted coordinate row rather than HGVS.
+// Used to refuse the "GENE p.Change" fallback for rows we could not parse,
+// so an unparseable row reports what is wrong instead of querying garbage.
+function looksLikeCoordinateRow(raw) {
+    const toks = splitCoordinateRow(raw).filter((t) => !COORDINATE_ROW_NOISE.test(t));
+    if (toks.length < 4) return false;
+    if (/:[gcp]\./i.test(String(raw))) return false;
+    for (let i = 0; i < toks.length - 1; i++) {
+        if (isChromToken(toks[i]) && /^\d[\d,]*$/.test(toks[i + 1])) return true;
+    }
+    return false;
+}
+
+/*
+ * Parse a pasted coordinate row into { chrom, pos, ref, alt, gene }.
+ *
+ * Strategy: anchor on the chromosome/position pair wherever it sits in the row,
+ * then read the alleles out of the tokens that follow. When more than two
+ * DNA-like tokens follow the position the last two win, because a gene symbol
+ * that happens to spell DNA (TTN, CAT, TAT) is always written before the
+ * alleles in every layout above. Returns null when nothing matches, so callers
+ * can fall through rather than act on a guess.
+ */
+function parseCoordinateRow(raw) {
+    const all = splitCoordinateRow(raw);
+    if (all.length < 4) return null;
+    const toks = all.filter((t) => !COORDINATE_ROW_NOISE.test(t));
+    if (toks.length < 4) return null;
+
+    // Anchor: a chromosome token immediately followed by a numeric position.
+    let chromIdx = -1;
+    for (let i = 0; i < toks.length - 1; i++) {
+        if (isChromToken(toks[i]) && /^\d[\d,]*$/.test(toks[i + 1])) { chromIdx = i; break; }
+    }
+    if (chromIdx === -1) return null;
+
+    const chrom = toks[chromIdx].replace(/^chr/i, '').toUpperCase();
+    const pos = toks[chromIdx + 1].replace(/,/g, '');
+    if (!/^\d+$/.test(pos)) return null;
+
+    const after = toks.slice(chromIdx + 2);
+    const dnaIdx = [];
+    after.forEach((t, i) => { if (isDnaAllele(t)) dnaIdx.push(i); });
+    if (dnaIdx.length < 2) return null;
+    // Last two DNA-like tokens are the alleles (see note above).
+    const refIdx = dnaIdx[dnaIdx.length - 2];
+    const altIdx = dnaIdx[dnaIdx.length - 1];
+    // Alleles are adjacent columns in every supported layout; anything else is
+    // too ambiguous to guess at.
+    if (altIdx !== refIdx + 1) return null;
+
+    // "-" and "." are the MAF/VCF spellings of an absent allele.
+    const clean = (t) => (t === '-' || t === '.' ? '' : t.toUpperCase());
+    const ref = clean(after[refIdx]);
+    const alt = clean(after[altIdx]);
+    if (!ref && !alt) return null;
+
+    // Gene: any non-allele alphabetic token, wherever it sits in the row.
+    const geneCandidates = toks
+        .filter((t, i) => i !== chromIdx && i !== chromIdx + 1)
+        .filter((t) => /^[A-Za-z][A-Za-z0-9-]*$/.test(t) && !isChromToken(t));
+    const consumed = new Set([after[refIdx], after[altIdx]]);
+    const gene = geneCandidates.find((t) => !consumed.has(t) || !isDnaAllele(t)) || null;
+
+    return { chrom, pos, ref, alt, gene: gene ? gene.toUpperCase() : null };
+}
+
+// Render a parsed coordinate row as normalised GRCh37 genomic HGVS.
+// Trims shared prefix/suffix so VCF-anchored indels ("T" -> "TG") become the
+// minimal HGVS event ("g.20148674_20148675insG") the annotation APIs expect.
+function coordinateRowToGenomicHgvs(row) {
+    if (!row) return null;
+    const { chrom, ref, alt } = row;
+    const pos = parseInt(row.pos, 10);
+    if (!Number.isFinite(pos)) return null;
+
+    if (ref.length === alt.length && ref.length > 0) {
+        if (ref.length === 1) return `chr${chrom}:g.${pos}${ref}>${alt}`;
+        return `chr${chrom}:g.${pos}_${pos + ref.length - 1}delins${alt}`;
+    }
+    // Pure insertion (MAF "-" reference): the new bases sit between pos and pos+1.
+    if (!ref) return `chr${chrom}:g.${pos}_${pos + 1}ins${alt}`;
+    // Pure deletion (MAF "-" alternate): ref spells out the deleted bases.
+    if (!alt) {
+        return ref.length === 1
+            ? `chr${chrom}:g.${pos}del`
+            : `chr${chrom}:g.${pos}_${pos + ref.length - 1}del`;
+    }
+    // VCF-anchored indel: trim the shared prefix and suffix to the minimal event.
+    let r = ref;
+    let a = alt;
+    let start = pos;
+    let end = pos + ref.length - 1;
+    while (r.length && a.length && r[0] === a[0]) { r = r.slice(1); a = a.slice(1); start += 1; }
+    while (r.length && a.length && r[r.length - 1] === a[a.length - 1]) {
+        r = r.slice(0, -1); a = a.slice(0, -1); end -= 1;
+    }
+    if (!r && !a) return null;
+    if (!a) {
+        return start === end ? `chr${chrom}:g.${start}del` : `chr${chrom}:g.${start}_${end}del`;
+    }
+    if (!r) {
+        // Insertion between the flanking bases left after trimming.
+        return `chr${chrom}:g.${end}_${end + 1}ins${a}`;
+    }
+    return start === end
+        ? `chr${chrom}:g.${start}delins${a}`
+        : `chr${chrom}:g.${start}_${end}delins${a}`;
+}
+
 // Build a genomic coordinate tuple from either raw user input (preferred) or a
 // normalised g. variant. Returns { chrom, pos, ref, alt, start, end, type } when
 // enough information is available, else null.
@@ -204,27 +721,18 @@ function parseGenomicHgvs(gVariant) {
 // keep working for indels; allele-dependent consumers resolve the bases against
 // the reference sequence via resolveVcfAlleles().
 function buildVariantCoordinateTuple(rawInput, gVariant) {
+    // Reuse the row parser the query normaliser uses, so every layout that can be
+    // looked up also produces working gnomAD/UCSC/SpliceAI coordinates rather
+    // than falling back to the less precise g.-string parse.
     const parseTokenInput = (raw) => {
-        if (!raw) return null;
-        const toks = String(raw).trim().split(/\s+/).filter(Boolean);
-        if (toks.length !== 4 && toks.length !== 5) return null;
-        const tokens = toks.slice();
-        if (tokens.length === 5) {
-            // For 5-token genomic input, always treat token #3 as an optional gene/label
-            // and remove it. Example: "17 7573954 TP53 T A".
-            tokens.splice(2, 1);
-        }
-        const [chrTok, posTok, refTok, altTok] = tokens;
-        const chrom = String(chrTok).replace(/^chr/i, '').toUpperCase();
-        const pos = String(posTok).replace(/,/g, '');
-        const ref = String(refTok).toUpperCase();
-        const alt = String(altTok).toUpperCase();
-        if (!/^[0-9XYMT]+$/.test(chrom)) return null;
-        if (!/^\d+$/.test(pos)) return null;
-        if (!/^[A-Za-z-]+$/.test(ref) || !/^[A-Za-z-]+$/.test(alt)) return null;
-        const startNum = Number(pos);
+        const row = parseCoordinateRow(raw);
+        if (!row) return null;
+        const startNum = Number(row.pos);
+        if (!Number.isFinite(startNum)) return null;
+        const ref = row.ref;
+        const alt = row.alt;
         return {
-            chrom: `chr${chrom}`, pos, ref, alt,
+            chrom: `chr${row.chrom}`, pos: row.pos, ref, alt,
             start: startNum, end: startNum + Math.max(ref.length, 1) - 1,
             type: ref.length === 1 && alt.length === 1 ? 'sub' : 'delins'
         };
@@ -1066,14 +1574,22 @@ async function fetchVariantRecoder(query) {
     // improves consistency and allows detection of variants such as
     // BRAF c.1799_1811delinsA.
     const url = `https://grch37.rest.ensembl.org/variant_recoder/human/${encoded}?content-type=application/json`;
-    const response = await fetchWithTimeout(url, {
+    const response = await fetchWithRetry(url, {
         headers: {
             'Accept': 'application/json'
         }
-    }, API_TIMEOUT_MS.recoder);
+    }, API_TIMEOUT_MS.recoder, {
+        attempts: 3,
+        onAttempt: ({ attempt, attempts }) => LookupProgress.attempt('recoder', attempt, attempts)
+    });
     if (!response.ok) {
         const text = await response.text();
-        throw new Error(`Variant recoder request failed (${response.status}): ${text}`);
+        const err = new Error(`Variant recoder request failed (${response.status}): ${text}`);
+        err.status = response.status;
+        // A 4xx here means Ensembl parsed the request and rejected the variant;
+        // a 5xx means the service is unwell and the variant may be perfectly fine.
+        err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+        throw err;
     }
     return response.json();
 }
@@ -2596,10 +3112,19 @@ function getSpliceAiScoreSummary(payload) {
 async function fetchMyVariant(variant) {
     const encoded = encodeURIComponent(variant);
     const url = `https://myvariant.info/v1/variant/${encoded}`;
-    const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.myvariant);
+    const response = await fetchWithRetry(url, {}, API_TIMEOUT_MS.myvariant, {
+        attempts: 2,
+        onAttempt: ({ attempt, attempts }) => LookupProgress.attempt('myvariant', attempt, attempts)
+    });
     if (!response.ok) {
         const text = await response.text();
-        throw new Error(`MyVariant.info request failed (${response.status}): ${text}`);
+        const err = new Error(`MyVariant.info request failed (${response.status}): ${text}`);
+        err.status = response.status;
+        // 404 is the normal answer for an indel MyVariant does not index — it is
+        // "no record here", not a failure, and must not be reported as an outage.
+        err.notFound = response.status === 404;
+        err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+        throw err;
     }
     return response.json();
 }
@@ -2717,14 +3242,20 @@ async function fetchVepHgvsHg19(variant) {
     const requestVep = async (useRefseq) => {
         const params = useRefseq ? 'hgvs=1&refseq=1' : 'hgvs=1';
         const url = `https://grch37.rest.ensembl.org/vep/human/hgvs/${encodeURIComponent(hgvs)}?content-type=application/json&${params}`;
-        const response = await fetchWithTimeout(url, {
+        const response = await fetchWithRetry(url, {
             headers: {
                 'Accept': 'application/json'
             }
-        }, API_TIMEOUT_MS.vep);
+        }, API_TIMEOUT_MS.vep, {
+            attempts: 2,
+            onAttempt: ({ attempt, attempts }) => LookupProgress.attempt('vep', attempt, attempts)
+        });
         if (!response.ok) {
             const text = await response.text();
-            throw new Error(`VEP HGVS request failed (${response.status}): ${text}`);
+            const err = new Error(`VEP HGVS request failed (${response.status}): ${text}`);
+            err.status = response.status;
+            err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+            throw err;
         }
         const data = await response.json();
         if (!Array.isArray(data) || data.length === 0) {
@@ -2856,10 +3387,16 @@ function extractCdnaNotationsFromHit(hit) {
 async function queryMyVariantById(identifier) {
     const encoded = encodeURIComponent(identifier);
     const url = `https://myvariant.info/v1/query?q=${encoded}&size=20`;
-    const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.myvariant);
+    const response = await fetchWithRetry(url, {}, API_TIMEOUT_MS.myvariant, {
+        attempts: 2,
+        onAttempt: ({ attempt, attempts }) => LookupProgress.attempt('myvariant', attempt, attempts)
+    });
     if (!response.ok) {
         const text = await response.text();
-        throw new Error(`MyVariant.info query request failed (${response.status}): ${text}`);
+        const err = new Error(`MyVariant.info query request failed (${response.status}): ${text}`);
+        err.status = response.status;
+        err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+        throw err;
     }
     const data = await response.json();
     if (data && data.hits && data.hits.length > 0) {
@@ -3439,6 +3976,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (err) {
             // If the recoder request fails, fall through and return an empty array.
+            // Record it though: an empty transcript list because Ensembl is down
+            // must not be presented the same way as one because the variant is
+            // genuinely unknown.
+            LookupProgress.step('recoder', 'fail', describeUpstreamFailure(err));
+            if (err && err.retryable) LookupProgress.markUpstreamOutage('recoder');
         }
         return [];
     }
@@ -3608,98 +4150,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     // fall through to other normalizations
                 }
             }
-            // Handle cases where genomic variant is specified as separate tokens: "chr7 140453136 A T" or "7 140453136 A T".
+            // Handle pasted coordinate rows: "chr7 140453136 A T", "7 140453136 BRAF A T",
+            // MAF column order, CSV separators and trailing build columns all land here.
             {
-                const toks = s.split(/\s+/).filter(Boolean);
-                // Support both four-token inputs (chr pos ref alt) and five-token inputs where a gene symbol appears between position and ref.
-                if (toks.length === 4 || toks.length === 5) {
-                    // Create a copy of tokens and remove a potential gene symbol at index 2 when length is 5.
-                    let tokens = toks.slice();
-                    if (tokens.length === 5) {
-                        const token3 = tokens[2];
-                        // For 5-token genomic input, always ignore token #3 as an optional gene/label
-                        // so values like TP53, ENSG IDs or other labels do not block normalisation.
-                        // Preserve a simple uppercase token as a gene hint for fallback displays.
-                        if (/^[A-Za-z][A-Za-z0-9-]*$/.test(token3)) {
-                            geneHintGlobal = token3.toUpperCase();
-                        }
-                        tokens.splice(2, 1);
+                const row = parseCoordinateRow(s);
+                if (row) {
+                    if (row.gene && !isChromosomeLikeGeneSymbol(row.gene)) {
+                        geneHintGlobal = row.gene;
                     }
-                    if (tokens.length === 4) {
-                        const [chrTok, posTok, refTok, altTok] = tokens;
-                        // Ensure chromosome token, position, ref and alt are valid DNA-like sequences
-                        if (/^[0-9XYMT]+$/.test(chrTok.replace(/^chr/i, '')) && /^\d+$/.test(posTok.replace(/,/g, '')) && /^[A-Za-z-]+$/.test(refTok) && /^[A-Za-z-]+$/.test(altTok)) {
-                            let chrom = chrTok.replace(/^chr/i, '').toUpperCase();
-                            // Strip commas from the coordinate before parsing (e.g. "140,453,136" -> "140453136").
-                            const pos = parseInt(posTok.replace(/,/g, ''), 10);
-                            const ref = refTok.toUpperCase();
-                            const alt = altTok.toUpperCase();
-                            // Handle length differences between ref and alt: deletions, insertions and complex delins.
-                            if (ref.length !== alt.length) {
-                                // Deletion or delins: alt shorter than ref indicates a deletion or a complex substitution
-                                if (alt.length < ref.length) {
-                                    /*
-                                     * Trim common prefix and suffix between ref and alt to obtain the
-                                     * minimal representation for delins variants.  For example, the
-                                     * input "7 140453122 TCCATCGAGATTTCA TCT" should normalise to
-                                     * chr7:g.140453124_140453136delinsT, because the shared "TC" prefix
-                                     * can be removed and the genomic start coordinate shifted.  If the
-                                     * resulting alt sequence is empty after trimming, this represents a
-                                     * pure deletion.  See documentation on variant normalisation.
-                                     */
-                                    let refTrim = ref;
-                                    let altTrim = alt;
-                                    let startPos = pos;
-                                    let endPos = pos + ref.length - 1;
-                                    // Trim from the left while both strings share the same leading base
-                                    while (altTrim.length > 0 && refTrim.length > 0 && altTrim[0] === refTrim[0]) {
-                                        altTrim = altTrim.slice(1);
-                                        refTrim = refTrim.slice(1);
-                                        startPos += 1;
-                                    }
-                                    // Trim from the right while both strings share the same trailing base
-                                    while (altTrim.length > 0 && refTrim.length > 0 && altTrim[altTrim.length - 1] === refTrim[refTrim.length - 1]) {
-                                        altTrim = altTrim.slice(0, -1);
-                                        refTrim = refTrim.slice(0, -1);
-                                        endPos -= 1;
-                                    }
-                                    // After trimming, if altTrim is empty, it's a pure deletion.
-                                    if (altTrim.length === 0) {
-                                        if (startPos === endPos) {
-                                            return `chr${chrom}:g.${startPos}del`;
-                                        }
-                                        return `chr${chrom}:g.${startPos}_${endPos}del`;
-                                    }
-                                    // Otherwise it's a delins with the trimmed alt sequence.
-                                    return `chr${chrom}:g.${startPos}_${endPos}delins${altTrim}`;
-                                }
-                                // Insertion or delins: alt longer than ref
-                                else if (alt.length > ref.length) {
-                                    // If ref is empty, simple insertion between pos and pos+1
-                                    if (ref === '') {
-                                        return `chr${chrom}:g.${pos}_${pos + 1}ins${alt}`;
-                                    }
-                                    // If ref is a prefix of alt, treat as insertion of the suffix
-                                    if (alt.startsWith(ref)) {
-                                        const insSeq = alt.slice(ref.length);
-                                        const insPosStart = pos + ref.length - 1;
-                                        const insPosEnd = pos + ref.length;
-                                        return `chr${chrom}:g.${insPosStart}_${insPosEnd}ins${insSeq}`;
-                                    }
-                                    // Otherwise treat as delins substitution
-                                    const delStart2 = pos;
-                                    const delEnd2 = pos + ref.length - 1;
-                                    return `chr${chrom}:g.${delStart2}_${delEnd2}delins${alt}`;
-                                }
-                            }
-                            // Lengths equal: represent SNVs as ref>alt, but use delins for MNVs.
-                            if (ref.length === 1) {
-                                return `chr${chrom}:g.${pos}${ref}>${alt}`;
-                            }
-                            const endPos = pos + ref.length - 1;
-                            return `chr${chrom}:g.${pos}_${endPos}delins${alt}`;
-                        }
-                    }
+                    const hgvs = coordinateRowToGenomicHgvs(row);
+                    if (hgvs) return hgvs;
                 }
             }
             // If no special cases above matched, continue with other normalisations
@@ -3756,6 +4216,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     variantPart = 'c.' + variantPart.slice(2);
                 }
                 return `${gene}:${variantPart}`;
+            }
+            // A row that looks like coordinates but did not parse must not fall through
+            // to the "GENE p.Change" branch below — that is what turned
+            // "EIF1AX X 20148674 T TG" into the query "EIF1AX:p.X" and then reported
+            // it as a variant that does not exist. Hand the raw text back so the
+            // caller can say what is actually wrong with the row.
+            if (looksLikeCoordinateRow(s)) {
+                return s;
             }
             // Split on whitespace or colon. This catches inputs like "BRAF V600E" or "BRAF:V600E".
             const parts = s.split(/[:\s]+/).filter(Boolean);
@@ -3817,6 +4285,24 @@ document.addEventListener('DOMContentLoaded', () => {
         // Log normalized query for debugging
         console.log('[DEBUG] Normalized query:', query);
 
+        LookupProgress.start();
+        // A coordinate row that survived normalisation unchanged is one the parser
+        // could not read. Say exactly that instead of sending the raw text to the
+        // annotation APIs and reporting the miss as "variant not found".
+        if (looksLikeCoordinateRow(query)) {
+            LookupProgress.step('parse', 'fail', 'unrecognised column layout');
+            LookupProgress.finish('fail', 'Could not read that row');
+            statusEl.textContent = 'Error: could not read that as a variant row. Expected chromosome, '
+                + 'position, then reference and alternate alleles — for example "X 20148674 EIF1AX T TG". '
+                + 'HGVS also works: chrX:g.20148675dup or NM_001412.4:c.388dup.';
+            resultSection.classList.add('hidden');
+            return;
+        }
+        LookupProgress.step('parse', 'ok', query !== rawInput ? `read as ${query}` : 'HGVS input');
+        if (query !== rawInput) {
+            LookupProgress.resolved({ input: rawInput, genomic: isGenomicVariant(query) ? query : '', gene: geneHintGlobal });
+        }
+
         // ── Gene-only / gene+descriptor mode ────────────────────────────────
         // When the input is just a gene symbol or a gene + alteration descriptor
         // (e.g. "BRAF" or "BRAF amplification"), skip the variant annotation
@@ -3825,6 +4311,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const gene = geneHintGlobal;
             const altType = alterationTypeGlobal; // e.g. "amplification" or null
 
+            // Gene-level mode renders its own cards and runs no variant pipeline,
+            // so the per-source panel has nothing to report.
+            LookupProgress.hide();
             statusEl.textContent = '';
             resultSection.classList.remove('hidden');
 
@@ -4979,10 +5468,17 @@ document.addEventListener('DOMContentLoaded', () => {
         // The variant_recoder can still return useful transcript annotations for complex
         // genomic variants that MyVariant.info does not index (e.g. delins).  If this
         // request fails, transcriptsFromRecoder will remain an empty array.
+        LookupProgress.step('recoder', 'running');
         try {
             transcriptsFromRecoder = await getTranscriptsList(query);
-        } catch {
+            LookupProgress.stepUnlessFailed('recoder', transcriptsFromRecoder.length ? 'ok' : 'empty',
+                transcriptsFromRecoder.length
+                    ? `${transcriptsFromRecoder.length} transcript${transcriptsFromRecoder.length === 1 ? '' : 's'}`
+                    : 'no transcript match');
+        } catch (recoderErr) {
             transcriptsFromRecoder = [];
+            LookupProgress.step('recoder', 'fail', describeUpstreamFailure(recoderErr));
+            if (recoderErr && recoderErr.retryable) LookupProgress.markUpstreamOutage('recoder');
         }
         if (!query) return;
         statusEl.textContent = 'Processing...';
@@ -5000,11 +5496,22 @@ document.addEventListener('DOMContentLoaded', () => {
             // If query is already in genomic HGVS format (chrN:g.posRef>Alt), try fetching directly.
             if (isGenomicVariant(query)) {
                 console.log('[DEBUG] Detected genomic HGVS input, attempting direct fetch:', query);
+                LookupProgress.step('myvariant', 'running');
                 try {
                     annotation = await fetchMyVariant(query);
                     gVariant = query;
+                    LookupProgress.step('myvariant', 'ok', 'annotation found');
                     console.log('[DEBUG] Direct genomic fetch succeeded for', query);
                 } catch (errDirectGenomic) {
+                    // 404 is the routine answer for an indel MyVariant does not index.
+                    LookupProgress.step('myvariant',
+                        errDirectGenomic && errDirectGenomic.notFound ? 'empty' : 'fail',
+                        errDirectGenomic && errDirectGenomic.notFound
+                            ? 'no record for this variant'
+                            : describeUpstreamFailure(errDirectGenomic));
+                    if (errDirectGenomic && errDirectGenomic.retryable && !errDirectGenomic.notFound) {
+                        LookupProgress.markUpstreamOutage('myvariant');
+                    }
                     console.log('[DEBUG] Direct genomic fetch failed, attempting liftover and retry:', errDirectGenomic);
                     try {
                         const lifted = await liftoverHg38ToHg19(query);
@@ -5400,11 +5907,14 @@ document.addEventListener('DOMContentLoaded', () => {
                                 // As a last resort, attempt to query the Ensembl VEP HGVS endpoint on the GRCh37 server
                                 // to retrieve transcript consequences for this genomic variant. This helps cover cases
                                 // where MyVariant.info does not index the deletion/indel but Ensembl VEP still recognises it.
+                                LookupProgress.step('vep', 'running');
                                 try {
                                     // Use the currently normalised gVariant if available; otherwise fall back to the original query.
                                     const hgvsForVep = gVariant || query;
                                     const vepRes = await fetchVepHgvsHg19(hgvsForVep);
                                     const vepConsequences = vepRes.consequences || [];
+                                    LookupProgress.step('vep', vepConsequences.length ? 'ok' : 'empty',
+                                        vepConsequences.length ? vepRes.mostSevere || 'resolved' : 'no consequences');
                                     if (vepConsequences.length > 0) {
                                         // Build a minimal annotation using the first gene symbol from the VEP data. The dbnsfp
                                         // genename field is used for summary display. The _id is set to the original query.
@@ -5462,19 +5972,26 @@ document.addEventListener('DOMContentLoaded', () => {
                                         altFound = true;
                                     }
                                 } catch (vepErr) {
-                                    // Ignore VEP errors and fall through to throwing an error below
+                                    // Record the reason before falling through: the error thrown
+                                    // below depends on whether this was an outage or a real miss.
+                                    LookupProgress.step('vep', 'fail', describeUpstreamFailure(vepErr));
+                                    if (vepErr && vepErr.retryable) LookupProgress.markUpstreamOutage('vep');
                                 }
                                 if (!altFound) {
-                                    // If no alternative candidate variant matches were found and VEP fallback failed,
-                                    // throw a more helpful error message. The original free‑text search error is
-                                    // replaced with guidance suggesting that the provided genomic position or
-                                    // reference allele may not exist in the chosen genome build.
-                                    throw new Error('Variant not found. Please verify the genomic coordinate and reference allele.');
+                                    // Nothing resolved. Which message is correct depends entirely on
+                                    // *why* nothing resolved, so ask the progress panel rather than
+                                    // assuming the user mistyped a coordinate: an Ensembl 503 used to
+                                    // be reported as an invalid reference allele.
+                                    throw buildLookupFailureError();
                                 }
                             }
                         }
                     } catch (errSearch) {
                         console.log('[DEBUG] Free-text MyVariant search error:', errSearch);
+                        // Re-wrapping used to drop the outage flag, so an Ensembl 503 was
+                        // reported to the user as a plain lookup failure. Keep the original
+                        // error when it already carries a diagnosis.
+                        if (errSearch && (errSearch.upstreamOutage || errSearch.retryable)) throw errSearch;
                         throw new Error(errSearch.message || 'Variant not found');
                     }
                 } else {
@@ -5529,6 +6046,34 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             // Display annotation
             statusEl.textContent = 'Annotation retrieved';
+            // Show what the input actually resolved to. Users paste a coordinate row
+            // and get back a page of cards; without this they cannot tell which
+            // transcript, which HGVS form, or even which build the tool settled on.
+            {
+                const canonical = Array.isArray(transcriptsFromRecoder) && transcriptsFromRecoder.length
+                    ? transcriptsFromRecoder[selectCanonicalTranscriptSafe(transcriptsFromRecoder)]
+                    : null;
+                const summaryForPanel = buildSummary(annotation, gVariant);
+                const rowValue = (name) => {
+                    const row = summaryForPanel.find((r) => r.name === name);
+                    return row ? String(row.value) : '';
+                };
+                LookupProgress.resolved({
+                    input: rawInput,
+                    genomic: isGenomicVariant(gVariant) ? gVariant : '',
+                    cdna: canonical && canonical.cDNA ? `${canonical.transcript}:${canonical.cDNA}` : '',
+                    protein: canonical && canonical.protein ? canonical.protein : '',
+                    // The summary's gene row can repeat a symbol once per transcript
+                    // ("BRAF, BRAF,BRAF"); the panel wants it named once.
+                    gene: dedupeSymbolList(rowValue('Gene(s)')) || geneHintGlobal || '',
+                    consequence: rowValue('Consequence'),
+                    assembly: 'GRCh37/hg19'
+                });
+                LookupProgress.finish('ok', 'Variant resolved');
+                // The panel header now carries the outcome, so the legacy status
+                // line below it would just repeat "Annotation retrieved".
+                statusEl.textContent = '';
+            }
             summaryTable.innerHTML = '';
             const summaryRows = buildSummary(annotation, gVariant);
             summaryRows.forEach(row => {
@@ -9362,6 +9907,7 @@ document.addEventListener('DOMContentLoaded', () => {
             resultSection.classList.remove('hidden');
         } catch (err) {
             statusEl.textContent = 'Error: ' + err.message;
+            LookupProgress.finish('fail', err.upstreamOutage ? 'Upstream service unavailable' : 'Lookup failed');
             console.error(err);
         }
     });

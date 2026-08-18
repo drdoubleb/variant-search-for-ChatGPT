@@ -73,6 +73,153 @@ form button:hover {
     font-weight: 600;
 }
 
+/* ── Lookup progress panel ─────────────────────────────────────────────────
+   Replaces the single mutable status line with a pipeline view: what the input
+   resolved to, and the live state of each upstream source. The distinction
+   between "returned nothing" and "failed" is carried by colour and glyph, so a
+   service outage no longer looks like a bad coordinate. */
+.lookup-progress {
+    margin-bottom: 1rem;
+    padding: 0.9rem 1rem;
+    background-color: #fff;
+    border: 1px solid #e3e6ee;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06);
+    font-size: 0.88rem;
+}
+
+.lp-header {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-weight: 600;
+    color: #202124;
+}
+
+.lp-header .lp-elapsed {
+    margin-left: auto;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    color: #8a8f98;
+    font-size: 0.8rem;
+}
+
+/* Spinner: animated while running, a solid state dot once settled. */
+.lp-spinner {
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background-color: #8a8f98;
+}
+
+.lp-header.lp-running .lp-spinner {
+    background-color: transparent;
+    border: 2px solid #3498db;
+    border-top-color: transparent;
+    animation: lp-spin 0.7s linear infinite;
+}
+
+.lp-header.lp-ok .lp-spinner { background-color: #1e8e5a; }
+.lp-header.lp-fail .lp-spinner { background-color: #c0392b; }
+.lp-header.lp-warn .lp-spinner { background-color: #b7791f; }
+
+@keyframes lp-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .lp-header.lp-running .lp-spinner { animation: none; }
+}
+
+/* Resolved nomenclature: the answer to "what did it actually look up?" */
+.lp-resolved {
+    margin-top: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    background-color: #f6f8fc;
+    border: 1px solid #e8ebf3;
+    border-radius: 6px;
+    display: grid;
+    grid-template-columns: minmax(7rem, max-content) 1fr;
+    gap: 0.25rem 0.9rem;
+}
+
+.lp-resolved-row {
+    display: contents;
+}
+
+.lp-resolved .lp-key {
+    color: #6b7280;
+    font-size: 0.8rem;
+}
+
+.lp-resolved .lp-value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    color: #202124;
+    overflow-wrap: anywhere;
+}
+
+/* Per-source pipeline rows */
+.lp-steps {
+    list-style: none;
+    margin: 0.75rem 0 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.lp-step {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    color: #4b5563;
+}
+
+.lp-step .lp-icon {
+    flex: 0 0 auto;
+    width: 1rem;
+    text-align: center;
+    color: #9aa0a6;
+}
+
+.lp-step .lp-name {
+    flex: 0 0 auto;
+}
+
+.lp-step .lp-detail {
+    color: #6b7280;
+    font-size: 0.82rem;
+    overflow-wrap: anywhere;
+}
+
+.lp-step .lp-timing {
+    margin-left: auto;
+    color: #9aa0a6;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.lp-step.lp-running { color: #202124; }
+.lp-step.lp-running .lp-icon { color: #3498db; }
+.lp-step.lp-ok .lp-icon { color: #1e8e5a; }
+/* "empty" means the source answered but holds no record — routine, not an error. */
+.lp-step.lp-empty .lp-icon { color: #9aa0a6; }
+.lp-step.lp-warn .lp-icon { color: #b7791f; }
+.lp-step.lp-fail { color: #922b21; }
+.lp-step.lp-fail .lp-icon { color: #c0392b; }
+
+@media (max-width: 600px) {
+    .lp-resolved {
+        grid-template-columns: 1fr;
+        gap: 0.1rem;
+    }
+    .lp-resolved-row { display: block; margin-bottom: 0.35rem; }
+    .lp-step { flex-wrap: wrap; }
+    .lp-step .lp-timing { margin-left: 0; }
+}
+
 .hidden {
     display: none;
 }
