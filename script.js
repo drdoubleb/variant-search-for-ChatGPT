@@ -270,10 +270,18 @@ const LookupProgress = (() => {
     let root = null;
     let stepsEl = null;
     let headerEl = null;
+    let bodyEl = null;
     let resolvedEl = null;
     const steps = new Map();
     let startedAt = 0;
+    // Frozen at finish() so re-rendering the header (e.g. on collapse) reports
+    // how long the lookup took, not how long ago it happened.
+    let finishedAt = 0;
     let active = false;
+    let collapsed = false;
+    // Kept so the collapsed header can still name what was resolved.
+    let lastResolved = null;
+    let lastHeader = { state: 'running', text: 'Looking up variant…' };
 
     function ensureDom() {
         if (root && document.body.contains(root)) return;
@@ -284,25 +292,60 @@ const LookupProgress = (() => {
         root.className = 'lookup-progress hidden';
         root.setAttribute('aria-live', 'polite');
 
-        headerEl = document.createElement('div');
+        // A button, not a div: the header is the collapse control, so it has to
+        // be reachable by keyboard and announce its expanded state.
+        headerEl = document.createElement('button');
+        headerEl.type = 'button';
         headerEl.className = 'lp-header';
+        headerEl.setAttribute('aria-controls', 'lookupProgressBody');
+        headerEl.addEventListener('click', () => setCollapsed(!collapsed));
         root.appendChild(headerEl);
+
+        bodyEl = document.createElement('div');
+        bodyEl.className = 'lp-body';
+        bodyEl.id = 'lookupProgressBody';
+        root.appendChild(bodyEl);
 
         resolvedEl = document.createElement('div');
         resolvedEl.className = 'lp-resolved hidden';
-        root.appendChild(resolvedEl);
+        bodyEl.appendChild(resolvedEl);
 
         stepsEl = document.createElement('ol');
         stepsEl.className = 'lp-steps';
-        root.appendChild(stepsEl);
+        bodyEl.appendChild(stepsEl);
 
         status.parentNode.insertBefore(root, status);
     }
 
+    function setCollapsed(next) {
+        collapsed = Boolean(next);
+        if (!root) return;
+        root.classList.toggle('lp-collapsed', collapsed);
+        if (bodyEl) bodyEl.classList.toggle('hidden', collapsed);
+        renderHeader(lastHeader.state, lastHeader.text);
+    }
+
+    // One-line stand-in for the panel body while collapsed: what was resolved,
+    // and how many sources answered.
+    function collapsedSummary() {
+        const parts = [];
+        if (lastResolved) {
+            const primary = lastResolved.genomic || lastResolved.cdna || lastResolved.protein;
+            if (primary) parts.push(primary);
+            else if (lastResolved.gene) parts.push(lastResolved.gene);
+        }
+        const checked = steps.size;
+        if (checked) parts.push(`${checked} source${checked === 1 ? '' : 's'} checked`);
+        return parts.join(' · ');
+    }
+
     function renderHeader(state, text) {
         if (!headerEl) return;
+        lastHeader = { state, text };
         headerEl.className = `lp-header lp-${state}`;
+        headerEl.setAttribute('aria-expanded', String(!collapsed));
         headerEl.textContent = '';
+
         const dot = document.createElement('span');
         dot.className = 'lp-spinner';
         dot.setAttribute('aria-hidden', 'true');
@@ -311,12 +354,30 @@ const LookupProgress = (() => {
         label.textContent = text;
         headerEl.appendChild(dot);
         headerEl.appendChild(label);
+
+        // Collapsed, the header is the whole panel, so it carries the summary.
+        if (collapsed) {
+            const summary = collapsedSummary();
+            if (summary) {
+                const sum = document.createElement('span');
+                sum.className = 'lp-summary';
+                sum.textContent = summary;
+                headerEl.appendChild(sum);
+            }
+        }
+
         if (startedAt) {
             const t = document.createElement('span');
             t.className = 'lp-elapsed';
-            t.textContent = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+            t.textContent = `${(((finishedAt || Date.now()) - startedAt) / 1000).toFixed(1)}s`;
             headerEl.appendChild(t);
         }
+
+        const chevron = document.createElement('span');
+        chevron.className = 'lp-chevron';
+        chevron.setAttribute('aria-hidden', 'true');
+        chevron.textContent = collapsed ? '▸' : '▾';
+        headerEl.appendChild(chevron);
     }
 
     function renderStep(key) {
@@ -367,11 +428,15 @@ const LookupProgress = (() => {
             ensureDom();
             steps.clear();
             startedAt = Date.now();
+            finishedAt = 0;
             active = true;
+            lastResolved = null;
             if (!root) return;
             if (stepsEl) stepsEl.textContent = '';
             if (resolvedEl) { resolvedEl.textContent = ''; resolvedEl.classList.add('hidden'); }
             root.classList.remove('hidden');
+            // A new lookup always starts expanded, whatever the last one left behind.
+            setCollapsed(false);
             renderHeader('running', 'Looking up variant…');
         },
         // state: running | ok | empty | warn | fail
@@ -416,6 +481,7 @@ const LookupProgress = (() => {
         resolved({ input, genomic, cdna, protein, gene, consequence, assembly }) {
             if (!active) return;
             ensureDom();
+            lastResolved = { genomic, cdna, protein, gene };
             if (!resolvedEl) return;
             resolvedEl.textContent = '';
             const rows = [
@@ -444,7 +510,7 @@ const LookupProgress = (() => {
         },
         finish(state, text) {
             if (!active) return;
-            renderHeader(state, text);
+            finishedAt = Date.now();
             for (const [key, step] of steps.entries()) {
                 if (step.state === 'running') {
                     step.state = state === 'fail' ? 'fail' : 'warn';
@@ -453,6 +519,11 @@ const LookupProgress = (() => {
                     renderStep(key);
                 }
             }
+            // On success the variant summary below is what the user came for, so
+            // fold the panel down to one line and let them reopen it. A failed or
+            // degraded lookup stays open: the per-source detail *is* the answer.
+            setCollapsed(state === 'ok');
+            renderHeader(state, text);
             active = false;
         },
         hide() {

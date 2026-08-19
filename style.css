@@ -88,12 +88,47 @@ form button:hover {
     font-size: 0.88rem;
 }
 
+/* The header doubles as the collapse toggle, so it is a <button> and needs the
+   browser's control styling stripped back to the panel's own look. */
 .lp-header {
     display: flex;
     align-items: center;
     gap: 0.55rem;
+    width: 100%;
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
     font-weight: 600;
+    text-align: left;
     color: #202124;
+    cursor: pointer;
+}
+
+.lp-header:hover .lp-header-text {
+    text-decoration: underline;
+}
+
+.lp-header:focus-visible {
+    outline: 2px solid #3498db;
+    outline-offset: 3px;
+    border-radius: 4px;
+}
+
+.lp-header .lp-header-text {
+    flex: 0 0 auto;
+}
+
+/* Collapsed, this one line stands in for the whole panel body. */
+.lp-header .lp-summary {
+    font-weight: 400;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8rem;
+    color: #6b7280;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
 }
 
 .lp-header .lp-elapsed {
@@ -102,6 +137,17 @@ form button:hover {
     font-variant-numeric: tabular-nums;
     color: #8a8f98;
     font-size: 0.8rem;
+}
+
+.lp-header .lp-chevron {
+    flex: 0 0 auto;
+    color: #9aa0a6;
+    font-size: 0.75rem;
+}
+
+/* Collapsed panels sit tighter — they are a status line, not a card. */
+.lookup-progress.lp-collapsed {
+    padding: 0.6rem 1rem;
 }
 
 /* Spinner: animated while running, a solid state dot once settled. */
@@ -134,7 +180,7 @@ form button:hover {
 
 /* Resolved nomenclature: the answer to "what did it actually look up?" */
 .lp-resolved {
-    margin-top: 0.75rem;
+    margin-top: 0;
     padding: 0.6rem 0.75rem;
     background-color: #f6f8fc;
     border: 1px solid #e8ebf3;
@@ -158,6 +204,10 @@ form button:hover {
     font-size: 0.82rem;
     color: #202124;
     overflow-wrap: anywhere;
+}
+
+.lp-body {
+    margin-top: 0.75rem;
 }
 
 /* Per-source pipeline rows */
@@ -211,6 +261,7 @@ form button:hover {
 .lp-step.lp-fail .lp-icon { color: #c0392b; }
 
 @media (max-width: 600px) {
+    .lp-header .lp-summary { display: none; }
     .lp-resolved {
         grid-template-columns: 1fr;
         gap: 0.1rem;
