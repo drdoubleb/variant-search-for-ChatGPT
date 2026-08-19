@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Variant Search (Beta)</title>
     <!-- Append a version query parameter to force browsers to reload the updated stylesheet -->
-    <link rel="stylesheet" href="style.css?v=20260713-2" />
+    <link rel="stylesheet" href="style.css?v=20260818-2" />
     <!-- Include a simple Google font for nicer typography -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
 </head>
@@ -13,12 +13,12 @@
     <header>
         <!-- Updated site title and description to reflect current branding. -->
         <h1>Variant Search (Beta)</h1>
-        <p>Enter a variant in HGVS genomic (g.), coding (c.) or protein (p.) notation. The tool will convert non‑genomic variants and display annotations from MyVariant.info.</p>
+        <p>Enter a variant in HGVS genomic (g.), coding (c.) or protein (p.) notation, or paste a coordinate row from a VCF, MAF or spreadsheet. Coordinates are interpreted as GRCh37/hg19.</p>
     </header>
     <main>
         <form id="variantForm">
             <label for="variantInput" class="sr-only">Variant (HGVS genomic, coding, or protein notation)</label>
-            <input type="text" id="variantInput" placeholder="e.g. chr7:g.140453136A>T or NM_001256849.2:c.76A>G or AGT:p.Met259Ser" />
+            <input type="text" id="variantInput" placeholder="e.g. chr7:g.140453136A>T · NM_001256849.2:c.76A>G · AGT:p.Met259Ser · 7 140453136 BRAF A T" />
             <button type="submit">Lookup</button>
             <div class="tumor-type-row">
                 <label for="tumorTypeInput">Tumor type <span class="optional-label">(optional)</span></label>
@@ -131,6 +131,6 @@
         // window.TURNSTILE_SITE_KEY = "0xAAAAAAAAAAAAAAAAAAAAAA";
     </script>
     <!-- AGENTS: bump the ?v= querystring on script.js and style.css whenever those files change, so browsers and static hosts (Hostinger, etc.) refetch instead of serving a stale cached copy. -->
-    <script src="script.js?v=20260713-5"></script>
+    <script src="script.js?v=20260818-2"></script>
 </body>
 </html>

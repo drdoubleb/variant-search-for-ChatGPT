@@ -1,5 +1,86 @@
 # Variant Search (Beta)
 
+## Accepted input formats
+
+Coordinates are interpreted as **GRCh37/hg19** — that is the assembly every
+resolution endpoint in this app targets (`grch37.rest.ensembl.org`), so an hg38
+position will either miss or silently resolve to the wrong locus.
+
+HGVS is accepted in genomic, coding and protein form:
+
+```
+chrX:g.20148675dup      NM_001412.4:c.388dup      EIF1AX:p.Gln130ProfsTer3
+```
+
+Pasted coordinate rows are also accepted, in the shapes people actually paste
+out of VCFs, MAFs, spreadsheets and pipeline reports:
+
+| Input | Notes |
+| --- | --- |
+| `X  20148674  EIF1AX  T  TG` | chrom, pos, gene, ref, alt — tabs or spaces |
+| `X  20148674  T  TG` | gene column optional |
+| `EIF1AX  X  20148674  T  TG` | MAF column order (Hugo_Symbol first) |
+| `X,20148674,EIF1AX,T,TG` | CSV/semicolon/pipe separated, quoted cells fine |
+| `X  20,148,674  EIF1AX  T  TG` | thousands separators in the coordinate |
+| `X  20148674  EIF1AX  T  TG  hg19` | trailing build/zygosity columns ignored |
+| `X  20148674  EIF1AX  -  G` | MAF-style `-` for an absent allele |
+
+Parsing anchors on the chromosome/position pair wherever it sits in the row and
+reads the alleles from the columns that follow. When more than two DNA-like
+columns follow the position, the **last two** are the alleles — a gene symbol
+that happens to spell DNA (`TTN`, `CAT`, `TAT`) is always written before them.
+
+A row that looks like coordinates but cannot be parsed is rejected with a
+message naming the expected layout. It is deliberately **not** passed through to
+the `GENE p.Change` interpretation: doing so used to turn
+`EIF1AX X 20148674 T TG` into the query `EIF1AX:p.X` and then report it back as
+a variant that could not be found.
+
+VCF-anchored indels are reduced to the minimal HGVS event before lookup, so
+`X 20148674 EIF1AX T TG` is queried as `chrX:g.20148674_20148675insG` and
+resolves to `chrX:g.20148675dup` / `NM_001412.4:c.388dup`.
+
+See `tests/coordinate-row.test.js`.
+
+## Upstream reliability and the lookup progress panel
+
+Every nomenclature lookup depends on `grch37.rest.ensembl.org`. That host
+intermittently returns 500/503 and has been measured taking **20-40 seconds** to
+answer a cold `variant_recoder` or `vep` query. The app previously made a single
+attempt behind a 6-7 second deadline, so a slow or unwell upstream produced:
+
+> Variant not found. Please verify the genomic coordinate and reference allele.
+
+— which blames the user's input for an outage, and sends them to re-check a
+coordinate that was never wrong.
+
+Two changes address this:
+
+- **`fetchWithRetry`** wraps `fetchWithTimeout` with bounded retries and
+  exponential backoff plus jitter. Transport errors and retryable statuses
+  (408, 425, 429, 500, 502, 503, 504) are retried; 4xx is not, because a 404
+  from MyVariant.info is a real answer — it holds no record for many indels.
+  Per-attempt deadlines were raised to match measured latency (recoder 12 s,
+  VEP 20 s, MyVariant 10 s). See `tests/fetch-retry.test.js`.
+
+- **The lookup progress panel** (`LookupProgress` in `script.js`, `.lookup-progress`
+  in `style.css`) replaces the single mutable status line. It shows what the
+  input resolved to — gene, genomic/coding/protein HGVS, effect, assembly — and
+  one row per upstream source with its state, timing and retry count.
+
+The panel distinguishes three outcomes that used to look identical:
+
+| Glyph | State | Meaning |
+| --- | --- | --- |
+| `●` | ok | the source answered and had data |
+| `◍` | empty | the source answered and holds no record — routine for indels |
+| `✕` | fail | the source did not answer (status, timeout or network error) |
+
+The final error message is derived from that record, so an Ensembl outage now
+reads "…did not respond. This is an upstream outage, not necessarily a problem
+with your variant — please retry in a moment" rather than blaming the
+coordinate.
+
 ## TP53 backend (Vercel)
 
 This repo now includes a serverless endpoint at `api/tp53.js` for TP53 mutation database lookups.
