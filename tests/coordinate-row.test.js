@@ -92,10 +92,7 @@ function coordinateRowToGenomicHgvs(row) {
     const pos = parseInt(row.pos, 10);
     if (!Number.isFinite(pos)) return null;
 
-    if (ref.length === alt.length && ref.length > 0) {
-        if (ref.length === 1) return `chr${chrom}:g.${pos}${ref}>${alt}`;
-        return `chr${chrom}:g.${pos}_${pos + ref.length - 1}delins${alt}`;
-    }
+    if (ref.length === 1 && alt.length === 1) return `chr${chrom}:g.${pos}${ref}>${alt}`;
     if (!ref) return `chr${chrom}:g.${pos}_${pos + 1}ins${alt}`;
     if (!alt) {
         return ref.length === 1
@@ -117,6 +114,7 @@ function coordinateRowToGenomicHgvs(row) {
     if (!r) {
         return `chr${chrom}:g.${end}_${end + 1}ins${a}`;
     }
+    if (r.length === 1 && a.length === 1) return `chr${chrom}:g.${start}${r}>${a}`;
     return start === end
         ? `chr${chrom}:g.${start}delins${a}`
         : `chr${chrom}:g.${start}_${end}delins${a}`;
@@ -165,6 +163,13 @@ check('MAF-style deletion ("-" alt)', hgvsOf('17 7578406 TP53 C -'), 'chr17:g.75
 check('multi-base deletion', hgvsOf('7 55242465 EGFR TAAGAGAAGCA T'), 'chr7:g.55242466_55242475del');
 check('delins', hgvsOf('7 140453122 BRAF TCCATCGAGATTTCA TCT'), 'chr7:g.140453124_140453136delinsT');
 check('MNV becomes delins', hgvsOf('7 140453136 BRAF AC TG'), 'chr7:g.140453136_140453137delinsTG');
+// Same-length pairs carrying shared context bases reduce to the minimal event —
+// an untrimmed delins ("CT">"CA" as delinsCA) misses in MyVariant/ClinVar.
+check('same-length pair, shared prefix → SNV', hgvsOf('7 140453135 BRAF CT CA'), 'chr7:g.140453136T>A');
+check('same-length pair, shared suffix → SNV', hgvsOf('7 140453136 BRAF AG TG'), 'chr7:g.140453136A>T');
+check('same-length pair, shared flanks → SNV', hgvsOf('7 140453135 BRAF CAG CTG'), 'chr7:g.140453136A>T');
+check('same-length pair, inner MNV keeps delins', hgvsOf('7 140453135 BRAF CACG CTGG'), 'chr7:g.140453136_140453137delinsTG');
+check('identical ref/alt is not a variant', hgvsOf('7 140453136 BRAF AC AC'), null);
 
 // ── Gene hint extraction ──────────────────────────────────────────────────
 check('gene from middle column', parseCoordinateRow('X 20148674 EIF1AX T TG').gene, 'EIF1AX');

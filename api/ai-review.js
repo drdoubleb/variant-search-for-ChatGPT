@@ -28,13 +28,19 @@ const DEFAULT_MODEL = 'openai/gpt-5-mini';
 // Browser origins permitted to spend the owner's key. The live frontend is on
 // Hostinger (drdoubleb.com); the Vercel host + previews are kept for testing.
 // Override with a comma-separated AI_ALLOWED_ORIGINS env var. Entries may be full
-// origins or "*." wildcards; "*" disables the check. Requests with no Origin header
-// (curl, server-to-server) are allowed through and left to the other layers.
+// origins or host patterns with "*" wildcards; a bare "*" disables the check.
+// Requests with no Origin header (curl, server-to-server) are allowed through and
+// left to the other layers.
+//
+// The previews entry is scoped to THIS project's deployments
+// (variant-search-for-chat-gpt-<hash|git-branch>-<scope>.vercel.app). The
+// previous "*.vercel.app" admitted every Vercel-hosted site on the internet —
+// anyone could deploy their own frontend and spend the owner's key from it.
 const DEFAULT_ALLOWED_ORIGINS = [
     'https://drdoubleb.com',
     'https://www.drdoubleb.com',
     'https://variant-search-for-chat-gpt.vercel.app',
-    '*.vercel.app'
+    'variant-search-for-chat-gpt-*.vercel.app'
 ];
 
 function parseAllowedOrigins() {
@@ -52,6 +58,15 @@ function isOriginAllowed(origin) {
     return allowed.some((entry) => {
         if (entry === origin) return true;
         if (entry.startsWith('*.')) return host === entry.slice(2) || host.endsWith(entry.slice(1));
+        // Host pattern with an embedded wildcard, e.g.
+        // "variant-search-for-chat-gpt-*.vercel.app". The wildcard matches within
+        // a single DNS label (no dots), so it cannot be stretched across domains.
+        if (entry.includes('*')) {
+            const escaped = entry.split('*')
+                .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+                .join('[a-z0-9-]*');
+            return new RegExp(`^${escaped}$`, 'i').test(host);
+        }
         if (entry === 'localhost') return host === 'localhost' || host.startsWith('localhost:');
         try { return new URL(entry).host === host; } catch { return false; }
     });

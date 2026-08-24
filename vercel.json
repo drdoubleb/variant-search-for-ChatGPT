@@ -12,6 +12,18 @@
     "api/tp53.js": {
       "maxDuration": 30
     },
+    "api/clinvar-region.js": {
+      "maxDuration": 30
+    },
+    "api/clinvar-variant.js": {
+      "maxDuration": 30
+    },
+    "api/spliceai.js": {
+      "maxDuration": 30
+    },
+    "api/clinicaltrials.js": {
+      "maxDuration": 15
+    },
     "api/pubmed.js": {
       "maxDuration": 15
     },

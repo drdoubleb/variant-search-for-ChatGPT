@@ -12,7 +12,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
     'https://drdoubleb.com',
     'https://www.drdoubleb.com',
     'https://variant-search-for-chat-gpt.vercel.app',
-    '*.vercel.app'
+    'variant-search-for-chat-gpt-*.vercel.app'
 ];
 
 function parseAllowedOrigins() {
@@ -30,6 +30,15 @@ function isOriginAllowed(origin) {
     return allowed.some((entry) => {
         if (entry === origin) return true;
         if (entry.startsWith('*.')) return host === entry.slice(2) || host.endsWith(entry.slice(1));
+        // Host pattern with an embedded wildcard, e.g.
+        // "variant-search-for-chat-gpt-*.vercel.app". The wildcard matches within
+        // a single DNS label (no dots), so it cannot be stretched across domains.
+        if (entry.includes('*')) {
+            const escaped = entry.split('*')
+                .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+                .join('[a-z0-9-]*');
+            return new RegExp(`^${escaped}$`, 'i').test(host);
+        }
         if (entry === 'localhost') return host === 'localhost' || host.startsWith('localhost:');
         try { return new URL(entry).host === host; } catch { return false; }
     });
@@ -56,12 +65,16 @@ check('empty Origin is allowed', isOriginAllowed('') === true);
 check('live Hostinger origin allowed', isOriginAllowed('https://drdoubleb.com') === true);
 check('www Hostinger origin allowed', isOriginAllowed('https://www.drdoubleb.com') === true);
 check('production Vercel origin allowed', isOriginAllowed('https://variant-search-for-chat-gpt.vercel.app') === true);
-check('vercel preview wildcard allowed', isOriginAllowed('https://variant-search-git-branch-abc.vercel.app') === true);
+check('project deploy-hash preview allowed', isOriginAllowed('https://variant-search-for-chat-gpt-a1b2c3d4e-drdoubleb.vercel.app') === true);
+check('project git-branch preview allowed', isOriginAllowed('https://variant-search-for-chat-gpt-git-fix-liftover-drdoubleb.vercel.app') === true);
 
 // Origin allowlist — blocked
 check('unrelated origin blocked', isOriginAllowed('https://evil.com') === false);
 check('suffix-spoof origin blocked', isOriginAllowed('https://drdoubleb.com.evil.com') === false);
 check('non-dot vercel lookalike blocked', isOriginAllowed('https://evilvercel.app') === false);
+check('someone else\'s Vercel deployment blocked', isOriginAllowed('https://attacker-frontend.vercel.app') === false);
+check('project-prefix on another domain blocked', isOriginAllowed('https://variant-search-for-chat-gpt-x.evil.com') === false);
+check('wildcard cannot span a dot', isOriginAllowed('https://variant-search-for-chat-gpt-x.y.vercel.app') === false);
 check('malformed origin blocked', isOriginAllowed('not-a-url') === false);
 
 // Origin allowlist — env override

@@ -67,28 +67,80 @@ function parseGenomicHgvs(gVariant) {
     return null;
 }
 
+const COORDINATE_ROW_NOISE = /^(hg18|hg19|hg38|grch3[678]|b3[678]|chr|snp|snv|ins|del|indel|mnp|somatic|germline|het|hom|\+|\.)$/i;
+
+const isDnaAllele = (t) => /^(?:[ACGTN]+|-)$/i.test(String(t));
+const isChromToken = (t) => /^(?:chr)?(?:[0-9]{1,2}|X|Y|M|MT)$/i.test(String(t));
+
+function splitCoordinateRow(raw) {
+    return String(raw || '')
+        .trim()
+        .replace(/\b\d{1,3}(?:,\d{3})+(?!\d)/g, (m) => m.replace(/,/g, ''))
+        .split(/[\s,;|]+/)
+        .map((t) => t.replace(/^["']+|["']+$/g, ''))
+        .filter(Boolean);
+}
+
+function parseCoordinateRow(raw) {
+    const all = splitCoordinateRow(raw);
+    if (all.length < 4) return null;
+    const toks = all.filter((t) => !COORDINATE_ROW_NOISE.test(t));
+    if (toks.length < 4) return null;
+
+    let chromIdx = -1;
+    for (let i = 0; i < toks.length - 1; i++) {
+        if (isChromToken(toks[i]) && /^\d[\d,]*$/.test(toks[i + 1])) { chromIdx = i; break; }
+    }
+    if (chromIdx === -1) return null;
+
+    const chrom = toks[chromIdx].replace(/^chr/i, '').toUpperCase();
+    const pos = toks[chromIdx + 1].replace(/,/g, '');
+    if (!/^\d+$/.test(pos)) return null;
+
+    const after = toks.slice(chromIdx + 2);
+    const dnaIdx = [];
+    after.forEach((t, i) => { if (isDnaAllele(t)) dnaIdx.push(i); });
+    if (dnaIdx.length < 2) return null;
+    const refIdx = dnaIdx[dnaIdx.length - 2];
+    const altIdx = dnaIdx[dnaIdx.length - 1];
+    if (altIdx !== refIdx + 1) return null;
+
+    const clean = (t) => (t === '-' || t === '.' ? '' : t.toUpperCase());
+    const ref = clean(after[refIdx]);
+    const alt = clean(after[altIdx]);
+    if (!ref && !alt) return null;
+
+    const geneCandidates = toks
+        .filter((t, i) => i !== chromIdx && i !== chromIdx + 1)
+        .filter((t) => /^[A-Za-z][A-Za-z0-9-]*$/.test(t) && !isChromToken(t));
+    const consumed = new Set([after[refIdx], after[altIdx]]);
+    const gene = geneCandidates.find((t) => !consumed.has(t) || !isDnaAllele(t)) || null;
+
+    return { chrom, pos, ref, alt, gene: gene ? gene.toUpperCase() : null };
+}
+
 function buildVariantCoordinateTuple(rawInput, gVariant) {
     const parseTokenInput = (raw) => {
-        if (!raw) return null;
-        const toks = String(raw).trim().split(/\s+/).filter(Boolean);
-        if (toks.length !== 4 && toks.length !== 5) return null;
-        const tokens = toks.slice();
-        if (tokens.length === 5) {
-            // For 5-token genomic input, always treat token #3 as an optional gene/label
-            // and remove it. Example: "17 7573954 TP53 T A".
-            tokens.splice(2, 1);
+        const row = parseCoordinateRow(raw);
+        if (!row) return null;
+        let startNum = Number(row.pos);
+        if (!Number.isFinite(startNum)) return null;
+        let ref = row.ref;
+        let alt = row.alt;
+        // Same-length pairs may carry shared context bases ("CT">"CA" is really a
+        // T>A one base along). VCF SNVs/MNVs need no anchor base, so trim to the
+        // minimal representation — the one gnomAD and SpliceAI index. Indels keep
+        // their anchored VCF form untouched.
+        if (ref.length === alt.length && ref.length > 1) {
+            while (ref.length > 1 && ref[0] === alt[0]) {
+                ref = ref.slice(1); alt = alt.slice(1); startNum += 1;
+            }
+            while (ref.length > 1 && ref[ref.length - 1] === alt[alt.length - 1]) {
+                ref = ref.slice(0, -1); alt = alt.slice(0, -1);
+            }
         }
-        const [chrTok, posTok, refTok, altTok] = tokens;
-        const chrom = String(chrTok).replace(/^chr/i, '').toUpperCase();
-        const pos = String(posTok).replace(/,/g, '');
-        const ref = String(refTok).toUpperCase();
-        const alt = String(altTok).toUpperCase();
-        if (!/^[0-9XYMT]+$/.test(chrom)) return null;
-        if (!/^\d+$/.test(pos)) return null;
-        if (!/^[A-Za-z-]+$/.test(ref) || !/^[A-Za-z-]+$/.test(alt)) return null;
-        const startNum = Number(pos);
         return {
-            chrom: `chr${chrom}`, pos, ref, alt,
+            chrom: `chr${row.chrom}`, pos: String(startNum), ref, alt,
             start: startNum, end: startNum + Math.max(ref.length, 1) - 1,
             type: ref.length === 1 && alt.length === 1 ? 'sub' : 'delins'
         };
@@ -314,6 +366,25 @@ check('substitution still yields alleles',
     eq(buildVariantCoordinateTuple('BRAF V600E', 'chr7:g.140453136A>T'),
         { chrom: 'chr7', pos: '140453136', ref: 'A', alt: 'T', start: 140453136, end: 140453136, type: 'sub' }));
 check('unparseable input yields null', buildVariantCoordinateTuple('BRAF V600E', 'BRAF:p.Val600Glu') === null);
+// Same-length pairs with shared context bases reduce to the minimal alleles
+// (matching the minimal g. notation the row parser now produces).
+check('same-length pair with shared prefix trims to the SNV',
+    eq(buildVariantCoordinateTuple('7 140453135 BRAF CT CA', null),
+        { chrom: 'chr7', pos: '140453136', ref: 'T', alt: 'A', start: 140453136, end: 140453136, type: 'sub' }));
+check('same-length pair with shared flanks trims to the SNV',
+    eq(buildVariantCoordinateTuple('7 140453135 BRAF CAG CTG', null),
+        { chrom: 'chr7', pos: '140453136', ref: 'A', alt: 'T', start: 140453136, end: 140453136, type: 'sub' }));
+{
+    const t = buildVariantCoordinateTuple('7 140453136 BRAF AC TG', null);
+    check('true MNV keeps both alleles untrimmed',
+        t && t.ref === 'AC' && t.alt === 'TG' && t.pos === '140453136' && t.type === 'delins');
+}
+{
+    // VCF-anchored indel: the anchored form is what gnomAD/SpliceAI want — untouched.
+    const t = buildVariantCoordinateTuple('X 20148674 EIF1AX T TG', null);
+    check('anchored indel alleles are not trimmed',
+        t && t.ref === 'T' && t.alt === 'TG' && t.pos === '20148674');
+}
 
 // --- VCF allele construction + left alignment -----------------------------
 

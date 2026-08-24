@@ -90,7 +90,9 @@ const API_TIMEOUT_MS = {
     tp53: 15000,
     clinvar: 15000,
     civic: 8000,
-    pubmed: 25000,
+    // The /api/pubmed function is capped at maxDuration 15 in vercel.json, so
+    // waiting longer than that client-side only delays the inevitable error.
+    pubmed: 16000,
     fda: 8000,
     bbkb: 8000,
     gnomadV4: 10000,
@@ -748,10 +750,7 @@ function coordinateRowToGenomicHgvs(row) {
     const pos = parseInt(row.pos, 10);
     if (!Number.isFinite(pos)) return null;
 
-    if (ref.length === alt.length && ref.length > 0) {
-        if (ref.length === 1) return `chr${chrom}:g.${pos}${ref}>${alt}`;
-        return `chr${chrom}:g.${pos}_${pos + ref.length - 1}delins${alt}`;
-    }
+    if (ref.length === 1 && alt.length === 1) return `chr${chrom}:g.${pos}${ref}>${alt}`;
     // Pure insertion (MAF "-" reference): the new bases sit between pos and pos+1.
     if (!ref) return `chr${chrom}:g.${pos}_${pos + 1}ins${alt}`;
     // Pure deletion (MAF "-" alternate): ref spells out the deleted bases.
@@ -760,7 +759,10 @@ function coordinateRowToGenomicHgvs(row) {
             ? `chr${chrom}:g.${pos}del`
             : `chr${chrom}:g.${pos}_${pos + ref.length - 1}del`;
     }
-    // VCF-anchored indel: trim the shared prefix and suffix to the minimal event.
+    // Multi-base ref/alt: trim the shared prefix and suffix to the minimal event.
+    // This handles VCF-anchored indels AND same-length pairs carrying context
+    // bases ("CT">"CA" is really a T>A substitution) — the annotation APIs index
+    // the minimal form, so an untrimmed delins would come back "not found".
     let r = ref;
     let a = alt;
     let start = pos;
@@ -769,6 +771,8 @@ function coordinateRowToGenomicHgvs(row) {
     while (r.length && a.length && r[r.length - 1] === a[a.length - 1]) {
         r = r.slice(0, -1); a = a.slice(0, -1); end -= 1;
     }
+    // Identical ref and alt describe no variant at all — refuse rather than
+    // sending a nonsense delins to the annotation APIs.
     if (!r && !a) return null;
     if (!a) {
         return start === end ? `chr${chrom}:g.${start}del` : `chr${chrom}:g.${start}_${end}del`;
@@ -777,6 +781,7 @@ function coordinateRowToGenomicHgvs(row) {
         // Insertion between the flanking bases left after trimming.
         return `chr${chrom}:g.${end}_${end + 1}ins${a}`;
     }
+    if (r.length === 1 && a.length === 1) return `chr${chrom}:g.${start}${r}>${a}`;
     return start === end
         ? `chr${chrom}:g.${start}delins${a}`
         : `chr${chrom}:g.${start}_${end}delins${a}`;
@@ -798,12 +803,24 @@ function buildVariantCoordinateTuple(rawInput, gVariant) {
     const parseTokenInput = (raw) => {
         const row = parseCoordinateRow(raw);
         if (!row) return null;
-        const startNum = Number(row.pos);
+        let startNum = Number(row.pos);
         if (!Number.isFinite(startNum)) return null;
-        const ref = row.ref;
-        const alt = row.alt;
+        let ref = row.ref;
+        let alt = row.alt;
+        // Same-length pairs may carry shared context bases ("CT">"CA" is really a
+        // T>A one base along). VCF SNVs/MNVs need no anchor base, so trim to the
+        // minimal representation — the one gnomAD and SpliceAI index. Indels keep
+        // their anchored VCF form untouched.
+        if (ref.length === alt.length && ref.length > 1) {
+            while (ref.length > 1 && ref[0] === alt[0]) {
+                ref = ref.slice(1); alt = alt.slice(1); startNum += 1;
+            }
+            while (ref.length > 1 && ref[ref.length - 1] === alt[alt.length - 1]) {
+                ref = ref.slice(0, -1); alt = alt.slice(0, -1);
+            }
+        }
         return {
-            chrom: `chr${row.chrom}`, pos: row.pos, ref, alt,
+            chrom: `chr${row.chrom}`, pos: String(startNum), ref, alt,
             start: startNum, end: startNum + Math.max(ref.length, 1) - 1,
             type: ref.length === 1 && alt.length === 1 ? 'sub' : 'delins'
         };
@@ -3917,6 +3934,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // Holds a list of transcript annotations (transcript ID, cDNA, protein) fetched via the Ensembl variant recoder.
     // This will be populated when the user submits a variant and used to build the transcripts list in the variant card.
     let transcriptsFromRecoder = [];
+    // Raw variant_recoder response from the most recent call, keyed by the query
+    // it answered. getTranscriptsList() runs at the start of every lookup, and
+    // the pipeline used to call fetchVariantRecoder AGAIN for the same query a
+    // moment later — a duplicated 12s-class (40s+ cold) Ensembl round-trip on
+    // most non-genomic lookups. Cache both success and failure so the second
+    // consumer reuses the answer instead of re-asking (or re-retrying) Ensembl.
+    let lastRecoderResult = { query: null, data: null, error: null };
 
     // Apply a stable thematic class to each card so CSS can render distinct colors per section.
     const applyCardTheme = (cardEl, cardTitle) => {
@@ -3933,6 +3957,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function getTranscriptsList(q) {
         try {
             const recResults = await fetchVariantRecoder(q);
+            lastRecoderResult = { query: q, data: recResults, error: null };
             // The Ensembl variant_recoder response is an array with a single object.
             // Historically the transcripts were stored under recResults[0].A, but newer
             // versions use lettered keys (A, B, C, ... or even G) depending on the
@@ -4050,6 +4075,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Record it though: an empty transcript list because Ensembl is down
             // must not be presented the same way as one because the variant is
             // genuinely unknown.
+            lastRecoderResult = { query: q, data: null, error: err };
             LookupProgress.step('recoder', 'fail', describeUpstreamFailure(err));
             if (err && err.retryable) LookupProgress.markUpstreamOutage('recoder');
         }
@@ -4402,6 +4428,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Local aiReviewExtras for gene-only mode (populated by async card callbacks)
             const geneOnlyAiExtras = {};
+            // Card results reused by the AI-review buildContext but not spread into
+            // supplemental_card_data (they appear top-level in the payload already).
+            const geneOnlyCardCache = {};
 
             // ── Card: CIViC ────────────────────────────────────────────────
             {
@@ -4880,6 +4909,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 compDxPanel.appendChild(fdaResultsDiv);
 
                 fetchFdaCompanionDiagnostics(gene).then((records) => {
+                    geneOnlyCardCache.fda_companion_diagnostics_records = records;
                     fdaResultsDiv.innerHTML = '';
                     if (!records || records.length === 0) {
                         const noResults = document.createElement('div');
@@ -5090,6 +5120,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (cardsContainer) cardsContainer.appendChild(ctCard);
 
                 fetchClinicalTrials(gene, tumorType).then(({ total, studies }) => {
+                    geneOnlyCardCache.clinical_trials = { total, studies };
                     ctResultsDiv.innerHTML = '';
                     if (total === 0 || studies.length === 0) {
                         ctResultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No recruiting Phase 2+ interventional trials found in the US.</div>';
@@ -5463,11 +5494,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 introText: 'Send the retrieved gene-level data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
                 loadingText: 'Gathering gene-level context for AI review…',
                 buildContext: async (userNotes) => {
-                    // Supplemental context for gene-only mode: skip coordinate-dependent calls
+                    // Supplemental context for gene-only mode: skip coordinate-dependent
+                    // calls, and reuse what the cards already fetched — a fresh fetch is
+                    // the fallback, not the default.
+                    const fdaPromise = Array.isArray(geneOnlyCardCache.fda_companion_diagnostics_records)
+                        ? Promise.resolve(geneOnlyCardCache.fda_companion_diagnostics_records)
+                        : fetchFdaCompanionDiagnostics(gene).catch(() => []);
+                    const bbkbPromise = (geneOnlyAiExtras.bbkb_biomarker_therapies && Array.isArray(geneOnlyAiExtras.bbkb_biomarker_therapies.results))
+                        ? Promise.resolve(geneOnlyAiExtras.bbkb_biomarker_therapies)
+                        : fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] }));
+                    const trialsPromise = (geneOnlyCardCache.clinical_trials && Array.isArray(geneOnlyCardCache.clinical_trials.studies))
+                        ? Promise.resolve(geneOnlyCardCache.clinical_trials)
+                        : fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }));
                     const [fdaRecords, bbkbTherapies, clinicalTrialData] = await Promise.all([
-                        fetchFdaCompanionDiagnostics(gene).catch(() => []),
-                        fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] })),
-                        fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }))
+                        fdaPromise,
+                        bbkbPromise,
+                        trialsPromise
                     ]);
                     const pubmedTerm = altType ? `${gene} ${altType}` : gene;
                     // Prefer the PubMed card's already-fetched data over re-fetching.
@@ -5477,10 +5519,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     const pubmedPromise = (cachedPubmed && Array.isArray(cachedPubmed.articles) && cachedPubmed.articles.length > 0)
                         ? Promise.resolve({ total: cachedPubmed.total ?? cachedPubmed.articles.length, articles: cachedPubmed.articles })
                         : fetchPubmedArticles(pubmedTerm, 5).catch(() => ({ total: 0, articles: [] }));
+                    const civicPromise = geneOnlyAiExtras.civic_api
+                        ? Promise.resolve(geneOnlyAiExtras.civic_api)
+                        : fetchCivicApiData(gene, '').catch(() => null);
+                    const openFdaPromise = (geneOnlyAiExtras.openfda && Array.isArray(geneOnlyAiExtras.openfda.results))
+                        ? Promise.resolve(geneOnlyAiExtras.openfda)
+                        : fetchOpenFdaDrugLabels(gene).catch(() => null);
                     const [pubmedData, civicData, openFdaData] = await Promise.all([
                         pubmedPromise,
-                        fetchCivicApiData(gene, '').catch(() => null),
-                        fetchOpenFdaDrugLabels(gene).catch(() => null)
+                        civicPromise,
+                        openFdaPromise
                     ]);
                     const supplementalContext = {
                         ...geneOnlyAiExtras,
@@ -5488,9 +5536,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         pubmed: pubmedData,
                         openfda_drug_labels: condenseOpenFdaForAi(openFdaData)
                     };
-                    // geneOnlyAiExtras may itself carry a full openFDA payload (from the
-                    // openFDA card); cap that copy's record count too so the AI context stays bounded.
-                    if (supplementalContext.openfda) supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
+                    // The card's copy under `openfda` would duplicate `openfda_drug_labels`
+                    // in the payload — for drug-rich genes that is the dominant context,
+                    // doubled. Keep the one canonical key.
+                    if (supplementalContext.openfda_drug_labels && supplementalContext.openfda) {
+                        delete supplementalContext.openfda;
+                    } else if (supplementalContext.openfda) {
+                        supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
+                    }
                     return {
                         submitted_query: rawInput,
                         gene,
@@ -5645,11 +5698,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     statusEl.textContent = 'Recoder fallback…';
                 }
-                try {
-                    recoderData = await fetchVariantRecoder(query);
-                } catch (errRecoder) {
-                    // Warn in console but don't immediately fail; we will attempt a free-text MyVariant search below.
-                    console.warn('Variant recoder failed; will attempt free-text search', errRecoder);
+                // getTranscriptsList already asked the recoder for this exact query at
+                // the start of the lookup (and fetchWithRetry exhausted its retries if
+                // Ensembl was unwell) — reuse that answer instead of a second 12s-class
+                // round trip. A cached failure stays a failure: recoderData remains
+                // null and the free-text MyVariant fallback below takes over.
+                if (lastRecoderResult.query === query) {
+                    recoderData = lastRecoderResult.data;
+                    if (!recoderData && lastRecoderResult.error) {
+                        console.warn('Variant recoder failed earlier in this lookup; skipping retry', lastRecoderResult.error);
+                    }
+                } else {
+                    try {
+                        recoderData = await fetchVariantRecoder(query);
+                    } catch (errRecoder) {
+                        // Warn in console but don't immediately fail; we will attempt a free-text MyVariant search below.
+                        console.warn('Variant recoder failed; will attempt free-text search', errRecoder);
+                    }
                 }
             } else {
                 // Annotation already exists; continue to fetch annotation details.
@@ -6115,6 +6180,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     }];
                 }
             }
+            // A newer search may have started while this one's annotation was in
+            // flight; from here on every write hits shared UI (progress panel,
+            // status line, cards), so a stale run must stop before it overwrites
+            // the newer lookup's output.
+            if (!isCurrentSearch()) return;
             // Display annotation
             statusEl.textContent = 'Annotation retrieved';
             // Show what the input actually resolved to. Users paste a coordinate row
@@ -6161,6 +6231,10 @@ document.addEventListener('DOMContentLoaded', () => {
             let detailsData = buildDetailsData(annotation, rawInput, gVariant);
             const detailsContainer = document.getElementById('detailsContainer');
             const aiReviewExtras = {};
+            // Card results reused by the AI-review buildContext but NOT spread into
+            // supplemental_card_data (they already appear top-level in the payload,
+            // so keeping them out of aiReviewExtras avoids sending two copies).
+            const cardDataCache = {};
 
             // GRCh37 VCF-style alleles for this lookup, resolved once and shared by
             // every allele-dependent consumer (gnomAD v2 link, gnomAD v4 API, SpliceAI,
@@ -6815,11 +6889,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 });
                 content.appendChild(makeLine('Gene', geneNames));
-                // Determine canonical cDNA and protein from transcriptsList. If not available, fall back to first values.
-                let canonicalEntryForDisplay = null;
-                if (transcriptsList && transcriptsList.length > 0) {
-                    canonicalEntryForDisplay = transcriptsList.find(t => t.canonical) || transcriptsList[0];
-                }
                 /*
                  * Determine the canonical cDNA (c.) and protein (p.) values to display in the
                  * summary card.  In earlier builds, certain genomic inputs resulted in
@@ -8495,20 +8564,6 @@ document.addEventListener('DOMContentLoaded', () => {
                                 addRow(table, 'TCGA/ICGC/GENIE count', tcga);
                             }
 
-                            // Keep functional/epidemiology visible but collapse computational + variant rows by default.
-                            const collapsibleRows = [];
-                            Array.from(table.querySelectorAll('tr')).forEach((tr) => {
-                                const header = tr.firstChild && tr.firstChild.textContent ? tr.firstChild.textContent : '';
-                                if (/Computational predictions \\(collapsed below\\)|Variant \\(collapsed below\\)/.test(header)) {
-                                    collapsibleRows.push(tr);
-                                    let n = tr.nextSibling;
-                                    while (n && !(n.firstChild && n.firstChild.colSpan === 2)) {
-                                        collapsibleRows.push(n);
-                                        n = n.nextSibling;
-                                    }
-                                }
-                            });
-                            collapsibleRows.forEach((r) => { r.style.display = 'none'; });
                             tp53Content.appendChild(table);
                             if (compDetails) tp53Content.appendChild(compDetails);
                             tp53Content.appendChild(variantDetails);
@@ -8690,29 +8745,47 @@ document.addEventListener('DOMContentLoaded', () => {
                 const pubmedVariantTumorTerm = (tumorType && aiReviewSearchVariantTerm)
                     ? [aiReviewGene, aiReviewSearchVariantTerm, tumorType].filter(Boolean).join(' ')
                     : '';
-                // Prefer card-cached PubMed results when available. The cards fetch the same
-                // queries on render; re-fetching here adds parallel load on NCBI's eutils, and
-                // when efetch trips the rate limit the proxy returns articles with empty
-                // abstracts — making the AI payload miss abstracts the cards already have.
-                const pubmedFromCacheOrFetch = (key, term) => {
+                // Prefer card-cached results when available. The cards fetch the same
+                // data on render; re-fetching everything on every "Run AI review" click
+                // re-hammers rate-limited upstreams (NCBI eutils above all — when efetch
+                // trips the limit the proxy returns articles with EMPTY abstracts, so the
+                // AI payload used to miss abstracts the cards already had) and adds
+                // seconds of latency per run. `cachedOr` reuses what a card stored in
+                // aiReviewExtras and only fetches when the card's data is absent/errored.
+                const cachedOr = (key, isValid, fetcher) => {
                     const cached = aiReviewExtras[key];
-                    if (cached && Array.isArray(cached.articles) && cached.articles.length > 0) {
-                        return Promise.resolve({ total: cached.total ?? cached.articles.length, articles: cached.articles });
-                    }
-                    return term ? fetchPubmedArticles(term, 5) : Promise.resolve({ total: 0, articles: [] });
+                    if (cached != null && isValid(cached)) return Promise.resolve(cached);
+                    return fetcher();
                 };
+                const pubmedFromCacheOrFetch = (key, term) => cachedOr(
+                    key,
+                    (c) => Array.isArray(c.articles) && c.articles.length > 0,
+                    () => (term ? fetchPubmedArticles(term, 5) : Promise.resolve({ total: 0, articles: [] }))
+                );
                 const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation, await getResolvedVcfAlleles());
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
-                    ['clinvar_variant_record', clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)],
+                    // The ClinVar card may have recovered a variation ID from the region
+                    // pull that the MyVariant annotation lacks — reusing its record (not
+                    // just saving a fetch) also stops that recovery from being clobbered
+                    // with null here.
+                    ['clinvar_variant_record', cachedOr('clinvar_variant_record',
+                        (c) => typeof c === 'object' && !c.error,
+                        () => (clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)))],
                     ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 5).then(r => ({
                         note: 'ClinVar variants within ±5bp of the queried position. The queried variant itself may appear here if it has its own ClinVar entry. Do not use these neighboring variants\' classifications as the classification for the queried variant.',
                         window_bp: 5,
                         variants: r.variants
                     })) : Promise.resolve({ note: 'ClinVar variants within ±5bp of the queried position.', window_bp: 5, variants: [] })],
-                    ['civic_api', aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)],
-                    ['gnomad_v4', coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt) : Promise.resolve(null)],
-                    ['spliceai_lookup', spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)],
+                    ['civic_api', cachedOr('civic_api',
+                        (c) => typeof c === 'object' && !c.error,
+                        () => (aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)))],
+                    ['gnomad_v4', cachedOr('gnomad_v4',
+                        (c) => typeof c === 'object' && Boolean(c.status),
+                        () => (coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt, extractHg38Start(annotation)) : Promise.resolve(null)))],
+                    ['spliceai_lookup', cachedOr('spliceai_lookup',
+                        (c) => typeof c === 'object' && !c.error && Boolean(c.data),
+                        () => (spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)))],
                     ['pubmed', pubmedTerm ? pubmedFromCacheOrFetch('pubmed', pubmedTerm) : Promise.resolve({ total: 0, articles: [] })],
                     ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? pubmedFromCacheOrFetch('pubmed_tumor_type', pubmedTumorTerm) : Promise.resolve(null)],
                     ['pubmed_variant_tumor_type', pubmedVariantTumorTerm
@@ -8720,15 +8793,23 @@ document.addEventListener('DOMContentLoaded', () => {
                         && pubmedVariantTumorTerm !== pubmedTumorTerm
                         ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm)
                         : Promise.resolve(null)],
-                    ['openfda_drug_labels', aiReviewGene ? fetchOpenFdaDrugLabels(aiReviewGene).catch(() => null) : Promise.resolve(null)],
-                    ['bbkb_biomarker_therapies', aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null)],
-                    ['tp53_mutation_database', isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
-                        gene: 'TP53',
-                        protein: normaliseAiReviewVariantText(aiReviewProtein),
-                        cdna: normaliseAiReviewVariantText(aiReviewCdna),
-                        genomic: String(gVariant || '').trim(),
-                        debug: true
-                    }) : Promise.resolve(null)]
+                    // The openFDA card stores the same payload shape under `openfda`;
+                    // reuse it rather than re-paging up to 10 requests of label text.
+                    ['openfda_drug_labels', cachedOr('openfda',
+                        (c) => Array.isArray(c.results),
+                        () => (aiReviewGene ? fetchOpenFdaDrugLabels(aiReviewGene).catch(() => null) : Promise.resolve(null)))],
+                    ['bbkb_biomarker_therapies', cachedOr('bbkb_biomarker_therapies',
+                        (c) => Array.isArray(c.results),
+                        () => (aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null)))],
+                    ['tp53_mutation_database', cachedOr('tp53_mutation_database',
+                        (c) => typeof c === 'object' && !c.error,
+                        () => (isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
+                            gene: 'TP53',
+                            protein: normaliseAiReviewVariantText(aiReviewProtein),
+                            cdna: normaliseAiReviewVariantText(aiReviewCdna),
+                            genomic: String(gVariant || '').trim(),
+                            debug: true
+                        }) : Promise.resolve(null)))]
                 ];
                 const settled = await Promise.allSettled(tasks.map(([, promise]) => promise));
                 settled.forEach((result, idx) => {
@@ -8737,6 +8818,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? result.value
                         : { error: result.reason?.message || String(result.reason || 'Unavailable') };
                 });
+                // The openFDA card's copy (spread in as `openfda`) would duplicate
+                // `openfda_drug_labels` byte-for-byte — for drug-rich genes that is the
+                // dominant part of the payload, doubled. Keep the one canonical key.
+                if (supplemental.openfda_drug_labels && supplemental.openfda) delete supplemental.openfda;
                 // Replace raw SpliceAI payload with compact summary (top 5 transcripts by delta score)
                 if (supplemental.spliceai_lookup && !supplemental.spliceai_lookup.error) {
                     const spliceSummary = getSpliceAiScoreSummary(supplemental.spliceai_lookup);
@@ -9277,6 +9362,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         compDxPanel.appendChild(fdaResultsDiv);
 
                         fetchFdaCompanionDiagnostics(firstGene).then((records) => {
+                            cardDataCache.fda_companion_diagnostics_records = records;
                             fdaResultsDiv.innerHTML = '';
                             if (!records || records.length === 0) {
                                 const noResults = document.createElement('div');
@@ -9508,6 +9594,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     if (ctSearchGene) {
                         fetchClinicalTrials(ctSearchGene, tumorType).then(({ total, studies }) => {
+                            cardDataCache.clinical_trials = { total, studies };
                             ctResultsDiv.innerHTML = '';
                             if (total === 0 || studies.length === 0) {
                                 ctResultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No recruiting Phase 2+ interventional trials found in the US.</div>';
@@ -9895,10 +9982,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 introText: 'Send the retrieved variant data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
                 loadingText: 'Gathering FDA, trial, and annotation context for AI review…',
                 buildContext: async (userNotes) => {
+                    // Reuse what the cards already fetched; fall back to a fresh fetch
+                    // only when a card's data never arrived (or errored).
+                    const fdaPromise = Array.isArray(cardDataCache.fda_companion_diagnostics_records)
+                        ? Promise.resolve(cardDataCache.fda_companion_diagnostics_records)
+                        : (aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]));
+                    const bbkbPromise = (aiReviewExtras.bbkb_biomarker_therapies && Array.isArray(aiReviewExtras.bbkb_biomarker_therapies.results))
+                        ? Promise.resolve(aiReviewExtras.bbkb_biomarker_therapies)
+                        : (aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null));
+                    const trialsPromise = (cardDataCache.clinical_trials && Array.isArray(cardDataCache.clinical_trials.studies))
+                        ? Promise.resolve(cardDataCache.clinical_trials)
+                        : (aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }));
                     const [fdaRecords, bbkbTherapies, clinicalTrialData, supplementalContext] = await Promise.all([
-                        aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
-                        aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null),
-                        aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
+                        fdaPromise,
+                        bbkbPromise,
+                        trialsPromise,
                         fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
                     ]);
                     // Cap the openFDA record count (the dominant payload for drug-rich genes)
@@ -9977,9 +10075,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             resultSection.classList.remove('hidden');
         } catch (err) {
+            console.error(err);
+            // A stale run's failure must not overwrite the status/progress panel
+            // of a newer search that is already underway.
+            if (!isCurrentSearch()) return;
             statusEl.textContent = 'Error: ' + err.message;
             LookupProgress.finish('fail', err.upstreamOutage ? 'Upstream service unavailable' : 'Lookup failed');
-            console.error(err);
         }
     });
 
