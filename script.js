@@ -5646,17 +5646,33 @@ document.addEventListener('DOMContentLoaded', () => {
         // genomic variants that MyVariant.info does not index (e.g. delins).  If this
         // request fails, transcriptsFromRecoder will remain an empty array.
         LookupProgress.step('recoder', 'running');
-        try {
-            transcriptsFromRecoder = await getTranscriptsList(query);
-            LookupProgress.stepUnlessFailed('recoder', transcriptsFromRecoder.length ? 'ok' : 'empty',
-                transcriptsFromRecoder.length
-                    ? `${transcriptsFromRecoder.length} transcript${transcriptsFromRecoder.length === 1 ? '' : 's'}`
+        // Start the recoder WITHOUT awaiting it. The whole pipeline used to block
+        // on this call before even trying the direct MyVariant search — during an
+        // Ensembl outage that meant ~37s of retries/timeouts in front of a result
+        // that the direct search then produced in ~2s. The promise is awaited only
+        // where its answer is actually needed: in full before the recoder-candidate
+        // fallback, and with a short grace period before rendering a result that
+        // was resolved without it (so a healthy Ensembl still contributes RefSeq
+        // transcript nomenclature, but a sick one cannot hold the page hostage).
+        transcriptsFromRecoder = [];
+        const transcriptsPromise = getTranscriptsList(query).then((list) => {
+            // Guard the shared state: a stale search's late-resolving recoder must
+            // not overwrite the transcripts or progress panel of a newer search.
+            if (!isCurrentSearch()) return list;
+            transcriptsFromRecoder = list;
+            LookupProgress.stepUnlessFailed('recoder', list.length ? 'ok' : 'empty',
+                list.length
+                    ? `${list.length} transcript${list.length === 1 ? '' : 's'}`
                     : 'no transcript match');
-        } catch (recoderErr) {
+            return list;
+        }).catch((recoderErr) => {
+            // getTranscriptsList swallows its own errors, so this is a safety net.
+            if (!isCurrentSearch()) return [];
             transcriptsFromRecoder = [];
             LookupProgress.step('recoder', 'fail', describeUpstreamFailure(recoderErr));
             if (recoderErr && recoderErr.retryable) LookupProgress.markUpstreamOutage('recoder');
-        }
+            return [];
+        });
         if (!query) return;
         statusEl.textContent = 'Processing...';
         resultSection.classList.add('hidden');
@@ -5751,6 +5767,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     statusEl.textContent = 'Recoder fallback…';
                 }
+                // Nothing resolved without the recoder, so now its answer is genuinely
+                // needed — wait for the in-flight call (this also guarantees
+                // lastRecoderResult below reflects this query's attempt).
+                await transcriptsPromise;
                 // getTranscriptsList already asked the recoder for this exact query at
                 // the start of the lookup (and fetchWithRetry exhausted its retries if
                 // Ensembl was unwell) — reuse that answer instead of a second 12s-class
@@ -6265,6 +6285,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     }];
                 }
             }
+            // The recoder may still be in flight when the annotation was resolved
+            // without it (direct MyVariant hit). Give it a short grace so a healthy
+            // Ensembl still contributes RefSeq transcript nomenclature to the
+            // Variant card, but never let a sick one hold the finished result page
+            // hostage — the dbNSFP fallback renders the correct canonical without it.
+            await Promise.race([
+                transcriptsPromise,
+                new Promise((resolve) => setTimeout(resolve, 6000))
+            ]);
             // A newer search may have started while this one's annotation was in
             // flight; from here on every write hits shared UI (progress panel,
             // status line, cards), so a stale run must stop before it overwrites
