@@ -1,26 +1,14 @@
 /*
- * Tests for resolveRedisRestEnv (copied verbatim from api/_ratelimit.js — KEEP IN
- * SYNC). It must accept both the canonical UPSTASH_REDIS_REST_* names and the prefixed
+ * Tests for resolveRedisRestEnv (imported from api/_ratelimit.js). It must accept both the canonical UPSTASH_REDIS_REST_* names and the prefixed
  * <PREFIX>_REST_API_URL / <PREFIX>_REST_API_TOKEN pair that the Vercel/Upstash
  * Marketplace integration injects (any prefix), and must ignore a redis:// *_URL.
  *
  * Run with: node tests/ratelimit-env.test.js
  */
 
-// --- helper copied verbatim from api/_ratelimit.js ------------------------
+// --- real helper imported from api/_ratelimit.js --------------------------
 
-function resolveRedisRestEnv() {
-    const env = process.env;
-    if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
-        return { url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN };
-    }
-    for (const key of Object.keys(env)) {
-        if (!/_REST_API_URL$/.test(key) || !env[key]) continue;
-        const tokenKey = key.replace(/_REST_API_URL$/, '_REST_API_TOKEN');
-        if (env[tokenKey]) return { url: env[key], token: env[tokenKey] };
-    }
-    return null;
-}
+import { resolveRedisRestEnv } from '../api/_ratelimit.js';
 
 // --- assertions -----------------------------------------------------------
 

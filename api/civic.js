@@ -337,3 +337,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ gene: apiGene, matchedVariant, assertions });
 }
+
+// Named exports for the test suite (tests/civic-assertions.test.js) — the
+// Vercel runtime reads only the default export above.
+export { normaliseAssertions, collectAssertionsFromGene, buildAssertions };

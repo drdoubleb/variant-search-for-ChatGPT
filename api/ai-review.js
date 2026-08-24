@@ -315,3 +315,7 @@ export default async function handler(req, res) {
         clearTimeout(timer);
     }
 }
+
+// Named export for the test suite (tests/ai-review-guard.test.js) — the
+// Vercel runtime reads only the default export above.
+export { parseUserKey };

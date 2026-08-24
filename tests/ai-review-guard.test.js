@@ -2,22 +2,17 @@
  * Tests for the proxy guards: the shared Origin allowlist (api/_origin.js,
  * imported directly — no copy to drift) that protects the owner's OpenRouter
  * key and keeps third-party websites from using the data proxies as their
- * backend, plus the BYO-key format check (copied verbatim from
- * api/ai-review.js — KEEP IN SYNC).
+ * backend, plus the BYO-key format check (imported from
+ * api/ai-review.js).
  *
  * Run with: node tests/ai-review-guard.test.js
  */
 
 import { isOriginAllowed } from '../api/_origin.js';
 
-// --- helper copied verbatim from api/ai-review.js -------------------------
+// --- real helper imported from api/ai-review.js ---------------------------
 
-function parseUserKey(value) {
-    if (value === undefined || value === null || value === '') return '';
-    const key = String(value).trim();
-    if (!key) return '';
-    return /^sk-[A-Za-z0-9_-]{16,}$/.test(key) ? key : null;
-}
+import { parseUserKey } from '../api/ai-review.js';
 
 // --- assertions -----------------------------------------------------------
 

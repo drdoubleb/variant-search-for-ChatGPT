@@ -1,6 +1,5 @@
 /*
- * Tests for ClinicalTrials.gov query building + filter helpers (copied verbatim from
- * api/clinicaltrials.js — KEEP IN SYNC). The proxy now pushes recruiting /
+ * Tests for ClinicalTrials.gov query building + filter helpers (imported from api/clinicaltrials.js). The proxy now pushes recruiting /
  * interventional / phase-2+ / US filters into the server query (percent-encoded), so
  * the page budget is spent on real candidates instead of being silently truncated at
  * 1000.
@@ -8,25 +7,9 @@
  * Run with: node tests/clinicaltrials-query.test.js
  */
 
-// --- helpers copied verbatim from api/clinicaltrials.js -------------------
+// --- real helpers imported from api/clinicaltrials.js ---------------------
 
-const PHASES_PHASE2_PLUS = new Set(['PHASE2', 'PHASE3', 'PHASE4']);
-
-function buildCtQuery(params) {
-    return Object.entries(params)
-        .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
-        .join('&');
-}
-
-function isPhase2Plus(phases) {
-    if (!Array.isArray(phases) || phases.length === 0) return false;
-    return phases.some(p => PHASES_PHASE2_PLUS.has(String(p).toUpperCase()));
-}
-
-function hasUsLocation(locations) {
-    if (!Array.isArray(locations)) return false;
-    return locations.some(loc => String(loc.country || '').toLowerCase() === 'united states');
-}
+import { buildCtQuery, isPhase2Plus, hasUsLocation } from '../api/clinicaltrials.js';
 
 // --- assertions -----------------------------------------------------------
 

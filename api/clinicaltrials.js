@@ -244,3 +244,7 @@ export default async function handler(req, res) {
         clearTimeout(timer);
     }
 }
+
+// Named exports for the test suite (tests/clinicaltrials-query.test.js) — the
+// Vercel runtime reads only the default export above.
+export { buildCtQuery, isPhase2Plus, hasUsLocation };

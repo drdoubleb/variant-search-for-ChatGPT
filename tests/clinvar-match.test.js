@@ -4,133 +4,22 @@
  * When MyVariant.info carries no `clinvar` block for the queried variant, the
  * ClinVar card recovers the variation ID from the live region pull by matching
  * on exact genomic position + substitution. The helpers live in script.js
- * (complementBase / findExactClinvarRegionMatch). Because the project has no
- * module system, they are re-declared here verbatim — KEEP IN SYNC with
- * script.js when either side changes.
+ * (complementBase / findExactClinvarRegionMatch) and are imported directly —
+ * the tests exercise the real implementations.
  *
  * Run with: node tests/clinvar-match.test.js
  */
 
-// --- helpers copied verbatim from script.js -------------------------------
+// --- real helpers imported from script.js ---------------------------------
 
-function complementBase(b) {
-    return { A: 'T', T: 'A', C: 'G', G: 'C' }[String(b || '').toUpperCase()] || '';
-}
-
-// Normalise a cDNA HGVS string for comparison across sources. Strips any accession
-// prefix and the optionally spelled-out reference bases, so the user's
-// "c.2319_2321delAAT" and ClinVar's "c.2319_2321del" compare equal. Inserted bases
-// are kept, because insAA and insTT are genuinely different variants.
-function normalizeCdnaForMatch(cdna) {
-    let s = String(cdna || '').trim().toLowerCase().replace(/\s+/g, '');
-    const colon = s.lastIndexOf(':');
-    if (colon !== -1) s = s.slice(colon + 1);
-    if (!/^[cn]\./.test(s)) return '';
-    s = s.replace(/^[cn]\./, 'c.');
-    s = s.replace(/del[acgt]+(?=ins)/, 'del');
-    s = s.replace(/(del|dup|inv)[acgt]+$/, '$1');
-    return s;
-}
-
-// Locate the ClinVar region-pull entry that corresponds to the exact queried
-
-// ClinVar itself has an entry — the per-variant lookup otherwise shows "N/A".
-//
-// variants: array of region-pull records ({ id, title, variationName, pos, germline }).
-// tuple:    queried variant ({ pos, ref, alt }) from buildVariantCoordinateTuple.
-//
-// Matching is intentionally conservative: only single-nucleotide substitutions
-// are recovered, and the substitution bases in the ClinVar title must match the
-// queried alleles (allowing for transcript-strand complementation on minus-strand
-// genes). When two SNVs share a position (e.g. G>C and G>A) the allele check
-// disambiguates; if no entry's alleles match, no fallback is applied.
-//
-// cdnaForms: optional list of the queried variant's cDNA HGVS strings. Indels have
-// no ref/alt to compare, and their genomic coordinates differ between HGVS (3'-shifted)
-// and ClinVar's own representation, so they are matched on the c. notation in the
-// record title instead — which is exactly how a user would recognise the record.
-function findExactClinvarRegionMatch(variants, tuple, cdnaForms) {
-    if (!Array.isArray(variants) || !tuple || !tuple.pos) return null;
-    const pos = Number(tuple.pos);
-    const ref = String(tuple.ref || '').toUpperCase();
-    const alt = String(tuple.alt || '').toUpperCase();
-    if (!/^[ACGT]$/.test(ref) || !/^[ACGT]$/.test(alt)) {
-        // Non-SNV: fall back to cDNA-notation matching when forms were supplied.
-        const wanted = new Set(
-            (Array.isArray(cdnaForms) ? cdnaForms : [cdnaForms])
-                .map(normalizeCdnaForMatch)
-                .filter(Boolean)
-        );
-        if (wanted.size === 0) return null;
-        for (const v of variants) {
-            const text = [v.title, v.variationName].filter(Boolean).join(' ');
-            const tokens = text.match(/c\.[A-Za-z0-9_>+*\-]+/gi) || [];
-            if (tokens.some((t) => wanted.has(normalizeCdnaForMatch(t)))) return v;
-        }
-        return null;
-    }
-
-    const refC = complementBase(ref);
-    const altC = complementBase(alt);
-    const candidates = variants.filter((v) => Number(v.pos) === pos);
-
-    for (const v of candidates) {
-        const text = [v.title, v.variationName].filter(Boolean).join(' ');
-        const m = text.match(/([ACGT])\s*>\s*([ACGT])/i);
-        if (!m) continue;
-        const tRef = m[1].toUpperCase();
-        const tAlt = m[2].toUpperCase();
-        if ((tRef === ref && tAlt === alt) || (tRef === refC && tAlt === altC)) {
-            return v;
-        }
-    }
-    return null;
-}
-
-function aaThreeToSingle(aa) {
-    if (!aa) return null;
-    const aaSingle = {
-        ALA: 'A', ARG: 'R', ASN: 'N', ASP: 'D', CYS: 'C', GLN: 'Q', GLU: 'E', GLY: 'G',
-        HIS: 'H', ILE: 'I', LEU: 'L', LYS: 'K', MET: 'M', PHE: 'F', PRO: 'P', SER: 'S',
-        THR: 'T', TRP: 'W', TYR: 'Y', VAL: 'V',
-        TER: '*', STOP: '*'
-    };
-    return aaSingle[String(aa).toUpperCase()] || null;
-}
-
-function parseProteinChange(text) {
-    const s = String(text || '');
-    let m = s.match(/p\.\(?([A-Za-z]{3})(\d+)([A-Za-z]{3})\)?/);
-    if (m) {
-        const ref = aaThreeToSingle(m[1]);
-        const alt = aaThreeToSingle(m[3]);
-        if (ref && alt) return { ref, pos: Number(m[2]), alt };
-    }
-    m = s.match(/\b([A-Za-z]{3})(\d+)([A-Za-z]{3})\b/);
-    if (m) {
-        const ref = aaThreeToSingle(m[1]);
-        const alt = aaThreeToSingle(m[3]);
-        if (ref && alt) return { ref, pos: Number(m[2]), alt };
-    }
-    m = s.match(/\bp?\.?([A-Z])(\d+)([A-Z*])\b/);
-    if (m) return { ref: m[1].toUpperCase(), pos: Number(m[2]), alt: m[3].toUpperCase() };
-    return null;
-}
-
-function sameProteinChange(a, b) {
-    return !!a && !!b && a.ref === b.ref && a.pos === b.pos && a.alt === b.alt;
-}
-
-function aaSingleToThree(aa) {
-    const map = {
-        A: 'Ala', R: 'Arg', N: 'Asn', D: 'Asp', C: 'Cys', Q: 'Gln', E: 'Glu', G: 'Gly',
-        H: 'His', I: 'Ile', L: 'Leu', K: 'Lys', M: 'Met', F: 'Phe', P: 'Pro', S: 'Ser',
-        T: 'Thr', W: 'Trp', Y: 'Tyr', V: 'Val', '*': 'Ter'
-    };
-    return map[String(aa || '').toUpperCase()] || null;
-}
+await import('../script.js');
+const {
+    complementBase, normalizeCdnaForMatch, findExactClinvarRegionMatch,
+    parseProteinChange, sameProteinChange, aaSingleToThree, clinvarReviewStars, escapeHtml
+} = globalThis.__variantSearchHelpers;
 
 // Build the eutils change forms the card sends to /api/clinvar-protein.
+// (Composed inline in the card code, so re-composed here rather than imported.)
 function buildChangeForms(pc) {
     const forms = [];
     const r3 = aaSingleToThree(pc.ref);
@@ -260,27 +149,7 @@ check('aaSingleToThree maps stop codon * → Ter', aaSingleToThree('*') === 'Ter
 check('three-letter search form parses back to the same change',
     sameProteinChange(parseProteinChange(buildChangeForms({ ref: 'R', pos: 282, alt: 'W' })[0]), { ref: 'R', pos: 282, alt: 'W' }));
 
-// --- review-status stars (copied verbatim from script.js) -----------------
-
-function escapeHtml(text) {
-    return String(text ?? '').replace(/[&<>"']/g, (ch) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
-    ));
-}
-
-function clinvarReviewStars(status) {
-    const s = String(status || '').toLowerCase();
-    if (!s) return '';
-    let filled = 0;
-    if (s.includes('no assertion') || s.includes('no classification')) filled = 0;
-    else if (s.includes('practice guideline')) filled = 4;
-    else if (s.includes('expert panel')) filled = 3;
-    else if (s.includes('multiple submitters')) filled = 2;
-    else if (s.includes('criteria provided')) filled = 1;
-    else filled = 0;
-    const stars = '★'.repeat(filled) + '☆'.repeat(4 - filled);
-    return `<span style="color:#f59e0b" title="${escapeHtml(status)}">${stars}</span>`;
-}
+// --- review-status stars (clinvarReviewStars imported above) --------------
 
 // Extract just the ★/☆ glyphs from the rendered span for easy assertions.
 function starsOf(status) {

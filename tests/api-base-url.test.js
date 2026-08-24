@@ -1,6 +1,5 @@
 /*
- * Tests for backend API base-URL resolution (copied verbatim from script.js —
- * KEEP IN SYNC). The key behaviour: a Vercel preview/branch deployment should
+ * Tests for backend API base-URL resolution (imported from script.js). The key behaviour: a Vercel preview/branch deployment should
  * call its OWN same-origin /api so a branch can be tested end-to-end before it
  * is merged to production, while Hostinger / custom domains / the production
  * apex keep using the pinned production backend.
@@ -8,32 +7,10 @@
  * Run with: node tests/api-base-url.test.js
  */
 
-const DEFAULT_BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
-const PRODUCTION_VERCEL_HOST = 'variant-search-for-chat-gpt.vercel.app';
+// --- real helpers imported from script.js ---------------------------------
 
-function trimTrailingSlash(value) {
-    return String(value || '').trim().replace(/\/+$/, '');
-}
-
-function isVercelPreviewHost() {
-    const host = (typeof window !== 'undefined' && window.location && window.location.hostname) || '';
-    return /\.vercel\.app$/i.test(host) && host !== PRODUCTION_VERCEL_HOST;
-}
-
-function getBackendApiBaseUrl() {
-    if (typeof window.BACKEND_API_BASE_URL === 'string') {
-        return trimTrailingSlash(window.BACKEND_API_BASE_URL);
-    }
-    if (isVercelPreviewHost()) return '';
-    return DEFAULT_BACKEND_API_BASE_URL;
-}
-
-function getConfiguredApiEndpoint(globalName, apiPath) {
-    const configured = String(window[globalName] || '').trim();
-    if (configured) return configured;
-    const base = getBackendApiBaseUrl();
-    return base ? `${base}${apiPath}` : apiPath;
-}
+await import('../script.js');
+const { getBackendApiBaseUrl, getConfiguredApiEndpoint, DEFAULT_BACKEND_API_BASE_URL, PRODUCTION_VERCEL_HOST } = globalThis.__variantSearchHelpers;
 
 // --- harness --------------------------------------------------------------
 

@@ -1,5 +1,5 @@
 /*
- * Tests for TP53 backend helpers (copied verbatim from api/tp53.js — KEEP IN SYNC):
+ * Tests for TP53 backend helpers (imported from api/tp53.js):
  *   - parseCsv: single-pass parser that preserves quoted newlines
  *   - proteinCodonKey / sameProteinCodon: same-codon relative matching
  *   - coordinateHasPosition: exact integer-token match (no substring false positives)
@@ -9,84 +9,9 @@
  * Run with: node tests/tp53-parse.test.js
  */
 
-// --- helpers copied verbatim from api/tp53.js -----------------------------
+// --- real helpers imported from api/tp53.js -------------------------------
 
-function parseCsv(text) {
-  const s = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const rows = [];
-  let row = [];
-  let cur = '';
-  let inQuotes = false;
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (s[i + 1] === '"') { cur += '"'; i++; }
-        else inQuotes = false;
-      } else {
-        cur += ch;
-      }
-    } else if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ',') {
-      row.push(cur);
-      cur = '';
-    } else if (ch === '\n') {
-      row.push(cur);
-      cur = '';
-      rows.push(row);
-      row = [];
-    } else {
-      cur += ch;
-    }
-  }
-  if (cur !== '' || row.length > 0) {
-    row.push(cur);
-    rows.push(row);
-  }
-  if (rows.length < 2) return [];
-  const headers = rows[0].map(h => String(h).trim());
-  const out = [];
-  for (let r = 1; r < rows.length; r++) {
-    const cols = rows[r];
-    if (cols.length === 1 && cols[0] === '') continue;
-    const obj = {};
-    headers.forEach((h, idx) => {
-      obj[h] = cols[idx] !== undefined ? cols[idx] : '';
-    });
-    out.push(obj);
-  }
-  return out;
-}
-
-function proteinCodonKey(compact) {
-  const m = String(compact || '').match(/^([A-Z*])(\d+)/);
-  return m ? `${m[1]}${m[2]}` : null;
-}
-function sameProteinCodon(a, b) {
-  const ka = proteinCodonKey(a);
-  const kb = proteinCodonKey(b);
-  return !!ka && ka === kb;
-}
-function coordinateHasPosition(coord, pos) {
-  const nums = String(coord || '').match(/\d+/g);
-  return Array.isArray(nums) && nums.some(n => Number(n) === pos);
-}
-
-// Extraction logic from discoverDatasetUrls (network fetch omitted).
-function extractDatasetUrls(html, base = 'https://tp53.cancer.gov/get_tp53data') {
-  const found = [...String(html).matchAll(/static\/data\/[A-Za-z0-9_]+_r\d+\.csv/gi)].map(m => m[0]);
-  const pick = (re) => {
-    const hit = found.find(h => re.test(h));
-    if (!hit) return null;
-    try { return new URL(hit, base).toString(); } catch { return null; }
-  };
-  return [
-    pick(/\/MutationView_r\d+\.csv$/i),
-    pick(/\/TumorVariantDownload_r\d+\.csv$/i),
-    pick(/\/GermlineDownload_r\d+\.csv$/i)
-  ].filter(Boolean);
-}
+import { parseCsv, sameProteinCodon, coordinateHasPosition, extractDatasetUrls } from '../api/tp53.js';
 
 // --- assertions -----------------------------------------------------------
 

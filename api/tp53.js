@@ -18,6 +18,22 @@ const TP53_DOWNLOAD_PAGE = 'https://tp53.cancer.gov/get_tp53data';
 // buildMatches needs), or [] when discovery fails so callers fall back to the
 // hard-coded list. The MutationView pattern is anchored on a leading slash so it does
 // not also match InducedMutationView.
+// Pure extraction core (no network), split out so the test suite can drive it
+// with canned HTML.
+function extractDatasetUrls(html, base = TP53_DOWNLOAD_PAGE) {
+  const found = [...String(html).matchAll(/static\/data\/[A-Za-z0-9_]+_r\d+\.csv/gi)].map(m => m[0]);
+  const pick = (re) => {
+    const hit = found.find(h => re.test(h));
+    if (!hit) return null;
+    try { return new URL(hit, base).toString(); } catch { return null; }
+  };
+  return [
+    pick(/\/MutationView_r\d+\.csv$/i),
+    pick(/\/TumorVariantDownload_r\d+\.csv$/i),
+    pick(/\/GermlineDownload_r\d+\.csv$/i)
+  ].filter(Boolean);
+}
+
 async function discoverDatasetUrls() {
   try {
     const res = await fetch(TP53_DOWNLOAD_PAGE, {
@@ -28,18 +44,7 @@ async function discoverDatasetUrls() {
     });
     if (!res.ok) return [];
     const html = await res.text();
-    const found = [...String(html).matchAll(/static\/data\/[A-Za-z0-9_]+_r\d+\.csv/gi)].map(m => m[0]);
-    const pick = (re) => {
-      const hit = found.find(h => re.test(h));
-      if (!hit) return null;
-      try { return new URL(hit, TP53_DOWNLOAD_PAGE).toString(); } catch { return null; }
-    };
-    const urls = [
-      pick(/\/MutationView_r\d+\.csv$/i),
-      pick(/\/TumorVariantDownload_r\d+\.csv$/i),
-      pick(/\/GermlineDownload_r\d+\.csv$/i)
-    ].filter(Boolean);
-    return Array.from(new Set(urls));
+    return Array.from(new Set(extractDatasetUrls(html)));
   } catch {
     return [];
   }
@@ -578,3 +583,7 @@ export default async function handler(req, res) {
     });
   }
 }
+
+// Named exports for the test suite (tests/tp53-parse.test.js) — the Vercel
+// runtime reads only the default export above.
+export { parseCsv, proteinCodonKey, sameProteinCodon, coordinateHasPosition, extractDatasetUrls };
