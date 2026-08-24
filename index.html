@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Variant Search (Beta)</title>
     <!-- Append a version query parameter to force browsers to reload the updated stylesheet -->
-    <link rel="stylesheet" href="style.css?v=20260824-b2d709ae00" />
+    <link rel="stylesheet" href="style.css?v=20260824-fbc4c82fb0" />
     <!-- Include a simple Google font for nicer typography -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
 </head>
@@ -13,7 +13,7 @@
     <header>
         <!-- Updated site title and description to reflect current branding. -->
         <h1>Variant Search (Beta)</h1>
-        <p>Enter a variant in HGVS genomic (g.), coding (c.) or protein (p.) notation, or paste a coordinate row from a VCF, MAF or spreadsheet. Coordinates are interpreted as GRCh37/hg19.</p>
+        <p>Enter a variant in HGVS genomic (g.), coding (c.) or protein (p.) notation, or paste a coordinate row from a VCF, MAF or spreadsheet. Coordinates are interpreted as GRCh37/hg19 by default — tick the GRCh38 box if yours are hg38.</p>
     </header>
     <main>
         <form id="variantForm">
@@ -23,6 +23,16 @@
             <div class="tumor-type-row">
                 <label for="tumorTypeInput">Tumor type <span class="optional-label">(optional)</span></label>
                 <input type="text" id="tumorTypeInput" placeholder="e.g. melanoma, NSCLC, colorectal cancer" autocomplete="off" />
+            </div>
+            <!-- Assembly toggle: unchecked = GRCh37/hg19 (the default this site has always used).
+                 Applies to genomic coordinates only; c./p. notation has no assembly. An NC_
+                 accession declares its own build through its version and overrides the box. -->
+            <div class="assembly-row">
+                <label for="grch38Toggle">
+                    <input type="checkbox" id="grch38Toggle" />
+                    My coordinates are GRCh38/hg38
+                </label>
+                <span class="optional-label">(unchecked: GRCh37/hg19 — genomic input is converted to hg19 before lookup)</span>
             </div>
         </form>
         <div id="status"></div>
@@ -131,6 +141,6 @@
         // window.TURNSTILE_SITE_KEY = "0xAAAAAAAAAAAAAAAAAAAAAA";
     </script>
     <!-- AGENTS: bump the ?v= querystring on script.js and style.css whenever those files change, so browsers and static hosts (Hostinger, etc.) refetch instead of serving a stale cached copy. The value must end with the file's content hash — run `node tests/cache-bust.test.js` (part of npm test) and it prints the exact value to paste when it is out of date. -->
-    <script src="script.js?v=20260824-6b36b89e87"></script>
+    <script src="script.js?v=20260824-49d04aed9b"></script>
 </body>
 </html>

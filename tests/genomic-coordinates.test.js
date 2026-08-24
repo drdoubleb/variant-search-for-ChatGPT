@@ -37,6 +37,48 @@ function assemblyFromNcAccession(value) {
     return null;
 }
 
+function splitGenomicHgvsPositions(gv) {
+    const m = String(gv || '').match(/^(?:chr)?([0-9]{1,2}|[XY]|MT?):g\.(\d+)(?:_(\d+))?(.*)$/i);
+    if (!m) return null;
+    return {
+        chrom: m[1].toUpperCase(),
+        start: parseInt(m[2], 10),
+        end: m[3] ? parseInt(m[3], 10) : null,
+        rest: m[4] || ''
+    };
+}
+
+function ncGenomicToChr(gv) {
+    const m = String(gv || '').match(/^NC_(\d{6})\.\d+:(g\..*)$/i);
+    if (!m) return null;
+    const num = parseInt(m[1], 10);
+    if (!GRCH37_NC_VERSIONS[num]) return null;
+    const chrom = num === 23 ? 'X' : num === 24 ? 'Y' : String(num);
+    return `chr${chrom}:${m[2]}`;
+}
+
+function minimalSpdiForms(s) {
+    const seqId = String(s.seq_id || '');
+    const del0 = String(s.deleted_sequence || '');
+    const ins0 = String(s.inserted_sequence || '');
+    const pos0 = s.position;
+    const forms = [];
+    for (const prefixFirst of [true, false]) {
+        let d = del0;
+        let i = ins0;
+        let p = pos0;
+        const trimPrefix = () => {
+            while (d.length && i.length && d[0] === i[0]) { d = d.slice(1); i = i.slice(1); p += 1; }
+        };
+        const trimSuffix = () => {
+            while (d.length && i.length && d[d.length - 1] === i[i.length - 1]) { d = d.slice(0, -1); i = i.slice(0, -1); }
+        };
+        if (prefixFirst) { trimPrefix(); trimSuffix(); } else { trimSuffix(); trimPrefix(); }
+        if (d || i) forms.push(`${seqId}:${p}:${d}:${i}`);
+    }
+    return Array.from(new Set(forms));
+}
+
 function parseGenomicHgvs(gVariant) {
     if (!gVariant) return null;
     const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.*)$/i);
@@ -385,6 +427,63 @@ check('unknown version yields null', assemblyFromNcAccession('NC_000007.99:g.1A>
 check('mitochondrial accession yields null', assemblyFromNcAccession('NC_012920.1:g.100A>T') === null);
 check('non-NC input yields null', assemblyFromNcAccession('chr7:g.140453136A>T') === null);
 check('empty input yields null', assemblyFromNcAccession('') === null);
+
+// --- splitGenomicHgvsPositions --------------------------------------------
+// The GRCh38 input toggle remaps ONLY the positions of a genomic HGVS string,
+// leaving the event description ("rest") byte-for-byte intact — so it must
+// split every g. form the app accepts, not just substitutions.
+
+check('split: substitution', eq(splitGenomicHgvsPositions('chr7:g.140753336A>T'),
+    { chrom: '7', start: 140753336, end: null, rest: 'A>T' }));
+check('split: chr prefix optional', eq(splitGenomicHgvsPositions('7:g.140753336A>T'),
+    { chrom: '7', start: 140753336, end: null, rest: 'A>T' }));
+check('split: range deletion', eq(splitGenomicHgvsPositions('chr16:g.2110671_2110673del'),
+    { chrom: '16', start: 2110671, end: 2110673, rest: 'del' }));
+check('split: insertion keeps inserted bases in rest', eq(splitGenomicHgvsPositions('chrX:g.20166791_20166792insG'),
+    { chrom: 'X', start: 20166791, end: 20166792, rest: 'insG' }));
+check('split: single-position del', eq(splitGenomicHgvsPositions('chr17:g.7674220del'),
+    { chrom: '17', start: 7674220, end: null, rest: 'del' }));
+check('split: delins', eq(splitGenomicHgvsPositions('chr7:g.140753336_140753337delinsAA'),
+    { chrom: '7', start: 140753336, end: 140753337, rest: 'delinsAA' }));
+check('split: mitochondrial MT accepted', eq(splitGenomicHgvsPositions('chrMT:g.8993T>G'),
+    { chrom: 'MT', start: 8993, end: null, rest: 'T>G' }));
+check('split: NC_ form rejected (convert first)', splitGenomicHgvsPositions('NC_000007.14:g.140753336A>T') === null);
+check('split: non-genomic rejected', splitGenomicHgvsPositions('BRAF:p.Val600Glu') === null);
+check('split: empty rejected', splitGenomicHgvsPositions('') === null);
+
+// --- ncGenomicToChr --------------------------------------------------------
+
+check('NC_ GRCh38 chr7 converts to chr form', ncGenomicToChr('NC_000007.14:g.140753336A>T') === 'chr7:g.140753336A>T');
+check('NC_ GRCh37 chr7 converts to chr form', ncGenomicToChr('NC_000007.13:g.140453136A>T') === 'chr7:g.140453136A>T');
+check('NC_ chrX converts', ncGenomicToChr('NC_000023.10:g.20148674T>G') === 'chrX:g.20148674T>G');
+check('NC_ chrY converts', ncGenomicToChr('NC_000024.9:g.100A>T') === 'chrY:g.100A>T');
+check('mitochondrial NC_ left for the recoder', ncGenomicToChr('NC_012920.1:g.100A>T') === null);
+check('non-genomic NC_ (SPDI) rejected', ncGenomicToChr('NC_000016.9:2122947:AAT:') === null);
+check('chr-form input passes through as null', ncGenomicToChr('chr7:g.140453136A>T') === null);
+
+// --- minimalSpdiForms -------------------------------------------------------
+// NCBI Variation Services contextual SPDIs are VCF-anchored; these are real
+// responses fetched live. MyVariant indexes only the minimal event, and in
+// repeat regions the trim order decides which flank survives — so both minimal
+// forms are offered as candidates.
+
+check('SPDI: clean substitution passes through as one form',
+    eq(minimalSpdiForms({ seq_id: 'NC_000007.13', position: 140453135, deleted_sequence: 'A', inserted_sequence: 'T' }),
+        ['NC_000007.13:140453135:A:T']));
+check('SPDI: anchored deletion TAAT→T yields both trim orders',
+    eq(minimalSpdiForms({ seq_id: 'NC_000016.9', position: 2122946, deleted_sequence: 'TAAT', inserted_sequence: 'T' }),
+        ['NC_000016.9:2122947:AAT:', 'NC_000016.9:2122946:TAA:']));
+check('SPDI: anchored duplication G→GG yields both insertion placements',
+    eq(minimalSpdiForms({ seq_id: 'NC_000023.10', position: 20148674, deleted_sequence: 'G', inserted_sequence: 'GG' }),
+        ['NC_000023.10:20148675::G', 'NC_000023.10:20148674::G']));
+check('SPDI: anchored insertion T→TTT',
+    eq(minimalSpdiForms({ seq_id: 'NC_000004.11', position: 55593602, deleted_sequence: 'T', inserted_sequence: 'TTT' }),
+        ['NC_000004.11:55593603::TT', 'NC_000004.11:55593602::TT']));
+check('SPDI: identical sequences describe no variant',
+    eq(minimalSpdiForms({ seq_id: 'NC_000007.13', position: 1, deleted_sequence: 'A', inserted_sequence: 'A' }), []));
+check('SPDI: MNV with shared flanks trims to the core',
+    eq(minimalSpdiForms({ seq_id: 'NC_000007.13', position: 140453134, deleted_sequence: 'CAG', inserted_sequence: 'CTG' }),
+        ['NC_000007.13:140453135:A:T']));
 
 // --- buildVariantCoordinateTuple ------------------------------------------
 

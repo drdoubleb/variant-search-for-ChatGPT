@@ -2,9 +2,11 @@
 
 ## Accepted input formats
 
-Coordinates are interpreted as **GRCh37/hg19** — that is the assembly every
-resolution endpoint in this app targets (`grch37.rest.ensembl.org`), so an hg38
-position will either miss or silently resolve to the wrong locus.
+Coordinates are interpreted as **GRCh37/hg19 by default** — that is the assembly
+every resolution endpoint in this app targets (`grch37.rest.ensembl.org`), so an
+hg38 position passed through unconverted would either miss or silently resolve
+to the wrong locus. GRCh38 input is supported through an explicit toggle — see
+[GRCh38 input toggle](#grch38-input-toggle).
 
 HGVS is accepted in genomic, coding and protein form:
 
@@ -42,6 +44,42 @@ resolves to `chrX:g.20148675dup` / `NM_001412.4:c.388dup`.
 
 See `tests/coordinate-row.test.js`.
 
+## GRCh38 input toggle
+
+A checkbox under the search box — **"My coordinates are GRCh38/hg38"** — lets
+genomic-coordinate input (chr:g. HGVS, pasted VCF/MAF rows) be entered in
+GRCh38. Unchecked is the long-standing GRCh37/hg19 default. The choice is kept
+in the shareable URL as `?assembly=grch38` (also accepted: `hg38`, `38`).
+
+How it works:
+
+- When checked, the normalised genomic query is mapped **once, up front**
+  through Ensembl's `/map/human/GRCh38/…/GRCh37` endpoint (with the GRCh37
+  mirror as a failover host), and the entire pipeline then runs on the GRCh37
+  coordinate exactly as if it had been typed. The mapping appears as its own
+  step in the lookup progress panel.
+- The mapping is **strict**: it refuses coordinates that land on a different
+  chromosome (patch/scaffold), change span length, flip strand, or split into
+  multiple segments — and a refused or failed mapping is a hard error, not a
+  silent fall-through. An hg38 position labelled hg19 would confidently
+  annotate the wrong locus, which is worse than no answer.
+- An `NC_` accession declares its own assembly through its version
+  (`NC_000007.13` = GRCh37, `.14` = GRCh38) and **overrides the checkbox in
+  both directions** — the accession is unambiguous, the checkbox can be stale.
+  `NC_` genomic HGVS of either build is converted to the chr form and, when
+  GRCh38, lifted the same way.
+- Transcript- and protein-level input (`NM_…:c.…`, `GENE:p.…`, gene-only) has
+  no assembly and is untouched by the checkbox.
+- Because the lifted input pins down both builds' positions, the GRCh38 start
+  is handed to the gnomAD v4 proxy as its `pos38` hint, skipping the
+  server-side liftover round-trip for that variant.
+
+Only positions are remapped; the event description (`A>T`, `del`, `insG`, …)
+is carried over byte-for-byte. Helpers: `splitGenomicHgvsPositions`,
+`ncGenomicToChr`, `mapGrch38GenomicToGrch37` in `script.js`; unit tests in
+`tests/genomic-coordinates.test.js`, browser coverage in
+`tests/browser-smoke.js`.
+
 ## Upstream reliability and the lookup progress panel
 
 Every nomenclature lookup depends on `grch37.rest.ensembl.org`. That host
@@ -60,6 +98,20 @@ coordinate from the wrong assembly — it silently returns a position hundreds o
 kb away. A GRCh38 candidate the client-side helper cannot lift (indels; the
 helper handles substitutions only) is dropped rather than carried forward
 mislabelled as hg19.
+
+When **both** Ensembl hosts fail, the recoder falls back to **NCBI Variation
+Services** (`api.ncbi.nlm.nih.gov/variation/v0`, CORS-open, independent
+infrastructure): `/hgvs/{query}/contextuals` places the variant as a SPDI, and
+`/spdi/{spdi}/all_equivalent_contextual` remaps it to the GRCh37 `NC_`
+chromosome placement. The scope is deliberately narrow — accessioned nucleotide
+HGVS only (`NM_/NC_/NG_/NR_` with `c./g./n.`); gene-symbol and protein queries
+still need Ensembl. NCBI's contextual SPDIs are VCF-anchored ("TAAT→T" for a
+deletion), so they are trimmed to the minimal event in **both** trim orders
+(`minimalSpdiForms`) — in a repeat region the order decides which flank
+survives, and MyVariant indexes only its normalised form — and fed into the
+existing candidate-conversion path as a recoder-shaped response with no
+transcript nomenclature. The progress panel says "resolved via NCBI Variation
+Services" rather than pretending Ensembl answered.
 
 The app previously made a single attempt behind a 6-7 second deadline, so a
 slow or unwell upstream produced:
@@ -291,8 +343,10 @@ The FDA drugs card gains a fourth tab, **DGIdb**: aggregated drug–gene
 interaction claims (approved *and* investigational compounds) from DGIdb's
 CORS-open GraphQL API, sorted by interaction score with approval status,
 interaction type, and source counts. Clearly labelled as interaction claims —
-not efficacy or approval evidence. Included in the AI payload as
-`supplemental_card_data.dgidb`.
+not efficacy or approval evidence. Deliberately **excluded from the AI-review
+payload**: DGIdb's aggregated investigational/preclinical claims would dilute
+the clinical sources the review is meant to weigh — the tab is for human
+browsing.
 
 ## Proxy origin allowlist
 
