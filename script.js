@@ -245,37 +245,43 @@ function isRetryableFetchError(err) {
  * shows what it is waiting on instead of sitting on a frozen status line.
  * The final failure is re-thrown with `.retryable` set, which lets the caller
  * tell "the service is down" apart from "this variant does not exist".
+ *
+ * Built through a factory so the retry loop can be exercised with an injected
+ * fetch — no network, no AbortController — by tests/fetch-retry.test.js.
  */
-async function fetchWithRetry(url, options = {}, timeoutMs = 6000, retryOpts = {}) {
-    const attempts = Math.max(1, retryOpts.attempts ?? 3);
-    const baseDelayMs = retryOpts.baseDelayMs ?? 400;
-    const onAttempt = typeof retryOpts.onAttempt === 'function' ? retryOpts.onAttempt : null;
-    let lastErr = null;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-        if (onAttempt) onAttempt({ attempt, attempts });
-        try {
-            const res = await fetchWithTimeout(url, options, timeoutMs);
-            if (RETRYABLE_HTTP_STATUS.has(res.status) && attempt < attempts) {
-                lastErr = new Error(`Upstream returned ${res.status}`);
+function makeFetchWithRetry(fetchImpl) {
+    return async function fetchWithRetry(url, options = {}, timeoutMs = 6000, retryOpts = {}) {
+        const attempts = Math.max(1, retryOpts.attempts ?? 3);
+        const baseDelayMs = retryOpts.baseDelayMs ?? 400;
+        const onAttempt = typeof retryOpts.onAttempt === 'function' ? retryOpts.onAttempt : null;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            if (onAttempt) onAttempt({ attempt, attempts });
+            try {
+                const res = await fetchImpl(url, options, timeoutMs);
+                if (RETRYABLE_HTTP_STATUS.has(res.status) && attempt < attempts) {
+                    lastErr = new Error(`Upstream returned ${res.status}`);
+                    lastErr.retryable = true;
+                    lastErr.status = res.status;
+                } else {
+                    return res;
+                }
+            } catch (err) {
+                if (!isRetryableFetchError(err) || attempt === attempts) {
+                    if (isRetryableFetchError(err)) err.retryable = true;
+                    throw err;
+                }
+                lastErr = err;
                 lastErr.retryable = true;
-                lastErr.status = res.status;
-            } else {
-                return res;
             }
-        } catch (err) {
-            if (!isRetryableFetchError(err) || attempt === attempts) {
-                if (isRetryableFetchError(err)) err.retryable = true;
-                throw err;
-            }
-            lastErr = err;
-            lastErr.retryable = true;
+            // Exponential backoff with jitter so simultaneous cards do not retry in lockstep.
+            const delay = baseDelayMs * Math.pow(2, attempt - 1) * (0.7 + Math.random() * 0.6);
+            await new Promise((resolve) => setTimeout(resolve, delay));
         }
-        // Exponential backoff with jitter so simultaneous cards do not retry in lockstep.
-        const delay = baseDelayMs * Math.pow(2, attempt - 1) * (0.7 + Math.random() * 0.6);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-    throw lastErr || new Error('Request failed');
+        throw lastErr || new Error('Request failed');
+    };
 }
+const fetchWithRetry = makeFetchWithRetry(fetchWithTimeout);
 
 /*
  * ── Lookup progress panel ───────────────────────────────────────────────────
@@ -2680,8 +2686,7 @@ async function fetchFdaCompanionDiagnostics(gene) {
 // so a trigger word in one sentence can't accidentally negate a positive
 // mention several sentences later.
 //
-// KEEP IN SYNC with tests/openfda-filter.test.js — no module system in the
-// browser, so the test file re-declares the same regexes.
+// Exercised directly by tests/openfda-filter.test.js via the Node test exports.
 const OPENFDA_GENE_TOKEN = String.raw`[A-Z][A-Z0-9]{1,7}(?:[-/][A-Z0-9]{1,7})?`;
 const OPENFDA_NOUN = String.raw`(?:[Aa]berration|[Aa]lteration|[Mm]utation|[Rr]earrangement|[Ff]usion|[Dd]river|[Aa]mplification)s?\b`;
 const OPENFDA_NEGATION_LIST_RE = new RegExp(
@@ -2761,7 +2766,6 @@ function openFdaGeneOnlyInNegativeContext(text, gene) {
 // occurrence of the gene is flanked by non-letters. Punctuation/space
 // boundaries such as "(MET)", "MET exon 14" and "MET-amplified" still qualify,
 // so true targeted-therapy labels (capmatinib, amivantamab, …) are retained.
-// KEEP IN SYNC with tests/openfda-filter.test.js.
 function openFdaEscapeRegExp(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -2792,7 +2796,6 @@ function openFdaGeneAppearsAsWord(text, gene) {
 // prep, not the KIT receptor). A record is dropped when every gene/synonym hit
 // falls inside one of these phrases.
 //
-// KEEP IN SYNC with tests/openfda-filter.test.js.
 const OPENFDA_GENE_SYNONYMS = {
     KIT: ['c-Kit', 'CD117'],
 };
@@ -2838,7 +2841,7 @@ function openFdaFalsePositiveSpans(text, phrases) {
 // larger word), 'falsePositive' (present only inside a known false-positive
 // phrase), or 'negation' (every symbol occurrence sits in a negation span).
 // For genes with no synonyms and no false-positive phrases this reduces exactly
-// to the original three-step filter. KEEP IN SYNC with tests/openfda-filter.test.js.
+// to the original three-step filter.
 function openFdaRecordExclusionReason(ind, gene) {
     if (!ind || !gene) return 'case';
     const synonyms = openFdaSynonymsFor(gene);
@@ -5485,7 +5488,9 @@ function buildDetailsData(annotation, rawInput, gVariant) {
     return details;
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+// Named (rather than registered inline) so the registration below can be
+// skipped in Node, where the test suite imports this file for its helpers.
+const initVariantSearchUi = () => {
     // Holds a triple‑coded protein change parsed from the user's query (e.g. VAL600GLU).
     // This will be used to help select the canonical variant and to build search queries.
     let targetProtGlobal = null;
@@ -10258,4 +10263,45 @@ document.addEventListener('DOMContentLoaded', () => {
             form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
         }
     }
-});
+};
+if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', initVariantSearchUi);
+}
+
+// ── Node test exports ───────────────────────────────────────────────────────
+// script.js stays a single classic <script> for the browser — no build step,
+// one file to copy to Hostinger, and `export` statements would be a
+// SyntaxError in a classic script — but Node parses it fine as a module, so
+// the pure helpers are stashed on globalThis for the test suite to pick up
+// after `await import('../script.js')`. Guarded on the Node runtime itself —
+// not on `window`, which several tests stub before importing — so the block is
+// inert in the browser and the tests exercise the REAL implementations
+// instead of copied-verbatim snapshots that drift.
+if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+    globalThis.__variantSearchHelpers = {
+        // fetch plumbing
+        RETRYABLE_HTTP_STATUS, isRetryableFetchError, describeUpstreamFailure, makeFetchWithRetry,
+        // backend base-URL resolution
+        DEFAULT_BACKEND_API_BASE_URL, PRODUCTION_VERCEL_HOST, trimTrailingSlash,
+        isVercelPreviewHost, getBackendApiBaseUrl, getConfiguredApiEndpoint,
+        // genomic coordinates, assemblies, SPDI
+        GRCH37_NC_VERSIONS, assemblyFromNcAccession, splitGenomicHgvsPositions, ncGenomicToChr,
+        minimalSpdiForms, parseGenomicHgvs, buildVariantCoordinateTuple, buildGenomicHgvsFromVep,
+        reverseComplementSeq, vcfAllelesFromGenomicHgvs, leftNormalizeVcfAlleles,
+        // coordinate-row parsing
+        isDnaAllele, isChromToken, splitCoordinateRow, looksLikeCoordinateRow,
+        parseCoordinateRow, coordinateRowToGenomicHgvs,
+        // protein notation
+        tripleToSingle, aaThreeToSingle, aaSingleToThree, convertProteinBodyToSingle,
+        formatProteinDisplayWithSingleLetter, parseProteinResidueRange,
+        // ClinVar matching + display
+        complementBase, normalizeCdnaForMatch, findExactClinvarRegionMatch,
+        parseProteinChange, sameProteinChange, clinvarReviewStars,
+        // HTML/URL escaping
+        escapeHtml, safeUrl,
+        // openFDA label filtering
+        findOpenFdaNegationSpans, openFdaGeneOnlyInNegativeContext,
+        openFdaSynonymsFor, openFdaWordSpans, openFdaGeneAppearsAsWord,
+        openFdaRecordExclusionReason
+    };
+}

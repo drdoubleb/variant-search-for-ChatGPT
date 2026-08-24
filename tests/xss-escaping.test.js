@@ -1,7 +1,7 @@
 /*
  * Tests for the HTML/URL escaping helpers used to neutralise untrusted third-party
  * text (ClinVar / CIViC / COSMIC / model output) before it is written via innerHTML.
- * Helpers copied verbatim from script.js — KEEP IN SYNC.
+ * Helpers imported from script.js.
  *
  * Run with: node tests/xss-escaping.test.js
  */
@@ -9,24 +9,10 @@
 // safeUrl resolves relative URLs against window.location.href — provide a stub.
 globalThis.window = { location: { href: 'https://drdoubleb.com/variant/' } };
 
-// --- helpers copied verbatim from script.js -------------------------------
+// --- real helpers imported from script.js ---------------------------------
 
-function escapeHtml(text) {
-    return String(text ?? '').replace(/[&<>"']/g, (ch) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
-    ));
-}
-
-function safeUrl(url) {
-    const raw = String(url ?? '').trim();
-    if (!raw) return '';
-    try {
-        const parsed = new URL(raw, window.location.href);
-        return /^(https?:|mailto:)$/i.test(parsed.protocol) ? raw : '';
-    } catch {
-        return '';
-    }
-}
+await import('../script.js');
+const { escapeHtml, safeUrl } = globalThis.__variantSearchHelpers;
 
 // --- assertions -----------------------------------------------------------
 

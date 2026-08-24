@@ -13,112 +13,16 @@
  * parsed, but the same variant in MAF column order, as CSV, or with a trailing
  * build column did not.
  *
- * Helpers are copied verbatim from script.js (the project has no module system)
- * — KEEP IN SYNC when either side changes.
+ * Exercises the REAL implementations, imported from script.js via its Node
+ * test-export block.
  *
  * Run with: node tests/coordinate-row.test.js
  */
 
-// --- helpers copied verbatim from script.js -------------------------------
+// --- real helpers imported from script.js ---------------------------------
 
-const COORDINATE_ROW_NOISE = /^(hg18|hg19|hg38|grch3[678]|b3[678]|chr|snp|snv|ins|del|indel|mnp|somatic|germline|het|hom|\+|\.)$/i;
-
-const isDnaAllele = (t) => /^(?:[ACGTN]+|-)$/i.test(String(t));
-const isChromToken = (t) => /^(?:chr)?(?:[0-9]{1,2}|X|Y|M|MT)$/i.test(String(t));
-
-function splitCoordinateRow(raw) {
-    return String(raw || '')
-        .trim()
-        // Strip thousands separators inside a coordinate ("20,148,674") before
-        // commas are treated as column separators. The grouping pattern is
-        // required so a genuine CSV row ("1,12345,A,T") is not welded together.
-        .replace(/\b\d{1,3}(?:,\d{3})+(?!\d)/g, (m) => m.replace(/,/g, ''))
-        .split(/[\s,;|]+/)
-        .map((t) => t.replace(/^["']+|["']+$/g, ''))
-        .filter(Boolean);
-}
-
-function looksLikeCoordinateRow(raw) {
-    const toks = splitCoordinateRow(raw).filter((t) => !COORDINATE_ROW_NOISE.test(t));
-    if (toks.length < 4) return false;
-    if (/:[gcp]\./i.test(String(raw))) return false;
-    for (let i = 0; i < toks.length - 1; i++) {
-        if (isChromToken(toks[i]) && /^\d[\d,]*$/.test(toks[i + 1])) return true;
-    }
-    return false;
-}
-
-function parseCoordinateRow(raw) {
-    const all = splitCoordinateRow(raw);
-    if (all.length < 4) return null;
-    const toks = all.filter((t) => !COORDINATE_ROW_NOISE.test(t));
-    if (toks.length < 4) return null;
-
-    let chromIdx = -1;
-    for (let i = 0; i < toks.length - 1; i++) {
-        if (isChromToken(toks[i]) && /^\d[\d,]*$/.test(toks[i + 1])) { chromIdx = i; break; }
-    }
-    if (chromIdx === -1) return null;
-
-    const chrom = toks[chromIdx].replace(/^chr/i, '').toUpperCase();
-    const pos = toks[chromIdx + 1].replace(/,/g, '');
-    if (!/^\d+$/.test(pos)) return null;
-
-    const after = toks.slice(chromIdx + 2);
-    const dnaIdx = [];
-    after.forEach((t, i) => { if (isDnaAllele(t)) dnaIdx.push(i); });
-    if (dnaIdx.length < 2) return null;
-    const refIdx = dnaIdx[dnaIdx.length - 2];
-    const altIdx = dnaIdx[dnaIdx.length - 1];
-    if (altIdx !== refIdx + 1) return null;
-
-    const clean = (t) => (t === '-' || t === '.' ? '' : t.toUpperCase());
-    const ref = clean(after[refIdx]);
-    const alt = clean(after[altIdx]);
-    if (!ref && !alt) return null;
-
-    const geneCandidates = toks
-        .filter((t, i) => i !== chromIdx && i !== chromIdx + 1)
-        .filter((t) => /^[A-Za-z][A-Za-z0-9-]*$/.test(t) && !isChromToken(t));
-    const consumed = new Set([after[refIdx], after[altIdx]]);
-    const gene = geneCandidates.find((t) => !consumed.has(t) || !isDnaAllele(t)) || null;
-
-    return { chrom, pos, ref, alt, gene: gene ? gene.toUpperCase() : null };
-}
-
-function coordinateRowToGenomicHgvs(row) {
-    if (!row) return null;
-    const { chrom, ref, alt } = row;
-    const pos = parseInt(row.pos, 10);
-    if (!Number.isFinite(pos)) return null;
-
-    if (ref.length === 1 && alt.length === 1) return `chr${chrom}:g.${pos}${ref}>${alt}`;
-    if (!ref) return `chr${chrom}:g.${pos}_${pos + 1}ins${alt}`;
-    if (!alt) {
-        return ref.length === 1
-            ? `chr${chrom}:g.${pos}del`
-            : `chr${chrom}:g.${pos}_${pos + ref.length - 1}del`;
-    }
-    let r = ref;
-    let a = alt;
-    let start = pos;
-    let end = pos + ref.length - 1;
-    while (r.length && a.length && r[0] === a[0]) { r = r.slice(1); a = a.slice(1); start += 1; }
-    while (r.length && a.length && r[r.length - 1] === a[a.length - 1]) {
-        r = r.slice(0, -1); a = a.slice(0, -1); end -= 1;
-    }
-    if (!r && !a) return null;
-    if (!a) {
-        return start === end ? `chr${chrom}:g.${start}del` : `chr${chrom}:g.${start}_${end}del`;
-    }
-    if (!r) {
-        return `chr${chrom}:g.${end}_${end + 1}ins${a}`;
-    }
-    if (r.length === 1 && a.length === 1) return `chr${chrom}:g.${start}${r}>${a}`;
-    return start === end
-        ? `chr${chrom}:g.${start}delins${a}`
-        : `chr${chrom}:g.${start}_${end}delins${a}`;
-}
+await import('../script.js');
+const { looksLikeCoordinateRow, parseCoordinateRow, coordinateRowToGenomicHgvs } = globalThis.__variantSearchHelpers;
 
 // --- test harness ---------------------------------------------------------
 

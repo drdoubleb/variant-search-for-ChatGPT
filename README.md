@@ -494,3 +494,28 @@ protein is rejected rather than silently mapped to the wrong locus.
 Queries that cannot even be resolved to a codon fail with a message naming the
 reason and pointing at c./g. notation, instead of the previous bare
 "Variant not found via Ensembl Variant Recoder".
+
+## Test suite imports the real code
+
+`npm test` runs every `tests/*.test.js` with plain Node — no framework. The
+tests used to re-declare the helpers they exercised ("copied verbatim — KEEP
+IN SYNC" blocks), which drifted from production by design pressure alone.
+They now import the real implementations:
+
+- **`script.js`** stays a single classic `<script>` for the browser (no build
+  step, one file to copy to Hostinger — `export` statements would be a
+  SyntaxError there), but Node imports it fine as a module. A guarded block at
+  the bottom stashes the pure helpers on `globalThis.__variantSearchHelpers`
+  when running under Node; tests `await import('../script.js')` and destructure
+  from there. The `DOMContentLoaded` registration is skipped when `document`
+  does not exist, and `fetchWithRetry` is built through a `makeFetchWithRetry`
+  factory so the retry loop can be driven with an injected fetch.
+- **`api/*.js`** are ES modules already; the handlers now also carry named
+  exports for their pure helpers (`export { buildAssertions, … }`), which the
+  Vercel runtime ignores. `api/tp53.js` gained `extractDatasetUrls` — the pure
+  parsing core of `discoverDatasetUrls` — as a real seam instead of a test-only
+  re-implementation.
+
+The one remaining intentional re-composition is `buildChangeForms` in
+`tests/clinvar-match.test.js`, which mirrors logic composed inline in the
+ClinVar card rather than a named production function.

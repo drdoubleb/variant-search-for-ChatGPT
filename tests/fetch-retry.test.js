@@ -14,65 +14,16 @@
  *   - the failure that escapes is tagged `retryable` so the caller can tell an
  *     outage apart from a variant that genuinely does not exist
  *
- * Helpers are copied verbatim from script.js (the project has no module system)
- * — KEEP IN SYNC when either side changes.
+ * Exercises the REAL implementations, imported from script.js via its Node
+ * test-export block.
  *
  * Run with: node tests/fetch-retry.test.js
  */
 
-// --- helpers copied verbatim from script.js -------------------------------
+// --- real helpers imported from script.js ---------------------------------
 
-const RETRYABLE_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
-
-function isRetryableFetchError(err) {
-    const msg = String((err && err.message) || err || '');
-    return /timed out after|Failed to fetch|NetworkError|network error|load failed|ECONNRESET|terminated/i.test(msg);
-}
-
-function describeUpstreamFailure(err) {
-    if (!err) return 'failed';
-    if (err.status) return `HTTP ${err.status}`;
-    const msg = String(err.message || err);
-    if (/timed out after/i.test(msg)) return 'timed out';
-    if (/Failed to fetch|NetworkError|network error|load failed/i.test(msg)) return 'network error';
-    const m = msg.match(/\((\d{3})\)/);
-    if (m) return `HTTP ${m[1]}`;
-    return msg.length > 60 ? `${msg.slice(0, 57)}…` : msg;
-}
-
-// fetchWithRetry, copied verbatim except that fetchWithTimeout is injected so
-// the test can drive it without a network or a real AbortController.
-function makeFetchWithRetry(fetchWithTimeout) {
-    return async function fetchWithRetry(url, options = {}, timeoutMs = 6000, retryOpts = {}) {
-        const attempts = Math.max(1, retryOpts.attempts ?? 3);
-        const baseDelayMs = retryOpts.baseDelayMs ?? 400;
-        const onAttempt = typeof retryOpts.onAttempt === 'function' ? retryOpts.onAttempt : null;
-        let lastErr = null;
-        for (let attempt = 1; attempt <= attempts; attempt++) {
-            if (onAttempt) onAttempt({ attempt, attempts });
-            try {
-                const res = await fetchWithTimeout(url, options, timeoutMs);
-                if (RETRYABLE_HTTP_STATUS.has(res.status) && attempt < attempts) {
-                    lastErr = new Error(`Upstream returned ${res.status}`);
-                    lastErr.retryable = true;
-                    lastErr.status = res.status;
-                } else {
-                    return res;
-                }
-            } catch (err) {
-                if (!isRetryableFetchError(err) || attempt === attempts) {
-                    if (isRetryableFetchError(err)) err.retryable = true;
-                    throw err;
-                }
-                lastErr = err;
-                lastErr.retryable = true;
-            }
-            const delay = baseDelayMs * Math.pow(2, attempt - 1) * (0.7 + Math.random() * 0.6);
-            await new Promise((resolve) => setTimeout(resolve, delay));
-        }
-        throw lastErr || new Error('Request failed');
-    };
-}
+await import('../script.js');
+const { describeUpstreamFailure, makeFetchWithRetry } = globalThis.__variantSearchHelpers;
 
 // --- test harness ---------------------------------------------------------
 

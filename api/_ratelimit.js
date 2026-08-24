@@ -28,7 +28,7 @@ function retryAfterSeconds(result) {
 // Resolve the Upstash Redis REST URL + token from the environment, accepting both the
 // canonical UPSTASH_REDIS_REST_* names and the prefixed names the Vercel Marketplace
 // integration injects (<PREFIX>_REST_API_URL / <PREFIX>_REST_API_TOKEN, any prefix).
-function resolveRedisRestEnv() {
+export function resolveRedisRestEnv() {
     const env = process.env;
     if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
         return { url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN };

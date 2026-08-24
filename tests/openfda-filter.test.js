@@ -2,146 +2,19 @@
  * Tests for the openFDA gene-negation filter.
  *
  * The browser-side helpers live in script.js (see "openFDA gene-negation
- * filter" section). Because the project has no module system, the regexes
- * are re-declared here verbatim — KEEP IN SYNC with script.js when either
- * side changes.
+ * filter" section) and are imported directly — the tests exercise the real
+ * regexes and tables.
  *
  * Run with: node tests/openfda-filter.test.js
  */
 
-const OPENFDA_GENE_TOKEN = String.raw`[A-Z][A-Z0-9]{1,7}(?:[-/][A-Z0-9]{1,7})?`;
-const OPENFDA_NOUN = String.raw`(?:[Aa]berration|[Aa]lteration|[Mm]utation|[Rr]earrangement|[Ff]usion|[Dd]river|[Aa]mplification)s?\b`;
-const OPENFDA_NEGATION_LIST_RE = new RegExp(
-    String.raw`\b(?:[Nn]o|[Ww]ithout|[Ww]hose\s+tumors?\s+(?:have\s+no|do\s+not\s+have|lack)|[Ll]acking|[Aa]bsence\s+of|[Nn]egative\s+for)\s+` +
-    String.raw`[^.;:]{0,80}?\b${OPENFDA_GENE_TOKEN}\b` +
-    String.raw`[^.;:]{0,80}?${OPENFDA_NOUN}` +
-    String.raw`(?:\s+(?:or|and)\s+[^.;:]{0,80}?\b${OPENFDA_GENE_TOKEN}\b[^.;:]{0,80}?${OPENFDA_NOUN})*`,
-    'g'
-);
-const OPENFDA_WILDTYPE_TRAIL_RE = new RegExp(
-    String.raw`\b${OPENFDA_GENE_TOKEN}[- ]wild[- ]?type\b`,
-    'g'
-);
-const OPENFDA_WILDTYPE_LEAD_RE = new RegExp(
-    String.raw`\bwild[- ]?type\s+${OPENFDA_GENE_TOKEN}\b`,
-    'g'
-);
-const OPENFDA_PRIOR_THERAPY_RE = new RegExp(
-    String.raw`\b[Pp]atients\s+with\s+[^.;:]{0,150}?\b${OPENFDA_GENE_TOKEN}\b` +
-    String.raw`[^.;:]{0,200}?${OPENFDA_NOUN}` +
-    String.raw`[^.;:]{0,150}?should\s+have\s+(?:disease\s+)?progression\s+on\s+FDA[- ]approved\s+therapy`,
-    'g'
-);
-// "anti-<GENE>" / "anti‑<GENE>" / "anti <GENE>" — almost always refers to a
-// prior therapy class (e.g. "previously treated with ... an anti-EGFR
-// therapy" in Fruzaqla, Stivarga, Lonsurf for chemo-refractory mCRC).
-// EGFR/HER2/VEGF-targeted labels themselves describe their drug as an
-// "EGFR antagonist" / "HER2-directed antibody" / etc., not "anti-X", so
-// this pattern doesn't suppress true positives. Includes regular hyphen
-// (U+002D) and non-breaking hyphen (U+2011) seen in FDA label text.
-const OPENFDA_ANTI_GENE_RE = new RegExp(
-    String.raw`\banti[\-‑ ]${OPENFDA_GENE_TOKEN}\b`,
-    'g'
-);
+// --- real helpers imported from script.js ---------------------------------
 
-function findOpenFdaNegationSpans(text) {
-    if (!text) return [];
-    const spans = [];
-    const regexes = [
-        OPENFDA_NEGATION_LIST_RE,
-        OPENFDA_WILDTYPE_TRAIL_RE,
-        OPENFDA_WILDTYPE_LEAD_RE,
-        OPENFDA_PRIOR_THERAPY_RE,
-        OPENFDA_ANTI_GENE_RE,
-    ];
-    for (const re of regexes) {
-        re.lastIndex = 0;
-        let m;
-        while ((m = re.exec(text)) !== null) {
-            spans.push({ start: m.index, end: m.index + m[0].length });
-        }
-    }
-    return spans;
-}
-
-function openFdaGeneOnlyInNegativeContext(text, gene) {
-    if (!text || !gene) return false;
-    const positions = [];
-    let i = 0;
-    while ((i = text.indexOf(gene, i)) !== -1) {
-        positions.push(i);
-        i += gene.length;
-    }
-    if (positions.length === 0) return false;
-    const spans = findOpenFdaNegationSpans(text);
-    if (spans.length === 0) return false;
-    return positions.every(pos => spans.some(s => pos >= s.start && pos < s.end));
-}
-
-// Word-boundary filter — see script.js "openFDA word-boundary filter".
-function openFdaEscapeRegExp(s) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-function openFdaGeneAppearsAsWord(text, gene) {
-    if (!text || !gene) return false;
-    return new RegExp(String.raw`(?<![A-Za-z])${openFdaEscapeRegExp(gene)}(?![A-Za-z])`).test(text);
-}
-
-// Gene synonyms & false-positive exceptions — see script.js
-// "openFDA gene synonyms & false-positive exceptions". KEEP IN SYNC.
-const OPENFDA_GENE_SYNONYMS = {
-    KIT: ['c-Kit', 'CD117'],
-};
-const OPENFDA_FALSE_POSITIVE_PHRASES = {
-    KIT: ['bowel prep kit'],
-};
-function openFdaSynonymsFor(gene) {
-    return OPENFDA_GENE_SYNONYMS[gene] || [];
-}
-function openFdaWordSpans(text, term) {
-    if (!text || !term) return [];
-    const re = new RegExp(String.raw`(?<![A-Za-z])${openFdaEscapeRegExp(term)}(?![A-Za-z])`, 'g');
-    const spans = [];
-    let m;
-    while ((m = re.exec(text)) !== null) {
-        spans.push({ start: m.index, end: m.index + m[0].length });
-        if (re.lastIndex === m.index) re.lastIndex++;
-    }
-    return spans;
-}
-function openFdaFalsePositiveSpans(text, phrases) {
-    if (!text || !phrases || !phrases.length) return [];
-    const spans = [];
-    for (const p of phrases) {
-        const re = new RegExp(openFdaEscapeRegExp(p), 'gi');
-        let m;
-        while ((m = re.exec(text)) !== null) {
-            spans.push({ start: m.index, end: m.index + m[0].length });
-            if (re.lastIndex === m.index) re.lastIndex++;
-        }
-    }
-    return spans;
-}
-function openFdaRecordExclusionReason(ind, gene) {
-    if (!ind || !gene) return 'case';
-    const synonyms = openFdaSynonymsFor(gene);
-    const fpSpans = openFdaFalsePositiveSpans(ind, OPENFDA_FALSE_POSITIVE_PHRASES[gene] || []);
-    const outsideFp = (s) => !fpSpans.some(f => s.start >= f.start && s.end <= f.end);
-
-    if (!ind.includes(gene) && !synonyms.some(t => ind.includes(t))) return 'case';
-
-    const geneSpans = openFdaWordSpans(ind, gene).filter(outsideFp);
-    const synSpans = synonyms.flatMap(t => openFdaWordSpans(ind, t)).filter(outsideFp);
-
-    if (geneSpans.length === 0 && synSpans.length === 0) {
-        const hadRawWord = openFdaGeneAppearsAsWord(ind, gene)
-            || synonyms.some(t => openFdaGeneAppearsAsWord(ind, t));
-        return (hadRawWord && fpSpans.length) ? 'falsePositive' : 'boundary';
-    }
-
-    if (synSpans.length === 0 && openFdaGeneOnlyInNegativeContext(ind, gene)) return 'negation';
-    return '';
-}
+await import('../script.js');
+const {
+    findOpenFdaNegationSpans, openFdaGeneOnlyInNegativeContext,
+    openFdaGeneAppearsAsWord, openFdaRecordExclusionReason
+} = globalThis.__variantSearchHelpers;
 
 // ── Test cases ────────────────────────────────────────────────────────────
 // Each case lists the queried gene, an excerpt that mimics real FDA

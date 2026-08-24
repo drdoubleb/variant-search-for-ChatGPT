@@ -1,6 +1,5 @@
 /*
- * Tests for CIViC assertion assembly (helpers copied verbatim from api/civic.js —
- * KEEP IN SYNC). buildAssertions merges the matched variant's assertions (scope
+ * Tests for CIViC assertion assembly (imported from api/civic.js). buildAssertions merges the matched variant's assertions (scope
  * 'variant') with gene-wide assertions (scope 'gene'), deduped by id, and drops
  * rejected/submitted assertions. This replaces a dead
  * assertions(molecularProfileName: <geneSymbol>) query.
@@ -8,53 +7,9 @@
  * Run with: node tests/civic-assertions.test.js
  */
 
-// --- helpers copied verbatim from api/civic.js ----------------------------
+// --- real helpers imported from api/civic.js ------------------------------
 
-function normaliseAssertions(assertions) {
-    const seen = new Set();
-    return assertions
-        .filter((assertion) => {
-            const status = String(assertion?.status || 'accepted').toLowerCase();
-            return status !== 'rejected' && status !== 'submitted';
-        })
-        .filter((assertion) => {
-            const key = assertion?.id || JSON.stringify(assertion);
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-        })
-        .map((assertion) => ({
-            ...assertion,
-            therapies: Array.isArray(assertion.therapies)
-                ? { nodes: assertion.therapies }
-                : assertion.therapies
-        }));
-}
-
-function collectAssertionsFromGene(gene) {
-    const variants = Array.isArray(gene?.variants?.nodes) ? gene.variants.nodes : [];
-    const nested = [];
-    for (const variant of variants) {
-        const nodes = variant?.singleVariantMolecularProfile?.assertions?.nodes;
-        if (Array.isArray(nodes)) nested.push(...nodes);
-    }
-    return normaliseAssertions(nested);
-}
-
-function buildAssertions(matchedVariant, gene) {
-    const variantNodes = matchedVariant?.singleVariantMolecularProfile?.assertions?.nodes || [];
-    const variantAssertions = normaliseAssertions(variantNodes).map(a => ({ ...a, scope: 'variant' }));
-    const geneAssertions = collectAssertionsFromGene(gene).map(a => ({ ...a, scope: 'gene' }));
-
-    const seen = new Set(variantAssertions.map(a => a.id).filter(id => id != null));
-    const merged = [...variantAssertions];
-    for (const a of geneAssertions) {
-        if (a.id != null && seen.has(a.id)) continue;
-        if (a.id != null) seen.add(a.id);
-        merged.push(a);
-    }
-    return merged;
-}
+import { buildAssertions } from '../api/civic.js';
 
 // --- fixtures -------------------------------------------------------------
 
