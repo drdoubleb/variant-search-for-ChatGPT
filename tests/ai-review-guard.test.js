@@ -1,48 +1,16 @@
 /*
- * Tests for the AI-review proxy guards (helpers copied verbatim from
- * api/ai-review.js — KEEP IN SYNC). Covers the Origin allowlist that protects the
- * owner's OpenRouter key and the BYO-key format check.
+ * Tests for the proxy guards: the shared Origin allowlist (api/_origin.js,
+ * imported directly — no copy to drift) that protects the owner's OpenRouter
+ * key and keeps third-party websites from using the data proxies as their
+ * backend, plus the BYO-key format check (copied verbatim from
+ * api/ai-review.js — KEEP IN SYNC).
  *
  * Run with: node tests/ai-review-guard.test.js
  */
 
-// --- helpers copied verbatim from api/ai-review.js ------------------------
+import { isOriginAllowed } from '../api/_origin.js';
 
-const DEFAULT_ALLOWED_ORIGINS = [
-    'https://drdoubleb.com',
-    'https://www.drdoubleb.com',
-    'https://variant-search-for-chat-gpt.vercel.app',
-    'variant-search-for-chat-gpt-*.vercel.app'
-];
-
-function parseAllowedOrigins() {
-    const env = process.env.AI_ALLOWED_ORIGINS;
-    if (env && env.trim()) return env.split(',').map((s) => s.trim()).filter(Boolean);
-    return DEFAULT_ALLOWED_ORIGINS;
-}
-
-function isOriginAllowed(origin) {
-    if (!origin) return true; // no browser Origin → handled by rate-limit/Turnstile
-    const allowed = parseAllowedOrigins();
-    if (allowed.includes('*')) return true;
-    let host;
-    try { host = new URL(origin).host; } catch { return false; }
-    return allowed.some((entry) => {
-        if (entry === origin) return true;
-        if (entry.startsWith('*.')) return host === entry.slice(2) || host.endsWith(entry.slice(1));
-        // Host pattern with an embedded wildcard, e.g.
-        // "variant-search-for-chat-gpt-*.vercel.app". The wildcard matches within
-        // a single DNS label (no dots), so it cannot be stretched across domains.
-        if (entry.includes('*')) {
-            const escaped = entry.split('*')
-                .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-                .join('[a-z0-9-]*');
-            return new RegExp(`^${escaped}$`, 'i').test(host);
-        }
-        if (entry === 'localhost') return host === 'localhost' || host.startsWith('localhost:');
-        try { return new URL(entry).host === host; } catch { return false; }
-    });
-}
+// --- helper copied verbatim from api/ai-review.js -------------------------
 
 function parseUserKey(value) {
     if (value === undefined || value === null || value === '') return '';
@@ -77,13 +45,10 @@ check('project-prefix on another domain blocked', isOriginAllowed('https://varia
 check('wildcard cannot span a dot', isOriginAllowed('https://variant-search-for-chat-gpt-x.y.vercel.app') === false);
 check('malformed origin blocked', isOriginAllowed('not-a-url') === false);
 
-// Origin allowlist — env override
-process.env.AI_ALLOWED_ORIGINS = 'https://example.org';
-check('env override allows configured origin', isOriginAllowed('https://example.org') === true);
-check('env override blocks default origin', isOriginAllowed('https://drdoubleb.com') === false);
-process.env.AI_ALLOWED_ORIGINS = '*';
-check('wildcard * allows any origin', isOriginAllowed('https://anything.example') === true);
-delete process.env.AI_ALLOWED_ORIGINS;
+// Origin allowlist — env override (passed as the second argument)
+check('env override allows configured origin', isOriginAllowed('https://example.org', 'https://example.org') === true);
+check('env override blocks default origin', isOriginAllowed('https://drdoubleb.com', 'https://example.org') === false);
+check('wildcard * allows any origin', isOriginAllowed('https://anything.example', '*') === true);
 
 // BYO-key format
 check('missing key → empty string (use owner key)', parseUserKey(undefined) === '');

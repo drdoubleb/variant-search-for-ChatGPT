@@ -1684,8 +1684,9 @@ function convertSpdiToMyVariant(spdi) {
         const end = start; // end position for insertion is start position
         return `chr${chr}:g.${start}_${start + 1}ins${alt}`;
     }
-    // If both ref and alt are empty (unlikely), fall back to simple representation
-    return `chr${chr}:g.${start}>${alt}`;
+    // Both ref and alt empty describes no change at all — refuse rather than
+    // emit malformed HGVS ("g.123>") that downstream parsers would choke on.
+    throw new Error(`SPDI describes no sequence change: ${spdi}`);
 }
 
 // The GRCh37 mirror is preferred: complex clinical variants are catalogued

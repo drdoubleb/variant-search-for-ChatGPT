@@ -237,6 +237,18 @@ Rate limiting uses [`@upstash/ratelimit`](https://github.com/upstash/ratelimit-j
 The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV/nearby-variant results, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
 
 
+## Proxy origin allowlist
+
+Every serverless proxy (not just `ai-review`) now checks the browser `Origin`
+header against a shared allowlist (`api/_origin.js`): the live site, the
+production Vercel host, and this project's own `variant-search-for-chat-gpt-*`
+previews. Before this, any third-party website's JavaScript could use the
+deployment — and its `NCBI_API_KEY` quota and Vercel invocation budget — as its
+backend. Requests with **no** `Origin` header (curl, server-to-server
+integrations, GPT actions) are deliberately allowed through; only third-party
+browser embedding is blocked. Override with `PROXY_ALLOWED_ORIGINS`
+(comma-separated; falls back to `AI_ALLOWED_ORIGINS`; `*` disables the check).
+
 ## SpliceAI Lookup proxy
 
 The SpliceAI card uses `api/spliceai.js` as a lightweight proxy to the Broad Institute SpliceAI Lookup API. The proxy accepts variants in `chr-pos-ref-alt` format and forwards interactive-use requests with hg, distance, mask, and Gencode (`bc`) parameters. Returned scores are displayed in the SpliceAI card and included in the AI review payload under `supplemental_card_data.spliceai_lookup`.
