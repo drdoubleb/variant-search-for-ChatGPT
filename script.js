@@ -3978,12 +3978,10 @@ function renderDgidbPanel(panel, gene, extras) {
             resultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No DGIdb interactions found for ${escapeHtml(gene)}.</div>`;
             return;
         }
-        extras.dgidb = {
-            gene,
-            interaction_count: interactions.length,
-            note: 'Sorted by DGIdb interaction score; includes investigational compounds.',
-            top_interactions: interactions.slice(0, 25)
-        };
+        // Deliberately NOT stashed into the AI-review extras: DGIdb aggregates
+        // investigational/preclinical interaction claims, and that much
+        // non-clinical drug data in the payload would dilute the clinical
+        // sources the review is meant to weigh. The tab is for human browsing.
         const countEl = document.createElement('div');
         countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
         const approvedCount = interactions.filter((i) => i.approved).length;

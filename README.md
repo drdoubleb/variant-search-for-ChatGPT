@@ -343,8 +343,10 @@ The FDA drugs card gains a fourth tab, **DGIdb**: aggregated drug–gene
 interaction claims (approved *and* investigational compounds) from DGIdb's
 CORS-open GraphQL API, sorted by interaction score with approval status,
 interaction type, and source counts. Clearly labelled as interaction claims —
-not efficacy or approval evidence. Included in the AI payload as
-`supplemental_card_data.dgidb`.
+not efficacy or approval evidence. Deliberately **excluded from the AI-review
+payload**: DGIdb's aggregated investigational/preclinical claims would dilute
+the clinical sources the review is meant to weigh — the tab is for human
+browsing.
 
 ## Proxy origin allowlist
 
