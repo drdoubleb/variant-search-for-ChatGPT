@@ -293,6 +293,7 @@ async function fetchWithRetry(url, options = {}, timeoutMs = 6000, retryOpts = {
 const LookupProgress = (() => {
     const STEP_LABELS = {
         parse: 'Parse input',
+        liftover: 'Map GRCh38 → GRCh37 · Ensembl',
         recoder: 'Resolve nomenclature · Ensembl',
         myvariant: 'Annotations · MyVariant.info',
         vep: 'Consequences · Ensembl VEP',
@@ -1787,6 +1788,94 @@ async function liftoverHg38ToHg19(variant) {
     return variant;
 }
 
+// Split a chr-form genomic HGVS string into its coordinate parts so the
+// positions can be remapped between assemblies without understanding the
+// event: { chrom, start, end (null for single-position forms), rest } —
+// "chr7:g.140453136A>T" → { chrom:'7', start:140453136, end:null, rest:'A>T' },
+// "chr16:g.2122948_2122950del" → { chrom:'16', start:2122948, end:2122950, rest:'del' }.
+// Returns null for anything that is not chrN:g.<pos>[_<pos>]…
+function splitGenomicHgvsPositions(gv) {
+    const m = String(gv || '').match(/^(?:chr)?([0-9]{1,2}|[XY]|MT?):g\.(\d+)(?:_(\d+))?(.*)$/i);
+    if (!m) return null;
+    return {
+        chrom: m[1].toUpperCase(),
+        start: parseInt(m[2], 10),
+        end: m[3] ? parseInt(m[3], 10) : null,
+        rest: m[4] || ''
+    };
+}
+
+// Rewrite an NC_-accession genomic HGVS string ("NC_000007.14:g.140753336A>T")
+// into the chr form the rest of the pipeline speaks ("chr7:g.140753336A>T").
+// The accession VERSION is deliberately dropped — assemblyFromNcAccession()
+// reads it separately, before this conversion discards it. Returns null when
+// the accession is not a recognised human chromosome (leaves MT and scaffolds
+// to the recoder, which understands them natively).
+function ncGenomicToChr(gv) {
+    const m = String(gv || '').match(/^NC_(\d{6})\.\d+:(g\..*)$/i);
+    if (!m) return null;
+    const num = parseInt(m[1], 10);
+    if (!GRCH37_NC_VERSIONS[num]) return null;
+    const chrom = num === 23 ? 'X' : num === 24 ? 'Y' : String(num);
+    return `chr${chrom}:${m[2]}`;
+}
+
+// Strictly map a chr-form genomic HGVS string from GRCh38 to GRCh37.
+//
+// This is the explicit path behind the GRCh38 input toggle — the user DECLARED
+// the coordinates GRCh38, so unlike liftoverHg38ToHg19() (a best-effort guess
+// tried when a direct fetch 404s) every failure here throws: proceeding with
+// an hg38 position labelled hg19 would confidently annotate the wrong locus.
+// Refuses mappings that land on a different chromosome (patch/scaffold),
+// change length, flip strand, or split into multiple segments.
+async function mapGrch38GenomicToGrch37(gv) {
+    const parts = splitGenomicHgvsPositions(gv);
+    if (!parts) {
+        throw new Error(`could not read a chromosome coordinate out of "${gv}"`);
+    }
+    const { chrom, start, end, rest } = parts;
+    const spanEnd = end || start;
+    const span = `${chrom}:${start}..${spanEnd}`;
+    const path = `/map/human/GRCh38/${span}:1/GRCh37?content-type=application/json`;
+    let lastErr = null;
+    for (const host of ENSEMBL_MAP_HOSTS) {
+        let data;
+        try {
+            const res = await fetchWithTimeout(`${host}${path}`, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.liftover);
+            if (!res.ok) {
+                lastErr = new Error(`Ensembl assembly map returned ${res.status}`);
+                continue; // transient or host-specific — try the next host
+            }
+            data = await res.json();
+        } catch (err) {
+            lastErr = err;
+            continue;
+        }
+        // The host answered: its verdict is final, another host will not know better.
+        const mapped = ((data && data.mappings) || [])
+            .map((entry) => entry && entry.mapped)
+            .filter((mp) => mp && String(mp.assembly || '').toUpperCase() === 'GRCH37');
+        if (!mapped.length) {
+            throw new Error(`${span} (GRCh38) has no GRCh37 equivalent`);
+        }
+        if (mapped.length > 1) {
+            throw new Error(`${span} (GRCh38) maps to multiple GRCh37 segments — no unambiguous equivalent`);
+        }
+        const mp = mapped[0];
+        if (String(mp.seq_region_name || '').replace(/^chr/i, '').toUpperCase() !== chrom) {
+            throw new Error(`${span} (GRCh38) maps to ${mp.seq_region_name} in GRCh37, not chromosome ${chrom}`);
+        }
+        if (mp.strand !== undefined && Number(mp.strand) === -1) {
+            throw new Error(`${span} (GRCh38) maps to the opposite strand in GRCh37`);
+        }
+        if (!Number.isInteger(mp.start) || mp.start <= 0 || (mp.end - mp.start) !== (spanEnd - start)) {
+            throw new Error(`${span} (GRCh38) does not map cleanly to GRCh37`);
+        }
+        return `chr${chrom}:g.${mp.start}${end ? `_${mp.end}` : ''}${rest}`;
+    }
+    throw lastErr || new Error('Ensembl assembly mapping service unavailable');
+}
+
 
 
 // Read a known GRCh38 start coordinate out of a myvariant.info annotation.
@@ -1803,6 +1892,24 @@ function extractHg38Start(annotation) {
     for (const value of candidates) {
         const n = Number.parseInt(value, 10);
         if (Number.isInteger(n) && n > 0) return n;
+    }
+    return null;
+}
+
+// When the GRCh38 input toggle lifted the user's own coordinate, both builds'
+// positions are known before any annotation arrives. Remembered here (reset on
+// every submit) so knownHg38Start() can hand the gnomAD v4 proxy the GRCh38
+// start even for variants whose annotation lacks one — the user typed it.
+let inputLiftoverGlobal = null; // { pos37, pos38 } | null
+
+// GRCh38 start for the gnomAD v4 proxy: prefer the annotation's own hg38
+// field, fall back to the toggle-lifted input when it is the same variant
+// (matching GRCh37 start — a recoder fallback may have resolved elsewhere).
+function knownHg38Start(annotation, pos37) {
+    const fromAnnotation = extractHg38Start(annotation);
+    if (fromAnnotation) return fromAnnotation;
+    if (inputLiftoverGlobal && Number(pos37) === inputLiftoverGlobal.pos37) {
+        return inputLiftoverGlobal.pos38;
     }
     return null;
 }
@@ -5427,6 +5534,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const form = document.getElementById('variantForm');
     const input = document.getElementById('variantInput');
     const tumorTypeInput = document.getElementById('tumorTypeInput');
+    // GRCh38 checkbox: declares genomic-coordinate input GRCh38/hg38.
+    // Unchecked (the default) keeps the long-standing GRCh37/hg19 interpretation.
+    const grch38Toggle = document.getElementById('grch38Toggle');
     const statusEl = document.getElementById('status');
     const resultSection = document.getElementById('resultSection');
     const summaryTable = document.getElementById('summaryTable');
@@ -5503,6 +5613,36 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // ?assembly=grch38 (hg38/38 also accepted) pre-checks the GRCh38 box, so a
+    // shared link reproduces the search on the right build. Absent or anything
+    // else means the GRCh37 default.
+    const getGrch38FromUrl = () => {
+        const search = String(window.location.search || '');
+        const m = search.match(/[?&]assembly=([^&]*)/i);
+        if (!m) return false;
+        try {
+            return /^(?:grch38|hg38|38)$/i.test(decodeURIComponent(m[1] || ''));
+        } catch {
+            return false;
+        }
+    };
+
+    const syncAssemblyInUrl = (isGrch38) => {
+        try {
+            const url = new URL(window.location.href);
+            if (isGrch38) {
+                url.searchParams.set('assembly', 'grch38');
+            } else {
+                url.searchParams.delete('assembly');
+            }
+            const search = url.searchParams.toString();
+            const nextUrl = `${url.pathname}${search ? `?${search}` : ''}${url.hash || ''}`;
+            window.history.replaceState({}, '', nextUrl);
+        } catch {
+            // Ignore URL update errors and continue normal search flow.
+        }
+    };
+
     // Monotonic search counter, shared across submits, for the overlapping-search guard.
     let searchSeq = 0;
     form.addEventListener('submit', async (e) => {
@@ -5524,12 +5664,19 @@ document.addEventListener('DOMContentLoaded', () => {
         // "BRAF V600E", "braf:p.v600e", "BRAF:V600E" etc. by converting them
         // to standard HGVS-like strings. This heuristic uppercases gene symbols
         // and prepends "p." to protein variants when missing.
-        const rawInput = input.value.trim();
+        // `let`, not `const`: when the GRCh38 toggle lifts the coordinates, the
+        // raw input is REPLACED by the mapped GRCh37 HGVS — every downstream
+        // consumer (buildVariantCoordinateTuple and friends) re-parses rawInput
+        // preferentially, and letting them read the original hg38 tokens would
+        // pair GRCh38 positions with GRCh37 annotations.
+        let rawInput = input.value.trim();
         const tumorType = tumorTypeInput ? tumorTypeInput.value.trim() : '';
+        const grch38Checked = Boolean(grch38Toggle && grch38Toggle.checked);
         // Update the URL with the raw submitted value so inbound/outbound links can
         // preserve flexible user-entered formats (HGVS g./c./p., space-separated tokens, etc.).
         syncVariantInUrl(rawInput);
         syncTumorTypeInUrl(tumorType);
+        syncAssemblyInUrl(grch38Checked);
         let query = rawInput;
 
         // Detect gene-only or gene+descriptor input before normalisation.
@@ -6108,6 +6255,57 @@ document.addEventListener('DOMContentLoaded', () => {
             return; // Skip the variant annotation pipeline
         }
         // ── End gene-only mode ───────────────────────────────────────────────
+
+        // ── Assembly handling for genomic-coordinate input ───────────────────
+        // Everything downstream — MyVariant hg19, the GRCh37 recoder mirror, the
+        // ClinVar region pulls — speaks GRCh37, so a GRCh38 coordinate is lifted
+        // ONCE, up front and strictly. Two ways in: the checkbox declares bare
+        // coordinates (chr7:g.…, pasted rows) GRCh38; an NC_ accession declares
+        // its own assembly through its version and wins over the checkbox in
+        // BOTH directions (the accession is unambiguous, the checkbox can be
+        // stale). Transcript-level input (c./p.) has no assembly and is
+        // untouched. A failed mapping is an error, never a silent fall-through:
+        // hg38 coordinates labelled hg19 would annotate the wrong locus.
+        inputLiftoverGlobal = null;
+        if (isGenomicVariant(query)) {
+            const ncAssembly = assemblyFromNcAccession(query);
+            const chrForm = ncGenomicToChr(query);
+            if (chrForm) {
+                query = chrForm;
+                rawInput = query;
+            }
+            const assembly = ncAssembly || (grch38Checked ? 'GRCh38' : 'GRCh37');
+            if (ncAssembly === 'GRCh37' && grch38Checked) {
+                LookupProgress.step('liftover', 'warn', 'accession version says GRCh37 — checkbox ignored');
+            }
+            if (assembly === 'GRCh38' && !splitGenomicHgvsPositions(query)) {
+                // NC_012920 (mitochondrial — identical in both builds), LRG_ and
+                // scaffold accessions carry no chromosomal coordinate to remap;
+                // the recoder resolves them on their own terms. Note it and move on.
+                LookupProgress.step('liftover', 'warn', 'no chromosomal coordinate to remap — input left as-is');
+            } else if (assembly === 'GRCh38') {
+                const grch38Query = query;
+                LookupProgress.step('liftover', 'running');
+                try {
+                    query = await mapGrch38GenomicToGrch37(grch38Query);
+                    if (!isCurrentSearch()) return;
+                    const pre = splitGenomicHgvsPositions(grch38Query);
+                    const post = splitGenomicHgvsPositions(query);
+                    if (pre && post) inputLiftoverGlobal = { pos37: post.start, pos38: pre.start };
+                    rawInput = query;
+                    LookupProgress.step('liftover', 'ok', `${grch38Query} (GRCh38) → ${query}`);
+                    LookupProgress.resolved({ input: `${grch38Query} (GRCh38)`, genomic: query, gene: geneHintGlobal });
+                } catch (liftErr) {
+                    if (!isCurrentSearch()) return;
+                    LookupProgress.step('liftover', 'fail', liftErr.message);
+                    LookupProgress.finish('fail', 'GRCh38 → GRCh37 mapping failed');
+                    statusEl.textContent = `Error: could not map ${grch38Query} (GRCh38) to GRCh37 — ${liftErr.message}. `
+                        + 'The annotation sources are GRCh37/hg19-based, so the lookup cannot proceed without this conversion.';
+                    resultSection.classList.add('hidden');
+                    return;
+                }
+            }
+        }
 
         // Parse a triple‑coded protein change from the input query (e.g. p.Val600Glu or VAL600GLU).
         targetProtGlobal = null;
@@ -8645,9 +8843,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             : 'gnomAD v4.1: insufficient coordinate data.';
                         return;
                     }
-                    // The annotation usually already carries the GRCh38 start; handing
-                    // it to the proxy avoids a liftover round-trip that can fail.
-                    const knownPos38 = extractHg38Start(annotation);
+                    // The annotation usually already carries the GRCh38 start (or the
+                    // GRCh38 toggle captured it from the input); handing it to the
+                    // proxy avoids a liftover round-trip that can fail.
+                    const knownPos38 = knownHg38Start(annotation, pos37Coord);
                     return fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord, knownPos38).then((result) => {
                         // Drop sex-stratified (_XX/_XY) and 1000 Genomes (1KG:*)
                         // subpopulations from the populations arrays — matches the UI
@@ -9452,7 +9651,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         () => (aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)))],
                     ['gnomad_v4', cachedOr('gnomad_v4',
                         (c) => typeof c === 'object' && Boolean(c.status),
-                        () => (coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt, extractHg38Start(annotation)) : Promise.resolve(null)))],
+                        () => (coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt, knownHg38Start(annotation, coords.pos37)) : Promise.resolve(null)))],
                     ['spliceai_lookup', cachedOr('spliceai_lookup',
                         (c) => typeof c === 'object' && !c.error && Boolean(c.data),
                         () => (spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)))],
@@ -9935,6 +10134,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const initialTumorType = getTumorTypeFromUrl();
     if (initialTumorType && initialTumorType.trim() && tumorTypeInput) {
         tumorTypeInput.value = initialTumorType.trim();
+    }
+    if (grch38Toggle && getGrch38FromUrl()) {
+        grch38Toggle.checked = true;
     }
     if (initialVariant && initialVariant.trim()) {
         input.value = initialVariant.trim();

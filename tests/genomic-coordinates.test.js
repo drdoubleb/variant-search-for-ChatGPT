@@ -37,6 +37,26 @@ function assemblyFromNcAccession(value) {
     return null;
 }
 
+function splitGenomicHgvsPositions(gv) {
+    const m = String(gv || '').match(/^(?:chr)?([0-9]{1,2}|[XY]|MT?):g\.(\d+)(?:_(\d+))?(.*)$/i);
+    if (!m) return null;
+    return {
+        chrom: m[1].toUpperCase(),
+        start: parseInt(m[2], 10),
+        end: m[3] ? parseInt(m[3], 10) : null,
+        rest: m[4] || ''
+    };
+}
+
+function ncGenomicToChr(gv) {
+    const m = String(gv || '').match(/^NC_(\d{6})\.\d+:(g\..*)$/i);
+    if (!m) return null;
+    const num = parseInt(m[1], 10);
+    if (!GRCH37_NC_VERSIONS[num]) return null;
+    const chrom = num === 23 ? 'X' : num === 24 ? 'Y' : String(num);
+    return `chr${chrom}:${m[2]}`;
+}
+
 function parseGenomicHgvs(gVariant) {
     if (!gVariant) return null;
     const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.*)$/i);
@@ -385,6 +405,39 @@ check('unknown version yields null', assemblyFromNcAccession('NC_000007.99:g.1A>
 check('mitochondrial accession yields null', assemblyFromNcAccession('NC_012920.1:g.100A>T') === null);
 check('non-NC input yields null', assemblyFromNcAccession('chr7:g.140453136A>T') === null);
 check('empty input yields null', assemblyFromNcAccession('') === null);
+
+// --- splitGenomicHgvsPositions --------------------------------------------
+// The GRCh38 input toggle remaps ONLY the positions of a genomic HGVS string,
+// leaving the event description ("rest") byte-for-byte intact — so it must
+// split every g. form the app accepts, not just substitutions.
+
+check('split: substitution', eq(splitGenomicHgvsPositions('chr7:g.140753336A>T'),
+    { chrom: '7', start: 140753336, end: null, rest: 'A>T' }));
+check('split: chr prefix optional', eq(splitGenomicHgvsPositions('7:g.140753336A>T'),
+    { chrom: '7', start: 140753336, end: null, rest: 'A>T' }));
+check('split: range deletion', eq(splitGenomicHgvsPositions('chr16:g.2110671_2110673del'),
+    { chrom: '16', start: 2110671, end: 2110673, rest: 'del' }));
+check('split: insertion keeps inserted bases in rest', eq(splitGenomicHgvsPositions('chrX:g.20166791_20166792insG'),
+    { chrom: 'X', start: 20166791, end: 20166792, rest: 'insG' }));
+check('split: single-position del', eq(splitGenomicHgvsPositions('chr17:g.7674220del'),
+    { chrom: '17', start: 7674220, end: null, rest: 'del' }));
+check('split: delins', eq(splitGenomicHgvsPositions('chr7:g.140753336_140753337delinsAA'),
+    { chrom: '7', start: 140753336, end: 140753337, rest: 'delinsAA' }));
+check('split: mitochondrial MT accepted', eq(splitGenomicHgvsPositions('chrMT:g.8993T>G'),
+    { chrom: 'MT', start: 8993, end: null, rest: 'T>G' }));
+check('split: NC_ form rejected (convert first)', splitGenomicHgvsPositions('NC_000007.14:g.140753336A>T') === null);
+check('split: non-genomic rejected', splitGenomicHgvsPositions('BRAF:p.Val600Glu') === null);
+check('split: empty rejected', splitGenomicHgvsPositions('') === null);
+
+// --- ncGenomicToChr --------------------------------------------------------
+
+check('NC_ GRCh38 chr7 converts to chr form', ncGenomicToChr('NC_000007.14:g.140753336A>T') === 'chr7:g.140753336A>T');
+check('NC_ GRCh37 chr7 converts to chr form', ncGenomicToChr('NC_000007.13:g.140453136A>T') === 'chr7:g.140453136A>T');
+check('NC_ chrX converts', ncGenomicToChr('NC_000023.10:g.20148674T>G') === 'chrX:g.20148674T>G');
+check('NC_ chrY converts', ncGenomicToChr('NC_000024.9:g.100A>T') === 'chrY:g.100A>T');
+check('mitochondrial NC_ left for the recoder', ncGenomicToChr('NC_012920.1:g.100A>T') === null);
+check('non-genomic NC_ (SPDI) rejected', ncGenomicToChr('NC_000016.9:2122947:AAT:') === null);
+check('chr-form input passes through as null', ncGenomicToChr('chr7:g.140453136A>T') === null);
 
 // --- buildVariantCoordinateTuple ------------------------------------------
 

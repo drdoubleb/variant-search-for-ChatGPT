@@ -47,9 +47,20 @@ async function installRoutes(page) {
         const url = route.request().url();
         if (url.startsWith(BASE) || url.includes('127.0.0.1')) return route.continue();
         const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+        // The assembly-map endpoint answers (the GRCh38 toggle depends on it);
+        // the rest of Ensembl stays down. V600E GRCh38→GRCh37.
+        if (/ensembl\.org\/map\/human\/GRCh38\/7:140753336\.\.140753336/.test(url)) return json({
+            mappings: [{ mapped: { assembly: 'GRCh37', seq_region_name: '7', start: 140453136, end: 140453136, strand: 1 } }]
+        });
         if (/ensembl\.org/.test(url)) return route.abort(); // Ensembl outage
         if (/myvariant\.info\/v1\/query/.test(url)) return json({ hits: [BRAF_ANNOTATION] });
-        if (/myvariant\.info\/v1\/variant/.test(url)) return json(BRAF_ANNOTATION);
+        if (/myvariant\.info\/v1\/variant/.test(url)) {
+            // Only the true hg19 id resolves — an unlifted GRCh38 coordinate must
+            // NOT find an annotation, or the toggle test would pass vacuously.
+            return /140453136/.test(url)
+                ? json(BRAF_ANNOTATION)
+                : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ success: false, error: 'not found' }) });
+        }
         if (/cancer-types\.php/.test(url)) return json({ count: 1, cancer_types: [{ name: 'Melanoma', record_count: 3, aliases: ['melanoma'] }] });
         if (/guidelines\/api\/search\.php/.test(url)) return json({ count: 0, results: [], query: {} });
         if (/cbioportal\.org\/api\/genes\//.test(url)) return json({ entrezGeneId: 673, hugoGeneSymbol: 'BRAF' });
@@ -180,6 +191,25 @@ async function installRoutes(page) {
         const glText = await page.$eval('[data-card="guidelines"]', el => el.textContent);
         check('variant: Guidelines auto-selected tumor type ran a search',
             /No guideline records found for BRAF in Melanoma/.test(glText), glText.slice(0, 200));
+        await page.close();
+    }
+
+    // ── GRCh38 input toggle: hg38 coordinate lifted before the pipeline ────
+    {
+        const page = await newPage();
+        await page.goto(`${BASE}/?variant=chr7%3Ag.140753336A%3ET&assembly=grch38`, { waitUntil: 'domcontentloaded' });
+        check('grch38: checkbox pre-checked from ?assembly=grch38',
+            await page.$eval('#grch38Toggle', el => el.checked));
+        await page.waitForSelector('[data-card="variant"]', { timeout: 60000 });
+        await page.waitForTimeout(2000);
+        const lpText = (await page.$eval('#lookupProgress', el => el.textContent)).replace(/\s+/g, ' ');
+        check('grch38: liftover step shows the mapping',
+            /140753336.*GRCh38.*→.*140453136/.test(lpText), lpText.slice(0, 300));
+        const variantText = (await page.$eval('[data-card="variant"]', el => el.textContent)).replace(/\s+/g, ' ');
+        check('grch38: pipeline ran on the GRCh37 locus (canonical c.1799T>A)',
+            /c\.1799T>A/.test(variantText), variantText.slice(0, 250));
+        const gUrl = page.url();
+        check('grch38: assembly param kept in the shareable URL', /assembly=grch38/.test(gUrl), gUrl);
         await page.close();
     }
 
