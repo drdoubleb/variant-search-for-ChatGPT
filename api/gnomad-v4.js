@@ -110,6 +110,7 @@ async function gnomadPost(operationName, query, variables) {
 }
 
 import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache } from './_cache.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -213,9 +214,14 @@ export default async function handler(req, res) {
     }
 
     if (!variant) {
+        // A clean absence is as stable as a hit; a transient failure is not
+        // (liftover_unavailable / api_error above stay uncached).
+        setEdgeCache(res, 604800);
         return res.status(200).json({ status: 'not_found', grch38Id: variantId, ...(caveat ? { caveat } : {}) });
     }
 
+    // Frequencies change only on gnomAD releases — cache aggressively.
+    setEdgeCache(res, 604800);
     return res.status(200).json({
         status: 'found',
         grch38Id: variant.variant_id || variantId,

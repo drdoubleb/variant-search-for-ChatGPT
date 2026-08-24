@@ -127,6 +127,9 @@ const API_TIMEOUT_MS = {
     clinicalTrials: 20000,
     spliceai: 25000,
     aiReview: 60000,
+    cbioportal: 15000,
+    clingen: 10000,
+    dgidb: 12000,
     openFda: 12000,
     ensemblSequence: 8000,
     ensemblLookup: 10000
@@ -2753,15 +2756,27 @@ function condenseOpenFdaForAi(data, { maxRecords = 40 } = {}) {
     };
 }
 
-async function fetchPubmedArticles(searchTerm, limit = 5) {
-    if (!searchTerm) return { total: 0, articles: [] };
-    const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
+// `variantQuery` ({ gene, variant, extra? }) switches the proxy to its
+// LitVar2/PubTator3 path: variant-normalized literature (papers writing the
+// same change as p.Val600Glu, c.1799T>A or an rsID all match), relevance-ranked.
+// The proxy falls back to the plain `searchTerm` search when no variant entity
+// matches, so passing both is always safe.
+async function fetchPubmedArticles(searchTerm, limit = 5, variantQuery = null) {
+    const hasVariant = variantQuery && String(variantQuery.variant || '').trim();
+    if (!searchTerm && !hasVariant) return { total: 0, articles: [] };
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (searchTerm) params.set('term', searchTerm);
+    if (hasVariant) {
+        if (variantQuery.gene) params.set('gene', variantQuery.gene);
+        params.set('variant', variantQuery.variant);
+        if (variantQuery.extra) params.set('extra', variantQuery.extra);
+    }
     const endpoint = getConfiguredApiEndpoint('PUBMED_API_ENDPOINT', '/api/pubmed');
     const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.pubmed);
     if (!res.ok) throw new Error(`PubMed proxy error: ${res.status}`);
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
-    return { total: data.total || 0, articles: data.articles || [] };
+    return { total: data.total || 0, articles: data.articles || [], litvar: data.litvar || null, backend: data.backend || 'term' };
 }
 
 async function fetchClinicalTrials(gene, tumorType) {
@@ -2791,9 +2806,11 @@ async function fetchClinicalTrials(gene, tumorType) {
  * (tab labels, search terms, which extras/cache object to populate).
  */
 
-// PubMed card. `tabs` is 1-3 entries of { label, term, extraKey }; with a
-// single entry no tab bar is rendered. Results are stashed under
-// extras[extraKey] for the AI-review payload.
+// PubMed card. `tabs` is 1-3 entries of { label, term, extraKey, variantQuery? };
+// with a single entry no tab bar is rendered. `variantQuery` ({ gene, variant,
+// extra? }) routes that tab through the LitVar2 variant-normalized search, with
+// the term search as fallback. Results are stashed under extras[extraKey] for
+// the AI-review payload.
 function createPubmedCard({ container, tabs, extras }) {
     const PUBMED_LIMIT = 5;
     const pmCard = document.createElement('div');
@@ -2805,7 +2822,7 @@ function createPubmedCard({ container, tabs, extras }) {
     const pmContent = document.createElement('div');
     pmContent.className = 'card-content';
 
-    const buildPmResultsPanel = (panel, searchTerm, extraKey) => {
+    const buildPmResultsPanel = (panel, searchTerm, extraKey, variantQuery) => {
         const queryUrl = searchTerm
             ? `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(searchTerm)}&sort=relevance`
             : 'https://pubmed.ncbi.nlm.nih.gov/';
@@ -2822,19 +2839,31 @@ function createPubmedCard({ container, tabs, extras }) {
             panel.appendChild(queryLabel);
         }
         const resultsDiv = document.createElement('div');
-        if (searchTerm) {
+        if (searchTerm || variantQuery) {
             const spinner = document.createElement('div');
             spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
             spinner.textContent = 'Loading PubMed results…';
             resultsDiv.appendChild(spinner);
         }
         panel.appendChild(resultsDiv);
-        if (searchTerm) {
-            fetchPubmedArticles(searchTerm, PUBMED_LIMIT).then(({ total, articles }) => {
-                extras[extraKey] = { query: searchTerm, total, articles };
+        if (searchTerm || variantQuery) {
+            fetchPubmedArticles(searchTerm, PUBMED_LIMIT, variantQuery).then(({ total, articles, litvar, backend }) => {
+                extras[extraKey] = { query: searchTerm, total, articles, backend, litvar };
                 resultsDiv.innerHTML = '';
+                // Provenance line: which spelling-normalized entity matched. A
+                // LitVar2 hit means every nomenclature form of the variant was
+                // searched, not just the literal query text above.
+                if (litvar && backend === 'litvar') {
+                    const lvNote = document.createElement('div');
+                    lvNote.style.cssText = 'font-size:0.78rem;color:#0369a1;margin-bottom:6px;';
+                    lvNote.textContent = `Variant-matched via LitVar2: ${litvar.name}${litvar.rsid ? ` (${litvar.rsid})` : ''} — all nomenclature spellings, ranked by relevance`;
+                    resultsDiv.appendChild(lvNote);
+                }
                 if (total === 0 || articles.length === 0) {
-                    resultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No PubMed results found.</div>';
+                    const noRes = document.createElement('div');
+                    noRes.style.cssText = 'font-size:0.85rem;color:#6b7280;';
+                    noRes.textContent = 'No PubMed results found.';
+                    resultsDiv.appendChild(noRes);
                     return;
                 }
                 const countEl = document.createElement('div');
@@ -2875,11 +2904,13 @@ function createPubmedCard({ container, tabs, extras }) {
                 });
                 if (total > PUBMED_LIMIT) {
                     const seeAll = document.createElement('a');
-                    seeAll.href = queryUrl;
+                    seeAll.href = (litvar && litvar.url) ? litvar.url : queryUrl;
                     seeAll.target = '_blank';
                     seeAll.rel = 'noopener noreferrer';
                     seeAll.style.fontSize = '0.82rem';
-                    seeAll.textContent = `See all ${total.toLocaleString()} results on PubMed ↗`;
+                    seeAll.textContent = (litvar && litvar.url)
+                        ? `See all ${total.toLocaleString()} variant-matched articles on LitVar2 ↗`
+                        : `See all ${total.toLocaleString()} results on PubMed ↗`;
                     resultsDiv.appendChild(seeAll);
                 }
             }).catch(() => {
@@ -2911,11 +2942,11 @@ function createPubmedCard({ container, tabs, extras }) {
         });
         pmContent.appendChild(tabBar);
         tabs.forEach((tab, i) => {
-            buildPmResultsPanel(tabPanels[i], tab.term, tab.extraKey);
+            buildPmResultsPanel(tabPanels[i], tab.term, tab.extraKey, tab.variantQuery || null);
             pmContent.appendChild(tabPanels[i]);
         });
     } else {
-        buildPmResultsPanel(pmContent, tabs[0].term, tabs[0].extraKey);
+        buildPmResultsPanel(pmContent, tabs[0].term, tabs[0].extraKey, tabs[0].variantQuery || null);
     }
 
     pmCard.appendChild(pmContent);
@@ -2950,48 +2981,34 @@ function createFdaDrugsCard({ container, gene, extras, cardCache }) {
     // Tab bar
     const fdaTabBar = document.createElement('div');
     fdaTabBar.className = 'card-tabs';
-    const compDxBtn = document.createElement('button');
-    compDxBtn.type = 'button';
-    compDxBtn.className = 'card-tab-btn active';
-    compDxBtn.textContent = 'Companion Dx';
-    const openFdaBtn = document.createElement('button');
-    openFdaBtn.type = 'button';
-    openFdaBtn.className = 'card-tab-btn';
-    openFdaBtn.textContent = 'openFDA Labels';
-    const bbkbBtn = document.createElement('button');
-    bbkbBtn.type = 'button';
-    bbkbBtn.className = 'card-tab-btn';
-    bbkbBtn.textContent = 'BBKB';
-    fdaTabBar.appendChild(compDxBtn);
-    fdaTabBar.appendChild(openFdaBtn);
-    fdaTabBar.appendChild(bbkbBtn);
+    const fdaTabLabels = ['Companion Dx', 'openFDA Labels', 'BBKB', 'DGIdb'];
+    const fdaTabBtns = [];
+    const fdaTabPanels = [];
+    const activateFdaTab = (idx) => {
+        fdaTabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+        fdaTabPanels.forEach((p, i) => p.classList.toggle('active', i === idx));
+    };
+    fdaTabLabels.forEach((label, i) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = i === 0 ? 'card-tab-btn active' : 'card-tab-btn';
+        btn.textContent = label;
+        btn.addEventListener('click', () => activateFdaTab(i));
+        fdaTabBar.appendChild(btn);
+        fdaTabBtns.push(btn);
+        const panel = document.createElement('div');
+        panel.className = i === 0 ? 'card-tab-panel active' : 'card-tab-panel';
+        fdaTabPanels.push(panel);
+    });
     fdaContent.appendChild(fdaTabBar);
+    const [compDxPanel, openFdaPanel, bbkbPanel, dgidbPanel] = fdaTabPanels;
 
-    const compDxPanel = document.createElement('div');
-    compDxPanel.className = 'card-tab-panel active';
-    const openFdaPanel = document.createElement('div');
-    openFdaPanel.className = 'card-tab-panel';
-    const bbkbPanel = document.createElement('div');
-    bbkbPanel.className = 'card-tab-panel';
-
-    compDxBtn.addEventListener('click', () => {
-        compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
-        compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
-    });
-    openFdaBtn.addEventListener('click', () => {
-        openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
-        openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
-    });
-    bbkbBtn.addEventListener('click', () => {
-        bbkbBtn.classList.add('active'); compDxBtn.classList.remove('active'); openFdaBtn.classList.remove('active');
-        bbkbPanel.classList.add('active'); compDxPanel.classList.remove('active'); openFdaPanel.classList.remove('active');
-    });
-
-    fdaContent.appendChild(compDxPanel);
-    fdaContent.appendChild(openFdaPanel);
-    fdaContent.appendChild(bbkbPanel);
+    fdaTabPanels.forEach((p) => fdaContent.appendChild(p));
     fdaCard.appendChild(fdaContent);
     if (container) container.appendChild(fdaCard);
+
+    // --- DGIdb panel ---
+    renderDgidbPanel(dgidbPanel, gene, extras);
 
     // --- Companion Dx panel ---
     const fdaCompDxUrl = 'https://www.fda.gov/medical-devices/in-vitro-diagnostics/list-cleared-or-approved-companion-diagnostic-devices-in-vitro-and-imaging-tools';
@@ -3356,6 +3373,440 @@ function createClinicalTrialsCard({ container, gene, tumorType, cardCache }) {
     }
 
     return ctCard;
+}
+
+/*
+ * ── Cancer Prevalence card (cBioPortal) ─────────────────────────────────────
+ *
+ * "How often is this variant seen, and in which tumor types?" answered from
+ * cBioPortal's public API (CORS-open — called directly from the browser, no
+ * serverless function spent). v1 queries one large pan-cancer cohort,
+ * MSK-IMPACT 2017 (10,945 prospectively sequenced tumors), which is frozen —
+ * hence the hard-coded denominator — and clearly labels the source.
+ */
+const CBIOPORTAL_API = 'https://www.cbioportal.org/api';
+const CBIOPORTAL_STUDY = {
+    id: 'msk_impact_2017',
+    name: 'MSK-IMPACT 2017',
+    sampleListId: 'msk_impact_2017_all',
+    profileId: 'msk_impact_2017_mutations',
+    totalSamples: 10945, // allSampleCount of the frozen study
+    url: 'https://www.cbioportal.org/study/summary?id=msk_impact_2017'
+};
+
+async function fetchCbioportalGeneMutations(gene) {
+    const geneRes = await fetchWithTimeout(
+        `${CBIOPORTAL_API}/genes/${encodeURIComponent(gene)}`,
+        { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.cbioportal);
+    if (!geneRes.ok) return null; // unknown symbol → no card data
+    const geneData = await geneRes.json();
+    const entrez = Number(geneData && geneData.entrezGeneId);
+    if (!Number.isInteger(entrez) || entrez <= 0) return null;
+    const mutRes = await fetchWithTimeout(
+        `${CBIOPORTAL_API}/molecular-profiles/${CBIOPORTAL_STUDY.profileId}/mutations/fetch?projection=SUMMARY`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ sampleListId: CBIOPORTAL_STUDY.sampleListId, entrezGeneIds: [entrez] })
+        }, API_TIMEOUT_MS.cbioportal);
+    if (!mutRes.ok) throw new Error(`cBioPortal mutations fetch failed (${mutRes.status})`);
+    const mutations = await mutRes.json();
+    return { entrez, mutations: Array.isArray(mutations) ? mutations : [] };
+}
+
+// Resolve CANCER_TYPE for a set of sample IDs. Capped so a very common gene
+// (TP53) cannot post a giant identifier list; callers note when capped.
+async function fetchCbioportalCancerTypes(sampleIds, cap = 1000) {
+    const ids = sampleIds.slice(0, cap);
+    if (ids.length === 0) return {};
+    const res = await fetchWithTimeout(
+        `${CBIOPORTAL_API}/clinical-data/fetch?clinicalDataType=SAMPLE&projection=SUMMARY`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({
+                attributeIds: ['CANCER_TYPE'],
+                identifiers: ids.map((id) => ({ entityId: id, studyId: CBIOPORTAL_STUDY.id }))
+            })
+        }, API_TIMEOUT_MS.cbioportal);
+    if (!res.ok) throw new Error(`cBioPortal clinical-data fetch failed (${res.status})`);
+    const rows = await res.json();
+    const bySample = {};
+    (Array.isArray(rows) ? rows : []).forEach((r) => {
+        if (r && r.sampleId && r.value) bySample[r.sampleId] = r.value;
+    });
+    return bySample;
+}
+
+// Cancer Prevalence card. `proteinChange` (optional) is matched against the
+// cohort's protein changes after single-letter normalization; without it the
+// card shows gene-level prevalence only. Results land in
+// extras.cbioportal_prevalence for the AI-review payload.
+function createCbioportalCard({ container, gene, proteinChange, extras }) {
+    if (!gene) return null;
+    const card = document.createElement('div');
+    card.className = 'card';
+    const title = document.createElement('h3');
+    title.textContent = 'Cancer Prevalence';
+    applyCardTheme(card, 'Cancer Prevalence');
+    card.appendChild(title);
+    const content = document.createElement('div');
+    content.className = 'card-content';
+
+    const sourceLine = document.createElement('div');
+    sourceLine.style.cssText = 'font-size:0.78rem;color:#6b7280;margin-bottom:4px;';
+    sourceLine.textContent = `${CBIOPORTAL_STUDY.name} · ${CBIOPORTAL_STUDY.totalSamples.toLocaleString()} sequenced tumors (cBioPortal)`;
+    content.appendChild(sourceLine);
+
+    const linkEl = document.createElement('a');
+    linkEl.href = `https://www.cbioportal.org/results?cancer_study_list=${encodeURIComponent(CBIOPORTAL_STUDY.id)}&gene_list=${encodeURIComponent(gene)}`;
+    linkEl.target = '_blank';
+    linkEl.rel = 'noopener noreferrer';
+    linkEl.textContent = `View ${gene} on cBioPortal ↗`;
+    content.appendChild(linkEl);
+
+    const resultsDiv = document.createElement('div');
+    resultsDiv.style.cssText = 'margin-top:0.4rem;';
+    const spinner = document.createElement('div');
+    spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+    spinner.textContent = 'Loading cohort prevalence…';
+    resultsDiv.appendChild(spinner);
+    content.appendChild(resultsDiv);
+    card.appendChild(content);
+    if (container) container.appendChild(card);
+
+    const pct = (n, d) => (d > 0 ? `${((n / d) * 100).toFixed(n / d < 0.01 ? 2 : 1)}%` : 'n/a');
+    const line = (html) => {
+        const div = document.createElement('div');
+        div.style.cssText = 'font-size:0.86rem;margin-bottom:2px;';
+        div.innerHTML = html;
+        return div;
+    };
+
+    (async () => {
+        const data = await fetchCbioportalGeneMutations(gene);
+        if (!data) {
+            resultsDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${escapeHtml(gene)}" not found in cBioPortal.</div>`;
+            return;
+        }
+        const { mutations } = data;
+        const total = CBIOPORTAL_STUDY.totalSamples;
+        const geneSamples = new Set(mutations.map((m) => m.sampleId).filter(Boolean));
+
+        const targetNorm = normaliseProteinForCivicMatch(proteinChange || '');
+        const matchedSampleSet = new Set();
+        const changeCounts = {};
+        mutations.forEach((m) => {
+            const change = String(m.proteinChange || '').trim();
+            if (change) changeCounts[change] = (changeCounts[change] || 0) + 1;
+            if (targetNorm && normaliseProteinForCivicMatch(change) === targetNorm && m.sampleId) {
+                matchedSampleSet.add(m.sampleId);
+            }
+        });
+
+        resultsDiv.innerHTML = '';
+        resultsDiv.appendChild(line(`<strong>${escapeHtml(gene)} mutated:</strong> ${geneSamples.size.toLocaleString()} of ${total.toLocaleString()} tumors (${pct(geneSamples.size, total)})`));
+        if (targetNorm) {
+            if (matchedSampleSet.size > 0) {
+                resultsDiv.appendChild(line(`<strong>${escapeHtml(targetNorm)} specifically:</strong> ${matchedSampleSet.size.toLocaleString()} tumors (${pct(matchedSampleSet.size, total)} of cohort, ${pct(matchedSampleSet.size, geneSamples.size)} of ${escapeHtml(gene)}-mutant)`));
+            } else {
+                resultsDiv.appendChild(line(`<strong>${escapeHtml(targetNorm)}:</strong> not seen in this cohort`));
+            }
+        }
+
+        // Top protein changes in the gene, for context.
+        const topChanges = Object.entries(changeCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+        if (topChanges.length > 0) {
+            const topDet = document.createElement('details');
+            const topSum = document.createElement('summary');
+            topSum.style.cssText = 'font-size:0.82rem;cursor:pointer;';
+            topSum.textContent = `Most frequent ${gene} changes in this cohort`;
+            topDet.appendChild(topSum);
+            const ul = document.createElement('ul');
+            ul.style.cssText = 'margin-top:0.3rem;font-size:0.82rem;padding-left:1.2rem;line-height:1.5;';
+            topChanges.forEach(([change, n]) => {
+                const li = document.createElement('li');
+                li.textContent = `${change} — ${n.toLocaleString()}`;
+                ul.appendChild(li);
+            });
+            topDet.appendChild(ul);
+            resultsDiv.appendChild(topDet);
+        }
+
+        // Tumor-type breakdown — for the exact variant when matched, else the gene.
+        const breakdownIds = matchedSampleSet.size > 0 ? [...matchedSampleSet] : [...geneSamples];
+        const breakdownLabel = matchedSampleSet.size > 0 ? targetNorm : `${gene}-mutant`;
+        let breakdown = [];
+        let breakdownCapped = false;
+        try {
+            const CAP = 1000;
+            breakdownCapped = breakdownIds.length > CAP;
+            const bySample = await fetchCbioportalCancerTypes(breakdownIds, CAP);
+            // Count only the samples we asked about, whatever the response holds.
+            const wanted = new Set(breakdownIds.slice(0, CAP));
+            const counts = {};
+            Object.entries(bySample).forEach(([sid, ct]) => {
+                if (wanted.has(sid)) counts[ct] = (counts[ct] || 0) + 1;
+            });
+            breakdown = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        } catch (e) {
+            console.warn('cBioPortal cancer-type breakdown failed', e);
+        }
+        if (breakdown.length > 0) {
+            const bkTitle = document.createElement('div');
+            bkTitle.style.cssText = 'font-size:0.84rem;font-weight:600;margin-top:0.4rem;';
+            bkTitle.textContent = `Tumor types with ${breakdownLabel}${breakdownCapped ? ' (first 1,000 samples)' : ''}:`;
+            resultsDiv.appendChild(bkTitle);
+            const shown = breakdown.slice(0, 8);
+            const bkDiv = document.createElement('div');
+            bkDiv.style.cssText = 'font-size:0.82rem;color:#374151;line-height:1.5;';
+            bkDiv.textContent = shown.map(([ct, n]) => `${ct} (${n.toLocaleString()})`).join(' · ')
+                + (breakdown.length > shown.length ? ` · +${breakdown.length - shown.length} more` : '');
+            resultsDiv.appendChild(bkDiv);
+        }
+
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+        note.textContent = 'Source: cBioPortal (MSK-IMPACT 2017, targeted panel of a single institution\'s advanced-cancer patients — not population prevalence). Research use only.';
+        resultsDiv.appendChild(note);
+
+        extras.cbioportal_prevalence = {
+            study: { id: CBIOPORTAL_STUDY.id, name: CBIOPORTAL_STUDY.name, total_samples: total },
+            gene,
+            gene_mutant_samples: geneSamples.size,
+            variant: targetNorm || null,
+            variant_samples: targetNorm ? matchedSampleSet.size : null,
+            top_protein_changes: topChanges.map(([change, n]) => ({ change, count: n })),
+            cancer_type_breakdown: breakdown.map(([cancer_type, n]) => ({ cancer_type, count: n })),
+            cancer_type_breakdown_for: breakdownLabel,
+            cancer_type_breakdown_capped: breakdownCapped,
+            note: 'Single-institution advanced-cancer sequencing cohort; frequencies are cohort prevalence, not population or incidence figures.'
+        };
+    })().catch((err) => {
+        console.warn('cBioPortal prevalence card failed', err);
+        resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">cBioPortal unavailable.</div>';
+    });
+
+    return card;
+}
+
+/*
+ * ── ClinGen Evidence Repository (eRepo) ─────────────────────────────────────
+ *
+ * Expert-panel (VCEP) variant classifications with ACMG criteria applied —
+ * higher-confidence than aggregate ClinVar for the variants they cover. The
+ * API is CORS-open and indexes GRCh37 NC_ genomic HGVS, which we can build
+ * from the resolved coordinate, so one exact-match GET answers the question
+ * regardless of which transcript version the panel used.
+ */
+
+// GRCh37 RefSeq chromosome accession for a chromosome name — the inverse of
+// assemblyFromNcAccession's table. Returns null for MT/unknown.
+function grch37NcAccession(chrom) {
+    const bare = String(chrom || '').replace(/^chr/i, '').toUpperCase();
+    const num = bare === 'X' ? 23 : bare === 'Y' ? 24 : parseInt(bare, 10);
+    const version = GRCH37_NC_VERSIONS[num];
+    if (!version) return null;
+    return `NC_${String(num).padStart(6, '0')}.${version}`;
+}
+
+// Look up ClinGen eRepo classifications for a GRCh37 genomic HGVS string
+// ("chr7:g.140453136A>T"). Returns { total, entries: [{ gene, classification,
+// panel, published, caid, url }] } or null when the variant has no
+// expert-panel record (the common case — most variants are not VCEP-curated).
+async function fetchClingenErepo(gVariant) {
+    const m = String(gVariant || '').match(/^chr([0-9XY]+):g\.(.+)$/i);
+    if (!m) return null;
+    const acc = grch37NcAccession(m[1]);
+    if (!acc) return null;
+    const hgvs = `${acc}:g.${m[2]}`;
+    const url = `https://erepo.clinicalgenome.org/evrepo/api/classifications?hgvs=${encodeURIComponent(hgvs)}`;
+    const res = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.clingen);
+    if (!res.ok) throw new Error(`ClinGen eRepo request failed (${res.status})`);
+    const data = await res.json();
+    const records = Array.isArray(data?.variantInterpretations) ? data.variantInterpretations : [];
+    if (records.length === 0) return null;
+    const entries = records.slice(0, 3).map((rec) => {
+        const guideline = (Array.isArray(rec.guidelines) ? rec.guidelines : [])[0] || {};
+        const agent = (Array.isArray(guideline.agents) ? guideline.agents : [])[0] || {};
+        return {
+            gene: rec.gene?.label || '',
+            classification: guideline.outcome?.label || agent.outcome?.label || '',
+            panel: agent.affiliation || '',
+            published: rec.publishedDate || '',
+            caid: rec.caid || '',
+            // The API @id maps 1:1 onto the human-readable UI page.
+            url: String(rec['@id'] || '').replace('/api/interpretation/', '/ui/classification/')
+        };
+    }).filter((e) => e.classification);
+    if (entries.length === 0) return null;
+    return { total: records.length, entries };
+}
+
+/*
+ * ── gnomAD gene constraint ──────────────────────────────────────────────────
+ *
+ * pLI / LOEUF / missense-Z say how tolerant a gene is to loss-of-function and
+ * missense variation — crucial context when interpreting truncating variants.
+ * One CORS-open GraphQL query against the gnomAD API (v2, GRCh37 — the
+ * exome-heavy dataset constraint was computed on).
+ */
+async function fetchGnomadConstraint(gene) {
+    const query = `query($symbol: String!) {
+        gene(gene_symbol: $symbol, reference_genome: GRCh37) {
+            gnomad_constraint { pli oe_lof oe_lof_upper mis_z oe_mis syn_z }
+        }
+    }`;
+    const res = await fetchWithTimeout('https://gnomad.broadinstitute.org/api', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ query, variables: { symbol: gene } })
+    }, API_TIMEOUT_MS.gnomadV4);
+    if (!res.ok) throw new Error(`gnomAD constraint request failed (${res.status})`);
+    const data = await res.json();
+    return data?.data?.gene?.gnomad_constraint || null;
+}
+
+// Append a compact "Gene constraint" section to a card's content element.
+// Stored in extras.gnomad_constraint for the AI-review payload.
+function appendGnomadConstraintSection(contentEl, gene, extras) {
+    if (!gene || !contentEl) return;
+    const wrap = document.createElement('div');
+    contentEl.appendChild(wrap);
+    fetchGnomadConstraint(gene).then((c) => {
+        if (!c) return; // gene unknown to gnomAD — say nothing
+        extras.gnomad_constraint = { gene, ...c };
+        const divider = document.createElement('hr');
+        divider.style.cssText = 'margin:0.5rem 0;border:none;border-top:1px solid #e5e7eb;';
+        wrap.appendChild(divider);
+        const header = document.createElement('div');
+        header.style.cssText = 'font-size:0.78rem;font-weight:600;color:#6b7280;margin-bottom:0.2rem;';
+        header.textContent = `Gene constraint · ${gene} (gnomAD v2)`;
+        wrap.appendChild(header);
+        const fmt = (v, digits = 2) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '—' : Number(v).toFixed(digits));
+        const line = document.createElement('div');
+        line.style.cssText = 'font-size:0.84rem;';
+        line.title = 'pLI ≥0.9 and LOEUF <0.35 suggest intolerance to loss-of-function; missense Z >3 suggests missense constraint. o/e = observed/expected.';
+        line.textContent = `pLI ${fmt(c.pli)} · LOEUF ${fmt(c.oe_lof_upper)} · missense Z ${fmt(c.mis_z)} · o/e mis ${fmt(c.oe_mis)}`;
+        wrap.appendChild(line);
+    }).catch((err) => {
+        console.warn('gnomAD constraint fetch failed', err);
+    });
+}
+
+/*
+ * ── DGIdb drug–gene interactions ────────────────────────────────────────────
+ *
+ * Aggregated interaction claims (approved and investigational compounds) from
+ * DGIdb's CORS-open GraphQL API. Rendered as a tab of the FDA drugs card,
+ * clearly labelled — it complements, not replaces, the FDA-approval views.
+ */
+async function fetchDgidbInteractions(gene) {
+    const query = `query($names: [String!]) {
+        genes(names: $names) {
+            nodes {
+                name
+                interactions {
+                    drug { name approved }
+                    interactionScore
+                    interactionTypes { type directionality }
+                    sources { sourceDbName }
+                }
+            }
+        }
+    }`;
+    const res = await fetchWithTimeout('https://dgidb.org/api/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ query, variables: { names: [gene] } })
+    }, API_TIMEOUT_MS.dgidb);
+    if (!res.ok) throw new Error(`DGIdb request failed (${res.status})`);
+    const data = await res.json();
+    const node = data?.data?.genes?.nodes?.[0];
+    if (!node) return null;
+    return (Array.isArray(node.interactions) ? node.interactions : [])
+        .map((i) => ({
+            drug: i?.drug?.name || '',
+            approved: Boolean(i?.drug?.approved),
+            score: Number(i?.interactionScore) || 0,
+            types: (Array.isArray(i?.interactionTypes) ? i.interactionTypes : []).map((t) => t?.type).filter(Boolean),
+            sources: (Array.isArray(i?.sources) ? i.sources : []).map((s) => s?.sourceDbName).filter(Boolean)
+        }))
+        .filter((i) => i.drug)
+        .sort((a, b) => b.score - a.score);
+}
+
+// DGIdb tab panel for the FDA drugs card. Results land in extras.dgidb for the
+// AI-review payload.
+function renderDgidbPanel(panel, gene, extras) {
+    const linkEl = document.createElement('a');
+    linkEl.href = `https://dgidb.org/results?searchType=gene&searchTerms=${encodeURIComponent(gene)}`;
+    linkEl.target = '_blank';
+    linkEl.rel = 'noopener noreferrer';
+    linkEl.textContent = 'DGIdb drug–gene interaction database ↗';
+    panel.appendChild(linkEl);
+
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+    note.textContent = `Aggregated interaction claims for ${gene} — includes investigational compounds, not only FDA-approved drugs.`;
+    panel.appendChild(note);
+
+    const resultsDiv = document.createElement('div');
+    const spinner = document.createElement('div');
+    spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+    spinner.textContent = 'Loading DGIdb interactions…';
+    resultsDiv.appendChild(spinner);
+    panel.appendChild(resultsDiv);
+
+    fetchDgidbInteractions(gene).then((interactions) => {
+        resultsDiv.innerHTML = '';
+        if (!interactions || interactions.length === 0) {
+            resultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No DGIdb interactions found for ${escapeHtml(gene)}.</div>`;
+            return;
+        }
+        extras.dgidb = {
+            gene,
+            interaction_count: interactions.length,
+            note: 'Sorted by DGIdb interaction score; includes investigational compounds.',
+            top_interactions: interactions.slice(0, 25)
+        };
+        const countEl = document.createElement('div');
+        countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
+        const approvedCount = interactions.filter((i) => i.approved).length;
+        countEl.textContent = `${interactions.length} interaction claims (${approvedCount} with approved drugs), by interaction score`;
+        resultsDiv.appendChild(countEl);
+
+        const DGIDB_PREVIEW = 8;
+        const buildRow = (i) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'font-size:0.82rem;margin-bottom:4px;';
+            const bits = [
+                i.approved ? 'approved' : 'investigational',
+                i.types.length ? i.types.join('/') : null,
+                i.score ? `score ${i.score.toFixed(2)}` : null,
+                i.sources.length ? `${i.sources.length} source${i.sources.length === 1 ? '' : 's'}` : null
+            ].filter(Boolean);
+            row.innerHTML = `<strong>${escapeHtml(i.drug)}</strong> <span style="color:#6b7280;display:inline">— ${escapeHtml(bits.join(' · '))}</span>`;
+            return row;
+        };
+        interactions.slice(0, DGIDB_PREVIEW).forEach((i) => resultsDiv.appendChild(buildRow(i)));
+        if (interactions.length > DGIDB_PREVIEW) {
+            const more = document.createElement('details');
+            const moreSum = document.createElement('summary');
+            moreSum.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
+            moreSum.textContent = `Show ${Math.min(interactions.length - DGIDB_PREVIEW, 25)} more…`;
+            more.appendChild(moreSum);
+            interactions.slice(DGIDB_PREVIEW, DGIDB_PREVIEW + 25).forEach((i) => more.appendChild(buildRow(i)));
+            resultsDiv.appendChild(more);
+        }
+        const srcNote = document.createElement('div');
+        srcNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+        srcNote.textContent = 'Source: DGIdb (aggregated from CIViC, CKB, DTC, and others). Interaction claims are not efficacy or approval evidence — verify before clinical use.';
+        resultsDiv.appendChild(srcNote);
+    }).catch((err) => {
+        console.warn('DGIdb fetch failed', err);
+        resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">DGIdb unavailable.</div>';
+    });
 }
 
 // Guidelines card. `getGene` is resolved at selection time (the variant mode's
@@ -5577,6 +6028,9 @@ document.addEventListener('DOMContentLoaded', () => {
             // ── Card: Clinical Trials ──────────────────────────────────────
             createClinicalTrialsCard({ container: cardsContainer, gene, tumorType, cardCache: geneOnlyCardCache });
 
+            // ── Card: Cancer Prevalence (cBioPortal cohort frequency) ──────
+            createCbioportalCard({ container: cardsContainer, gene, proteinChange: '', extras: geneOnlyAiExtras });
+
             // ── Card: Guidelines ───────────────────────────────────────────
             createGuidelinesCard({ container: cardsContainer, tumorType, getGene: () => gene, extras: geneOnlyAiExtras });
 
@@ -7313,6 +7767,25 @@ document.addEventListener('DOMContentLoaded', () => {
                     recNote.textContent = "Matched via live ClinVar query — MyVariant.info's ClinVar mirror has no record for this allele (expected for somatic-only entries).";
                     content.appendChild(recNote);
                 }
+                // ClinGen expert-panel (VCEP) classification, when one exists —
+                // higher-confidence than aggregate ClinVar for covered variants.
+                // Most variants have no VCEP record; the line only renders on a hit.
+                if (!codonOnlyResolutionGlobal && isGenomicVariant(gVariant)) {
+                    const clingenDiv = document.createElement('div');
+                    content.appendChild(clingenDiv);
+                    fetchClingenErepo(gVariant).then((cg) => {
+                        if (!cg) return;
+                        aiReviewExtras.clingen_erepo = cg;
+                        const first = cg.entries[0];
+                        const extraCount = cg.total - 1;
+                        const href = safeUrl(first.url);
+                        clingenDiv.innerHTML = '<strong>ClinGen expert panel:</strong> '
+                            + `<span style="font-weight:600;display:inline;color:${getPathogenicityColor(first.classification)}">${escapeHtml(first.classification)}</span>`
+                            + `${first.panel ? ` — ${escapeHtml(first.panel)}` : ''}${first.published ? ` (${escapeHtml(first.published)})` : ''}`
+                            + (href ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">View ↗</a>` : '')
+                            + (extraCount > 0 ? ` <span style="color:#6b7280;display:inline">+${extraCount} more condition${extraCount === 1 ? '' : 's'}</span>` : '');
+                    }).catch((err) => { console.warn('ClinGen eRepo fetch failed', err); });
+                }
                 // Conditions summary (show up to 3, rest collapsed)
                 if (conditionsList.length > 0) {
                     const spanCond = document.createElement('div');
@@ -8140,6 +8613,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 v4Section.appendChild(v4Loading);
                 content.appendChild(v4Section);
 
+                // ── Gene constraint (pLI / LOEUF / missense Z) ───────────────────
+                {
+                    const genesForConstraint = geneNames ? geneNames.split(',').map((g) => g.trim()).filter(Boolean) : [];
+                    let constraintGene = genesForConstraint.find((g) => !isChromosomeLikeGeneSymbol(g)) || '';
+                    if (!constraintGene && geneHintGlobal && !isChromosomeLikeGeneSymbol(geneHintGlobal)) constraintGene = geneHintGlobal;
+                    appendGnomadConstraintSection(content, constraintGene, aiReviewExtras);
+                }
+
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
 
@@ -8549,6 +9030,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
             }
+            // Card: Cancer Prevalence (cBioPortal cohort frequency)
+            {
+                const genesForCbio = geneNames ? geneNames.split(',').map((g) => g.trim()).filter(Boolean) : [];
+                let cbioGene = genesForCbio.find((g) => !isChromosomeLikeGeneSymbol(g)) || '';
+                if (!cbioGene && geneHintGlobal && !isChromosomeLikeGeneSymbol(geneHintGlobal)) cbioGene = geneHintGlobal;
+                createCbioportalCard({
+                    container: cardsContainer,
+                    gene: cbioGene,
+                    proteinChange: protein || targetProtGlobal || '',
+                    extras: aiReviewExtras
+                });
+            }
             // Card: TP53 Mutation Database (shown only for TP53 variants)
             if (isTp53Gene(geneNames)) {
                 const tp53Card = document.createElement('div');
@@ -8931,11 +9424,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (cached != null && isValid(cached)) return Promise.resolve(cached);
                     return fetcher();
                 };
-                const pubmedFromCacheOrFetch = (key, term) => cachedOr(
+                const pubmedFromCacheOrFetch = (key, term, variantQuery = null) => cachedOr(
                     key,
                     (c) => Array.isArray(c.articles) && c.articles.length > 0,
-                    () => (term ? fetchPubmedArticles(term, 5) : Promise.resolve({ total: 0, articles: [] }))
+                    () => (term || variantQuery ? fetchPubmedArticles(term, 5, variantQuery) : Promise.resolve({ total: 0, articles: [] }))
                 );
+                const aiPubmedVariantQuery = aiReviewSearchVariantTerm
+                    ? { gene: aiReviewGene, variant: aiReviewSearchVariantTerm }
+                    : null;
                 const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation, await getResolvedVcfAlleles());
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
@@ -8960,12 +9456,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     ['spliceai_lookup', cachedOr('spliceai_lookup',
                         (c) => typeof c === 'object' && !c.error && Boolean(c.data),
                         () => (spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)))],
-                    ['pubmed', pubmedTerm ? pubmedFromCacheOrFetch('pubmed', pubmedTerm) : Promise.resolve({ total: 0, articles: [] })],
+                    ['pubmed', pubmedTerm ? pubmedFromCacheOrFetch('pubmed', pubmedTerm, aiPubmedVariantQuery) : Promise.resolve({ total: 0, articles: [] })],
                     ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? pubmedFromCacheOrFetch('pubmed_tumor_type', pubmedTumorTerm) : Promise.resolve(null)],
                     ['pubmed_variant_tumor_type', pubmedVariantTumorTerm
                         && pubmedVariantTumorTerm !== pubmedTerm
                         && pubmedVariantTumorTerm !== pubmedTumorTerm
-                        ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm)
+                        ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm,
+                            aiPubmedVariantQuery ? { ...aiPubmedVariantQuery, extra: tumorType } : null)
                         : Promise.resolve(null)],
                     // The openFDA card stores the same payload shape under `openfda`;
                     // reuse it rather than re-paging up to 10 requests of label text.
@@ -9286,13 +9783,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     const pmVariantTumorSearchTerm = (tumorType && searchVariantTerm)
                         ? [firstGene, searchVariantTerm, tumorType].filter(Boolean).join(' ')
                         : '';
-                    const pmTabs = [{ label: 'Gene + Variant', term: pmSearchTerm, extraKey: 'pubmed' }];
+                    // Variant tabs go through LitVar2 (all nomenclature spellings)
+                    // with the term search as automatic fallback; the tumor-only
+                    // tab stays a plain term search.
+                    const pmVariantQuery = searchVariantTerm
+                        ? { gene: firstGene, variant: searchVariantTerm }
+                        : null;
+                    const pmTabs = [{ label: 'Gene + Variant', term: pmSearchTerm, extraKey: 'pubmed', variantQuery: pmVariantQuery }];
                     if (pmTumorSearchTerm && pmSearchTerm !== pmTumorSearchTerm) {
                         pmTabs.push({ label: 'Gene + Tumor Type', term: pmTumorSearchTerm, extraKey: 'pubmed_tumor_type' });
                         if (pmVariantTumorSearchTerm
                             && pmVariantTumorSearchTerm !== pmSearchTerm
                             && pmVariantTumorSearchTerm !== pmTumorSearchTerm) {
-                            pmTabs.push({ label: 'Gene + Variant + Tumor Type', term: pmVariantTumorSearchTerm, extraKey: 'pubmed_variant_tumor_type' });
+                            pmTabs.push({
+                                label: 'Gene + Variant + Tumor Type',
+                                term: pmVariantTumorSearchTerm,
+                                extraKey: 'pubmed_variant_tumor_type',
+                                variantQuery: pmVariantQuery ? { ...pmVariantQuery, extra: tumorType } : null
+                            });
                         }
                     }
                     createPubmedCard({ container: cardsContainer, tabs: pmTabs, extras: aiReviewExtras });

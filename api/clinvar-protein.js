@@ -39,6 +39,7 @@ function collectTraitNames(rec) {
 }
 
 import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache, setNoStore } from './_cache.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -74,6 +75,9 @@ export default async function handler(req, res) {
     const retmax = Math.min(Math.max(1, parseInt(retmaxParam, 10) || 200), 500);
     const apiKey = process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';
 
+    // Successful lookups are shared across users — let Vercel's CDN serve
+    // repeats without re-invoking the function or hitting the upstream.
+    setEdgeCache(res, 21600);
     try {
         // ClinVar's own search help recommends querying same-protein-change
         // variants by gene symbol plus a one- or three-letter protein change
@@ -124,6 +128,7 @@ export default async function handler(req, res) {
 
         return res.status(200).json({ variants, total: totalInClinVar });
     } catch (err) {
+        setNoStore(res); // transient failure — never pin it in the CDN
         console.error('ClinVar protein proxy error:', err);
         return res.status(502).json({ error: 'ClinVar protein lookup failed', detail: err.message });
     }

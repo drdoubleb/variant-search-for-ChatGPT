@@ -52,10 +52,49 @@ async function installRoutes(page) {
         if (/myvariant\.info\/v1\/variant/.test(url)) return json(BRAF_ANNOTATION);
         if (/cancer-types\.php/.test(url)) return json({ count: 1, cancer_types: [{ name: 'Melanoma', record_count: 3, aliases: ['melanoma'] }] });
         if (/guidelines\/api\/search\.php/.test(url)) return json({ count: 0, results: [], query: {} });
-        if (/api\/pubmed/.test(url)) return json({ total: 0, articles: [] });
+        if (/cbioportal\.org\/api\/genes\//.test(url)) return json({ entrezGeneId: 673, hugoGeneSymbol: 'BRAF' });
+        if (/cbioportal\.org\/api\/molecular-profiles\/.*\/mutations\/fetch/.test(url)) return json([
+            { sampleId: 'S1', proteinChange: 'V600E' },
+            { sampleId: 'S2', proteinChange: 'V600E' },
+            { sampleId: 'S3', proteinChange: 'G469A' }
+        ]);
+        if (/cbioportal\.org\/api\/clinical-data\/fetch/.test(url)) return json([
+            { sampleId: 'S1', clinicalAttributeId: 'CANCER_TYPE', value: 'Melanoma' },
+            { sampleId: 'S2', clinicalAttributeId: 'CANCER_TYPE', value: 'Thyroid Cancer' },
+            { sampleId: 'S3', clinicalAttributeId: 'CANCER_TYPE', value: 'Melanoma' }
+        ]);
+        if (/api\/pubmed/.test(url)) {
+            // Variant queries get the LitVar2-shaped answer; term queries stay empty.
+            return url.includes('variant=')
+                ? json({
+                    total: 12,
+                    articles: [{ pmid: '1', title: 'Mock LitVar paper', authors: 'A, B et al.', journal: 'J', year: '2024', abstract: '' }],
+                    litvar: { id: '@VARIANT_p.V600E_BRAF_human', name: 'p.V600E', rsid: 'rs113488022', url: 'https://www.ncbi.nlm.nih.gov/research/litvar2/docsum?variant=litvar%40rs113488022%23%23' },
+                    backend: 'litvar'
+                })
+                : json({ total: 0, articles: [], backend: 'term' });
+        }
         if (/api\/clinvar/.test(url)) return json({ variants: [], total: 0 });
         if (/api\/clinicaltrials/.test(url)) return json({ total: 0, studies: [] });
         if (/api\.fda\.gov/.test(url)) return json({ meta: { results: { total: 0 } }, results: [] });
+        if (/erepo\.clinicalgenome\.org/.test(url)) return json({
+            variantInterpretations: [{
+                gene: { label: 'BRAF' },
+                '@id': 'https://erepo.genome.network/evrepo/api/interpretation/CA123/MONDO:1/001',
+                caid: 'CAR:CA123',
+                publishedDate: '2024-01-01',
+                guidelines: [{ outcome: { label: 'Pathogenic' }, agents: [{ affiliation: 'Mock VCEP', outcome: { label: 'Pathogenic' } }] }]
+            }]
+        });
+        if (/gnomad\.broadinstitute\.org\/api/.test(url)) return json({
+            data: { gene: { gnomad_constraint: { pli: 0.9999, oe_lof: 0.1, oe_lof_upper: 0.209, mis_z: 3.72, oe_mis: 0.487, syn_z: -0.22 } } }
+        });
+        if (/dgidb\.org\/api\/graphql/.test(url)) return json({
+            data: { genes: { nodes: [{ name: 'BRAF', interactions: [
+                { drug: { name: 'DABRAFENIB', approved: true }, interactionScore: 0.5, interactionTypes: [{ type: 'inhibitor' }], sources: [{ sourceDbName: 'CKB' }] },
+                { drug: { name: 'MOCKDRUG', approved: false }, interactionScore: 0.1, interactionTypes: [], sources: [] }
+            ] }] } }
+        });
         return json({});
     });
 }
@@ -84,15 +123,19 @@ async function installRoutes(page) {
         await page.waitForTimeout(3000);
         const titles = await page.$$eval('#cardsContainer .card > h3', els => els.map(e => e.textContent));
         check('gene-only: card set', JSON.stringify(titles) === JSON.stringify(
-            ['CIViC', 'OncoKB', 'PubMed', 'FDA-Approved Drugs (by gene)', 'Clinical Trials', 'Guidelines', 'Optional AI Review']),
+            ['CIViC', 'OncoKB', 'PubMed', 'FDA-Approved Drugs (by gene)', 'Clinical Trials', 'Cancer Prevalence', 'Guidelines', 'Optional AI Review']),
             JSON.stringify(titles));
+        const cbioGeneText = await page.$eval('[data-card="cancer-prevalence"]', el => el.textContent);
+        check('gene-only: prevalence gene stats', /BRAF mutated:\s*3 of 10,945/.test(cbioGeneText.replace(/\s+/g, ' ')), cbioGeneText.slice(0, 200));
         const pmText = await page.$eval('[data-card="pubmed"]', el => el.textContent);
         check('gene-only: PubMed panel', /Search PubMed/.test(pmText) && /Query: "BRAF"/.test(pmText), pmText.slice(0, 120));
         const fdaTabs = await page.$$eval('[data-card="fda-approved-drugs-by-gene"] .card-tab-btn', els => els.map(e => e.textContent));
-        check('gene-only: FDA tabs', JSON.stringify(fdaTabs) === JSON.stringify(['Companion Dx', 'openFDA Labels', 'BBKB']), JSON.stringify(fdaTabs));
+        check('gene-only: FDA tabs', JSON.stringify(fdaTabs) === JSON.stringify(['Companion Dx', 'openFDA Labels', 'BBKB', 'DGIdb']), JSON.stringify(fdaTabs));
         await page.click('[data-card="fda-approved-drugs-by-gene"] .card-tab-btn:nth-child(2)');
         const activeTab = await page.$eval('[data-card="fda-approved-drugs-by-gene"] .card-tab-btn.active', el => el.textContent);
         check('gene-only: FDA tab switch', activeTab === 'openFDA Labels', activeTab);
+        const dgidbText = (await page.$eval('[data-card="fda-approved-drugs-by-gene"]', el => el.textContent)).replace(/\s+/g, ' ');
+        check('gene-only: DGIdb panel populated', /DABRAFENIB.*approved · inhibitor · score 0\.50/.test(dgidbText), dgidbText.slice(0, 300));
         const ctText = await page.$eval('[data-card="clinical-trials"]', el => el.textContent);
         check('gene-only: Trials panel', /Search ClinicalTrials.gov/.test(ctText) && /Query: "BRAF"/.test(ctText), ctText.slice(0, 120));
         const glText = await page.$eval('[data-card="guidelines"]', el => el.textContent);
@@ -109,8 +152,18 @@ async function installRoutes(page) {
         await page.waitForTimeout(3000);
         const titles = await page.$$eval('#cardsContainer .card > h3', els => els.map(e => e.textContent));
         check('variant: extracted cards present',
-            ['PubMed', 'FDA-Approved Drugs (by gene)', 'Clinical Trials', 'Guidelines', 'Optional AI Review']
+            ['PubMed', 'FDA-Approved Drugs (by gene)', 'Clinical Trials', 'Cancer Prevalence', 'Guidelines', 'Optional AI Review']
                 .every(t => titles.includes(t)), JSON.stringify(titles));
+        const cbioText = (await page.$eval('[data-card="cancer-prevalence"]', el => el.textContent)).replace(/\s+/g, ' ');
+        check('variant: prevalence variant stats', /V600E specifically:\s*2 tumors/.test(cbioText), cbioText.slice(0, 250));
+        check('variant: prevalence tumor-type breakdown (only requested samples counted)',
+            /Tumor types with V600E:.*Melanoma \(1\) · Thyroid Cancer \(1\)/.test(cbioText), cbioText.slice(0, 320));
+        const pmLitvarText = (await page.$eval('[data-card="pubmed"]', el => el.textContent)).replace(/\s+/g, ' ');
+        check('variant: LitVar2 provenance line', /Variant-matched via LitVar2: p\.V600E \(rs113488022\)/.test(pmLitvarText), pmLitvarText.slice(0, 250));
+        const clinvarText = (await page.$eval('[data-card="clinvar"]', el => el.textContent)).replace(/\s+/g, ' ');
+        check('variant: ClinGen expert-panel line', /ClinGen expert panel: Pathogenic — Mock VCEP \(2024-01-01\)/.test(clinvarText), clinvarText.slice(0, 300));
+        const gnomadText = (await page.$eval('[data-card="gnomad"]', el => el.textContent)).replace(/\s+/g, ' ');
+        check('variant: gnomAD gene constraint', /Gene constraint · BRAF.*pLI 1\.00 · LOEUF 0\.21 · missense Z 3\.72/.test(gnomadText), gnomadText.slice(0, 300));
         const variantText = await page.$eval('[data-card="variant"]', el => el.textContent);
         check('variant: canonical cDNA is c.1799T>A with recoder down',
             /c\.:\s*c\.1799T>A/.test(variantText.replace(/\s+/g, ' ')), variantText.slice(0, 250));
