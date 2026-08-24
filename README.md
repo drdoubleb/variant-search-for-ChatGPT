@@ -237,6 +237,32 @@ Rate limiting uses [`@upstash/ratelimit`](https://github.com/upstash/ratelimit-j
 The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV/nearby-variant results, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
 
 
+## Variant-normalized literature (LitVar2)
+
+A free-text PubMed search for "BRAF V600E" misses papers that write the same
+variant as `p.Val600Glu`, `c.1799T>A`, or `rs113488022`. When the lookup has a
+specific variant, the PubMed card's variant tabs go through NCBI's **LitVar2**
+(PubTator3 API) instead: the query is resolved to a variant entity, and the
+entity search returns relevance-ranked articles across every nomenclature
+spelling — optionally refined with the tumor type. The card shows a provenance
+line naming the matched entity/rsID and deep-links to LitVar2; when no entity
+matches (or the service is down) the plain term search runs unchanged. This
+lives inside `api/pubmed.js` (`gene`/`variant`/`extra` params), so no extra
+serverless function is spent.
+
+## Cancer Prevalence card (cBioPortal)
+
+Answers "how often is this variant seen, and in which tumor types?" from
+cBioPortal's public API, which is CORS-open and therefore called directly from
+the browser (no serverless function). v1 queries the **MSK-IMPACT 2017** cohort
+(10,945 prospectively sequenced advanced-cancer tumors): gene mutation
+frequency, the exact protein change's frequency (single-letter-normalized
+match), the gene's most frequent changes, and a tumor-type breakdown for the
+matched variant. The card labels the cohort explicitly — these are
+single-institution advanced-cancer cohort frequencies, not population
+prevalence. Results are included in the AI-review payload under
+`supplemental_card_data.cbioportal_prevalence`.
+
 ## Proxy origin allowlist
 
 Every serverless proxy (not just `ai-review`) now checks the browser `Origin`

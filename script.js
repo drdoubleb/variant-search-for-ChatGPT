@@ -127,6 +127,7 @@ const API_TIMEOUT_MS = {
     clinicalTrials: 20000,
     spliceai: 25000,
     aiReview: 60000,
+    cbioportal: 15000,
     openFda: 12000,
     ensemblSequence: 8000,
     ensemblLookup: 10000
@@ -3386,6 +3387,221 @@ function createClinicalTrialsCard({ container, gene, tumorType, cardCache }) {
     return ctCard;
 }
 
+/*
+ * ── Cancer Prevalence card (cBioPortal) ─────────────────────────────────────
+ *
+ * "How often is this variant seen, and in which tumor types?" answered from
+ * cBioPortal's public API (CORS-open — called directly from the browser, no
+ * serverless function spent). v1 queries one large pan-cancer cohort,
+ * MSK-IMPACT 2017 (10,945 prospectively sequenced tumors), which is frozen —
+ * hence the hard-coded denominator — and clearly labels the source.
+ */
+const CBIOPORTAL_API = 'https://www.cbioportal.org/api';
+const CBIOPORTAL_STUDY = {
+    id: 'msk_impact_2017',
+    name: 'MSK-IMPACT 2017',
+    sampleListId: 'msk_impact_2017_all',
+    profileId: 'msk_impact_2017_mutations',
+    totalSamples: 10945, // allSampleCount of the frozen study
+    url: 'https://www.cbioportal.org/study/summary?id=msk_impact_2017'
+};
+
+async function fetchCbioportalGeneMutations(gene) {
+    const geneRes = await fetchWithTimeout(
+        `${CBIOPORTAL_API}/genes/${encodeURIComponent(gene)}`,
+        { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.cbioportal);
+    if (!geneRes.ok) return null; // unknown symbol → no card data
+    const geneData = await geneRes.json();
+    const entrez = Number(geneData && geneData.entrezGeneId);
+    if (!Number.isInteger(entrez) || entrez <= 0) return null;
+    const mutRes = await fetchWithTimeout(
+        `${CBIOPORTAL_API}/molecular-profiles/${CBIOPORTAL_STUDY.profileId}/mutations/fetch?projection=SUMMARY`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ sampleListId: CBIOPORTAL_STUDY.sampleListId, entrezGeneIds: [entrez] })
+        }, API_TIMEOUT_MS.cbioportal);
+    if (!mutRes.ok) throw new Error(`cBioPortal mutations fetch failed (${mutRes.status})`);
+    const mutations = await mutRes.json();
+    return { entrez, mutations: Array.isArray(mutations) ? mutations : [] };
+}
+
+// Resolve CANCER_TYPE for a set of sample IDs. Capped so a very common gene
+// (TP53) cannot post a giant identifier list; callers note when capped.
+async function fetchCbioportalCancerTypes(sampleIds, cap = 1000) {
+    const ids = sampleIds.slice(0, cap);
+    if (ids.length === 0) return {};
+    const res = await fetchWithTimeout(
+        `${CBIOPORTAL_API}/clinical-data/fetch?clinicalDataType=SAMPLE&projection=SUMMARY`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({
+                attributeIds: ['CANCER_TYPE'],
+                identifiers: ids.map((id) => ({ entityId: id, studyId: CBIOPORTAL_STUDY.id }))
+            })
+        }, API_TIMEOUT_MS.cbioportal);
+    if (!res.ok) throw new Error(`cBioPortal clinical-data fetch failed (${res.status})`);
+    const rows = await res.json();
+    const bySample = {};
+    (Array.isArray(rows) ? rows : []).forEach((r) => {
+        if (r && r.sampleId && r.value) bySample[r.sampleId] = r.value;
+    });
+    return bySample;
+}
+
+// Cancer Prevalence card. `proteinChange` (optional) is matched against the
+// cohort's protein changes after single-letter normalization; without it the
+// card shows gene-level prevalence only. Results land in
+// extras.cbioportal_prevalence for the AI-review payload.
+function createCbioportalCard({ container, gene, proteinChange, extras }) {
+    if (!gene) return null;
+    const card = document.createElement('div');
+    card.className = 'card';
+    const title = document.createElement('h3');
+    title.textContent = 'Cancer Prevalence';
+    applyCardTheme(card, 'Cancer Prevalence');
+    card.appendChild(title);
+    const content = document.createElement('div');
+    content.className = 'card-content';
+
+    const sourceLine = document.createElement('div');
+    sourceLine.style.cssText = 'font-size:0.78rem;color:#6b7280;margin-bottom:4px;';
+    sourceLine.textContent = `${CBIOPORTAL_STUDY.name} · ${CBIOPORTAL_STUDY.totalSamples.toLocaleString()} sequenced tumors (cBioPortal)`;
+    content.appendChild(sourceLine);
+
+    const linkEl = document.createElement('a');
+    linkEl.href = `https://www.cbioportal.org/results?cancer_study_list=${encodeURIComponent(CBIOPORTAL_STUDY.id)}&gene_list=${encodeURIComponent(gene)}`;
+    linkEl.target = '_blank';
+    linkEl.rel = 'noopener noreferrer';
+    linkEl.textContent = `View ${gene} on cBioPortal ↗`;
+    content.appendChild(linkEl);
+
+    const resultsDiv = document.createElement('div');
+    resultsDiv.style.cssText = 'margin-top:0.4rem;';
+    const spinner = document.createElement('div');
+    spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+    spinner.textContent = 'Loading cohort prevalence…';
+    resultsDiv.appendChild(spinner);
+    content.appendChild(resultsDiv);
+    card.appendChild(content);
+    if (container) container.appendChild(card);
+
+    const pct = (n, d) => (d > 0 ? `${((n / d) * 100).toFixed(n / d < 0.01 ? 2 : 1)}%` : 'n/a');
+    const line = (html) => {
+        const div = document.createElement('div');
+        div.style.cssText = 'font-size:0.86rem;margin-bottom:2px;';
+        div.innerHTML = html;
+        return div;
+    };
+
+    (async () => {
+        const data = await fetchCbioportalGeneMutations(gene);
+        if (!data) {
+            resultsDiv.innerHTML = `<div style="font-size:0.82rem;color:#9ca3af;">Gene "${escapeHtml(gene)}" not found in cBioPortal.</div>`;
+            return;
+        }
+        const { mutations } = data;
+        const total = CBIOPORTAL_STUDY.totalSamples;
+        const geneSamples = new Set(mutations.map((m) => m.sampleId).filter(Boolean));
+
+        const targetNorm = normaliseProteinForCivicMatch(proteinChange || '');
+        const matchedSampleSet = new Set();
+        const changeCounts = {};
+        mutations.forEach((m) => {
+            const change = String(m.proteinChange || '').trim();
+            if (change) changeCounts[change] = (changeCounts[change] || 0) + 1;
+            if (targetNorm && normaliseProteinForCivicMatch(change) === targetNorm && m.sampleId) {
+                matchedSampleSet.add(m.sampleId);
+            }
+        });
+
+        resultsDiv.innerHTML = '';
+        resultsDiv.appendChild(line(`<strong>${escapeHtml(gene)} mutated:</strong> ${geneSamples.size.toLocaleString()} of ${total.toLocaleString()} tumors (${pct(geneSamples.size, total)})`));
+        if (targetNorm) {
+            if (matchedSampleSet.size > 0) {
+                resultsDiv.appendChild(line(`<strong>${escapeHtml(targetNorm)} specifically:</strong> ${matchedSampleSet.size.toLocaleString()} tumors (${pct(matchedSampleSet.size, total)} of cohort, ${pct(matchedSampleSet.size, geneSamples.size)} of ${escapeHtml(gene)}-mutant)`));
+            } else {
+                resultsDiv.appendChild(line(`<strong>${escapeHtml(targetNorm)}:</strong> not seen in this cohort`));
+            }
+        }
+
+        // Top protein changes in the gene, for context.
+        const topChanges = Object.entries(changeCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+        if (topChanges.length > 0) {
+            const topDet = document.createElement('details');
+            const topSum = document.createElement('summary');
+            topSum.style.cssText = 'font-size:0.82rem;cursor:pointer;';
+            topSum.textContent = `Most frequent ${gene} changes in this cohort`;
+            topDet.appendChild(topSum);
+            const ul = document.createElement('ul');
+            ul.style.cssText = 'margin-top:0.3rem;font-size:0.82rem;padding-left:1.2rem;line-height:1.5;';
+            topChanges.forEach(([change, n]) => {
+                const li = document.createElement('li');
+                li.textContent = `${change} — ${n.toLocaleString()}`;
+                ul.appendChild(li);
+            });
+            topDet.appendChild(ul);
+            resultsDiv.appendChild(topDet);
+        }
+
+        // Tumor-type breakdown — for the exact variant when matched, else the gene.
+        const breakdownIds = matchedSampleSet.size > 0 ? [...matchedSampleSet] : [...geneSamples];
+        const breakdownLabel = matchedSampleSet.size > 0 ? targetNorm : `${gene}-mutant`;
+        let breakdown = [];
+        let breakdownCapped = false;
+        try {
+            const CAP = 1000;
+            breakdownCapped = breakdownIds.length > CAP;
+            const bySample = await fetchCbioportalCancerTypes(breakdownIds, CAP);
+            // Count only the samples we asked about, whatever the response holds.
+            const wanted = new Set(breakdownIds.slice(0, CAP));
+            const counts = {};
+            Object.entries(bySample).forEach(([sid, ct]) => {
+                if (wanted.has(sid)) counts[ct] = (counts[ct] || 0) + 1;
+            });
+            breakdown = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        } catch (e) {
+            console.warn('cBioPortal cancer-type breakdown failed', e);
+        }
+        if (breakdown.length > 0) {
+            const bkTitle = document.createElement('div');
+            bkTitle.style.cssText = 'font-size:0.84rem;font-weight:600;margin-top:0.4rem;';
+            bkTitle.textContent = `Tumor types with ${breakdownLabel}${breakdownCapped ? ' (first 1,000 samples)' : ''}:`;
+            resultsDiv.appendChild(bkTitle);
+            const shown = breakdown.slice(0, 8);
+            const bkDiv = document.createElement('div');
+            bkDiv.style.cssText = 'font-size:0.82rem;color:#374151;line-height:1.5;';
+            bkDiv.textContent = shown.map(([ct, n]) => `${ct} (${n.toLocaleString()})`).join(' · ')
+                + (breakdown.length > shown.length ? ` · +${breakdown.length - shown.length} more` : '');
+            resultsDiv.appendChild(bkDiv);
+        }
+
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+        note.textContent = 'Source: cBioPortal (MSK-IMPACT 2017, targeted panel of a single institution\'s advanced-cancer patients — not population prevalence). Research use only.';
+        resultsDiv.appendChild(note);
+
+        extras.cbioportal_prevalence = {
+            study: { id: CBIOPORTAL_STUDY.id, name: CBIOPORTAL_STUDY.name, total_samples: total },
+            gene,
+            gene_mutant_samples: geneSamples.size,
+            variant: targetNorm || null,
+            variant_samples: targetNorm ? matchedSampleSet.size : null,
+            top_protein_changes: topChanges.map(([change, n]) => ({ change, count: n })),
+            cancer_type_breakdown: breakdown.map(([cancer_type, n]) => ({ cancer_type, count: n })),
+            cancer_type_breakdown_for: breakdownLabel,
+            cancer_type_breakdown_capped: breakdownCapped,
+            note: 'Single-institution advanced-cancer sequencing cohort; frequencies are cohort prevalence, not population or incidence figures.'
+        };
+    })().catch((err) => {
+        console.warn('cBioPortal prevalence card failed', err);
+        resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">cBioPortal unavailable.</div>';
+    });
+
+    return card;
+}
+
 // Guidelines card. `getGene` is resolved at selection time (the variant mode's
 // gene may arrive after render); results land in extras.guidelines.
 function createGuidelinesCard({ container, tumorType, getGene, extras }) {
@@ -5604,6 +5820,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // ── Card: Clinical Trials ──────────────────────────────────────
             createClinicalTrialsCard({ container: cardsContainer, gene, tumorType, cardCache: geneOnlyCardCache });
+
+            // ── Card: Cancer Prevalence (cBioPortal cohort frequency) ──────
+            createCbioportalCard({ container: cardsContainer, gene, proteinChange: '', extras: geneOnlyAiExtras });
 
             // ── Card: Guidelines ───────────────────────────────────────────
             createGuidelinesCard({ container: cardsContainer, tumorType, getGene: () => gene, extras: geneOnlyAiExtras });
@@ -8576,6 +8795,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
+            }
+            // Card: Cancer Prevalence (cBioPortal cohort frequency)
+            {
+                const genesForCbio = geneNames ? geneNames.split(',').map((g) => g.trim()).filter(Boolean) : [];
+                let cbioGene = genesForCbio.find((g) => !isChromosomeLikeGeneSymbol(g)) || '';
+                if (!cbioGene && geneHintGlobal && !isChromosomeLikeGeneSymbol(geneHintGlobal)) cbioGene = geneHintGlobal;
+                createCbioportalCard({
+                    container: cardsContainer,
+                    gene: cbioGene,
+                    proteinChange: protein || targetProtGlobal || '',
+                    extras: aiReviewExtras
+                });
             }
             // Card: TP53 Mutation Database (shown only for TP53 variants)
             if (isTp53Gene(geneNames)) {
