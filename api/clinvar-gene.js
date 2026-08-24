@@ -12,6 +12,7 @@ import { ncbiFetchJson } from './_ncbi.js';
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
 import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache, setNoStore } from './_cache.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -37,6 +38,9 @@ export default async function handler(req, res) {
     const retmax = Math.min(Math.max(1, parseInt(retmaxParam, 10) || 500), 1000);
     const apiKey = process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';
 
+    // Successful lookups are shared across users — let Vercel's CDN serve
+    // repeats without re-invoking the function or hitting the upstream.
+    setEdgeCache(res, 21600);
     try {
         const term = `${safeGene}[gene] AND single nucleotide variant[variation type]`;
         const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=clinvar&retmode=json&retmax=${retmax}&term=${encodeURIComponent(term)}${apiKey}`;
@@ -79,6 +83,7 @@ export default async function handler(req, res) {
 
         return res.status(200).json({ variants, total: totalInClinVar });
     } catch (err) {
+        setNoStore(res); // transient failure — never pin it in the CDN
         console.error('ClinVar gene proxy error:', err);
         return res.status(502).json({ error: 'ClinVar gene lookup failed', detail: err.message });
     }

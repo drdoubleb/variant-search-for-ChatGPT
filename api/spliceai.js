@@ -26,6 +26,7 @@ function sanitizeInteger(value, fallback, min, max) {
 }
 
 import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache } from './_cache.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -66,6 +67,8 @@ export default async function handler(req, res) {
             return res.status(200).json({ error: `SpliceAI Lookup returned ${response.status}`, detail: text.slice(0, 500), variant, hg, distance, mask, bc });
         }
 
+        // SpliceAI scores are deterministic per variant — cache aggressively.
+        setEdgeCache(res, 604800);
         return res.status(200).json({ variant, hg, distance, mask, bc, data });
     } catch (err) {
         const message = err?.name === 'AbortError' ? 'SpliceAI Lookup request timed out' : (err.message || 'SpliceAI Lookup failed');

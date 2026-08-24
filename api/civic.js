@@ -257,6 +257,7 @@ function buildAssertions(matchedVariant, gene) {
 }
 
 import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache } from './_cache.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -277,6 +278,9 @@ export default async function handler(req, res) {
 
     const safeGene = String(gene).replace(/[^A-Za-z0-9\-_.]/g, '');
     if (!safeGene) return res.status(400).json({ error: 'Invalid gene name' });
+
+    // Gene-level CIViC data changes slowly; let the CDN serve repeats.
+    setEdgeCache(res, 86400);
 
     const { id: geneId, name: geneName, queryErrors } = await lookupGeneId(safeGene);
 

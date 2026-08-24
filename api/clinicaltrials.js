@@ -123,6 +123,7 @@ function mapStudy(study) {
 }
 
 import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache } from './_cache.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -223,6 +224,8 @@ export default async function handler(req, res) {
 
         const studies = filtered.map(mapStudy);
 
+        // Cache only real result sets — the error-shaped 200s above must stay fresh.
+        setEdgeCache(res, 21600);
         return res.status(200).json({
             total: studies.length,
             studies,

@@ -106,6 +106,7 @@ function parseAggregateClassifications(xml) {
 }
 
 import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache, setNoStore } from './_cache.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -123,6 +124,9 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Missing or invalid id parameter (must be numeric ClinVar variation ID)' });
     }
 
+    // Successful lookups are shared across users — let Vercel's CDN serve
+    // repeats without re-invoking the function or hitting the upstream.
+    setEdgeCache(res, 21600);
     try {
         // VCV efetch gives the full classification tree including per-condition somatic data.
         const vcvUrl = `${EUTILS_BASE}/efetch.fcgi?db=clinvar&rettype=vcv&is_variationid&id=${encodeURIComponent(id)}${apiKey()}`;
@@ -139,6 +143,7 @@ export default async function handler(req, res) {
             somaticConditions,
         });
     } catch (err) {
+        setNoStore(res); // transient failure — never pin it in the CDN
         console.error('ClinVar variant proxy error:', err);
         return res.status(502).json({ error: 'ClinVar variant lookup failed', detail: err.message });
     }

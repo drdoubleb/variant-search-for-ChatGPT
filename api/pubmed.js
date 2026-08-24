@@ -41,6 +41,7 @@ function parseAbstractsFromXml(xmlText) {
 }
 
 import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache, setNoStore } from './_cache.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -61,6 +62,9 @@ export default async function handler(req, res) {
     const apiKey = process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';
     const maxResults = Math.min(Math.max(1, parseInt(limit, 10) || 5), 20);
 
+    // Successful lookups are shared across users — let Vercel's CDN serve
+    // repeats without re-invoking the function or hitting the upstream.
+    setEdgeCache(res, 21600);
     try {
         // Step 1: esearch — get PubMed IDs ranked by relevance
         const searchUrl = `${EUTILS_BASE}/esearch.fcgi?db=pubmed&retmode=json&retmax=${maxResults}&sort=relevance&term=${encodeURIComponent(term)}${apiKey}`;
@@ -106,6 +110,7 @@ export default async function handler(req, res) {
 
         return res.status(200).json({ total, articles });
     } catch (err) {
+        setNoStore(res); // transient failure — never pin it in the CDN
         console.error('PubMed proxy error:', err);
         return res.status(502).json({ error: 'PubMed lookup failed', detail: err.message });
     }
