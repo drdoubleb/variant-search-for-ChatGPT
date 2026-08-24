@@ -230,15 +230,22 @@ function coordinateHasPosition(coord, pos) {
 
 async function fetchDatasetText() {
   const envUrl = process.env.TP53_MUTATION_DATASET_URL;
-  const discovered = await discoverDatasetUrls();
   // Priority: explicit env override → discovered current-release URLs → hard-coded r21.
-  const candidates = Array.from(new Set([
-    ...(envUrl ? [envUrl] : []),
-    ...discovered,
-    ...DEFAULT_DATASET_CANDIDATES
-  ]));
+  // Candidate groups are resolved lazily so a working env override skips the
+  // discovery scrape (an extra fetch of the download page) entirely.
+  const candidateGroups = [
+    async () => (envUrl ? [envUrl] : []),
+    discoverDatasetUrls,
+    async () => DEFAULT_DATASET_CANDIDATES
+  ];
   const debugAttempts = [];
-  for (const url of candidates) {
+  const tried = new Set();
+  for (const group of candidateGroups) {
+  let groupUrls = [];
+  try { groupUrls = await group(); } catch { groupUrls = []; }
+  for (const url of groupUrls) {
+    if (!url || tried.has(url)) continue;
+    tried.add(url);
     try {
       const res = await fetch(url, {
         headers: {
@@ -287,6 +294,7 @@ async function fetchDatasetText() {
       debugAttempts.push({ url, ok: false, reason: 'fetch exception' });
       // try next URL
     }
+  }
   }
   return { text: null, datasetUrl: null, debugAttempts };
 }
@@ -454,6 +462,8 @@ function buildMatches(rows, { protein, cdna, genomic }) {
   return matches;
 }
 
+import { rejectDisallowedOrigin } from './_origin.js';
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST,GET,OPTIONS');
@@ -474,6 +484,10 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
+
+  // Block third-party websites from using this deployment as their backend
+  // (no-Origin callers pass — see api/_origin.js).
+  if (rejectDisallowedOrigin(req, res)) return;
 
   try {
     const body = req.body || {};

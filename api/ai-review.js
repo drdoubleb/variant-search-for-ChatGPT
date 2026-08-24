@@ -21,41 +21,18 @@ import PROMPT_TEMPLATE from './_ai-review-prompt.js';
 import HUMAN_PROMPT_TEMPLATE from './_ai-review-prompt-human.js';
 import { checkRateLimits } from './_ratelimit.js';
 import { verifyTurnstile } from './_turnstile.js';
+import { isOriginAllowed } from './_origin.js';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODEL = 'openai/gpt-5-mini';
 
-// Browser origins permitted to spend the owner's key. The live frontend is on
-// Hostinger (drdoubleb.com); the Vercel host + previews are kept for testing.
-// Override with a comma-separated AI_ALLOWED_ORIGINS env var. Entries may be full
-// origins or "*." wildcards; "*" disables the check. Requests with no Origin header
-// (curl, server-to-server) are allowed through and left to the other layers.
-const DEFAULT_ALLOWED_ORIGINS = [
-    'https://drdoubleb.com',
-    'https://www.drdoubleb.com',
-    'https://variant-search-for-chat-gpt.vercel.app',
-    '*.vercel.app'
-];
-
-function parseAllowedOrigins() {
-    const env = process.env.AI_ALLOWED_ORIGINS;
-    if (env && env.trim()) return env.split(',').map((s) => s.trim()).filter(Boolean);
-    return DEFAULT_ALLOWED_ORIGINS;
-}
-
-function isOriginAllowed(origin) {
-    if (!origin) return true; // no browser Origin → handled by rate-limit/Turnstile
-    const allowed = parseAllowedOrigins();
-    if (allowed.includes('*')) return true;
-    let host;
-    try { host = new URL(origin).host; } catch { return false; }
-    return allowed.some((entry) => {
-        if (entry === origin) return true;
-        if (entry.startsWith('*.')) return host === entry.slice(2) || host.endsWith(entry.slice(1));
-        if (entry === 'localhost') return host === 'localhost' || host.startsWith('localhost:');
-        try { return new URL(entry).host === host; } catch { return false; }
-    });
-}
+// Browser origins permitted to spend the owner's key: the shared allowlist in
+// ./_origin.js (live Hostinger site, production Vercel host, and this
+// project's own previews — a bare "*.vercel.app" previously admitted every
+// Vercel-hosted site on the internet). Override with a comma-separated
+// AI_ALLOWED_ORIGINS env var ("*" disables the check). Requests with no Origin
+// header (curl, server-to-server) are allowed through and left to the other
+// layers.
 
 function clientIp(req) {
     const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
@@ -207,7 +184,7 @@ export default async function handler(req, res) {
     }
 
     // Origin allowlist: block browser calls from other sites spending the owner key.
-    if (!isOriginAllowed(req.headers.origin)) {
+    if (!isOriginAllowed(req.headers.origin, process.env.AI_ALLOWED_ORIGINS)) {
         return res.status(403).json({ error: 'Origin not allowed' });
     }
 

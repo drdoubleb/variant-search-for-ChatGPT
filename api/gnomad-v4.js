@@ -109,10 +109,15 @@ async function gnomadPost(operationName, query, variables) {
     }
 }
 
+import { rejectDisallowedOrigin } from './_origin.js';
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    // Block third-party websites from using this deployment as their backend
+    // (no-Origin callers pass — see api/_origin.js).
+    if (rejectDisallowedOrigin(req, res)) return;
 
     const { chrom, pos37, ref, alt, pos38: pos38Hint } = req.query;
     if (!chrom || !pos37 || !ref || !alt) {

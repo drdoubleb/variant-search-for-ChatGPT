@@ -17,6 +17,34 @@ const accessionToChr = (accession) => {
 };
 
 
+// RefSeq chromosome accession VERSIONS distinguish the assembly: GRCh38 bumped
+// every chromosome's version by one (chr7 is NC_000007.13 in GRCh37 and .14 in
+// GRCh38). This lets recoder/SPDI output declare its own assembly, so the
+// pipeline lifts GRCh38 coordinates and — critically — leaves GRCh37 ones
+// alone. Blanket-lifting everything silently "mapped" already-hg19 positions
+// hundreds of kb away (Ensembl's /map does not error when handed a coordinate
+// from the wrong assembly; it just returns a wrong answer).
+const GRCH37_NC_VERSIONS = {
+    1: 10, 2: 11, 3: 11, 4: 11, 5: 9, 6: 11, 7: 13, 8: 10, 9: 11, 10: 10,
+    11: 9, 12: 11, 13: 10, 14: 8, 15: 9, 16: 9, 17: 10, 18: 9, 19: 9, 20: 10,
+    21: 8, 22: 10, 23: 10, 24: 9
+};
+
+// Returns 'GRCh37' | 'GRCh38' | null for an NC_-prefixed string (a full hgvsg
+// or SPDI is fine — only the leading accession is read). Null when the
+// accession is unversioned, mitochondrial, or not recognisably either build.
+function assemblyFromNcAccession(value) {
+    const m = String(value || '').match(/^NC_(\d{6})\.(\d+)/);
+    if (!m) return null;
+    const num = parseInt(m[1], 10);
+    const version = parseInt(m[2], 10);
+    const v37 = GRCH37_NC_VERSIONS[num];
+    if (!v37) return null;
+    if (version === v37) return 'GRCh37';
+    if (version === v37 + 1) return 'GRCh38';
+    return null;
+}
+
 const DEFAULT_BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
 // The canonical production Vercel host. Any *other* *.vercel.app host is a
 // preview/branch deployment.
@@ -90,7 +118,9 @@ const API_TIMEOUT_MS = {
     tp53: 15000,
     clinvar: 15000,
     civic: 8000,
-    pubmed: 25000,
+    // The /api/pubmed function is capped at maxDuration 15 in vercel.json, so
+    // waiting longer than that client-side only delays the inevitable error.
+    pubmed: 16000,
     fda: 8000,
     bbkb: 8000,
     gnomadV4: 10000,
@@ -748,10 +778,7 @@ function coordinateRowToGenomicHgvs(row) {
     const pos = parseInt(row.pos, 10);
     if (!Number.isFinite(pos)) return null;
 
-    if (ref.length === alt.length && ref.length > 0) {
-        if (ref.length === 1) return `chr${chrom}:g.${pos}${ref}>${alt}`;
-        return `chr${chrom}:g.${pos}_${pos + ref.length - 1}delins${alt}`;
-    }
+    if (ref.length === 1 && alt.length === 1) return `chr${chrom}:g.${pos}${ref}>${alt}`;
     // Pure insertion (MAF "-" reference): the new bases sit between pos and pos+1.
     if (!ref) return `chr${chrom}:g.${pos}_${pos + 1}ins${alt}`;
     // Pure deletion (MAF "-" alternate): ref spells out the deleted bases.
@@ -760,7 +787,10 @@ function coordinateRowToGenomicHgvs(row) {
             ? `chr${chrom}:g.${pos}del`
             : `chr${chrom}:g.${pos}_${pos + ref.length - 1}del`;
     }
-    // VCF-anchored indel: trim the shared prefix and suffix to the minimal event.
+    // Multi-base ref/alt: trim the shared prefix and suffix to the minimal event.
+    // This handles VCF-anchored indels AND same-length pairs carrying context
+    // bases ("CT">"CA" is really a T>A substitution) — the annotation APIs index
+    // the minimal form, so an untrimmed delins would come back "not found".
     let r = ref;
     let a = alt;
     let start = pos;
@@ -769,6 +799,8 @@ function coordinateRowToGenomicHgvs(row) {
     while (r.length && a.length && r[r.length - 1] === a[a.length - 1]) {
         r = r.slice(0, -1); a = a.slice(0, -1); end -= 1;
     }
+    // Identical ref and alt describe no variant at all — refuse rather than
+    // sending a nonsense delins to the annotation APIs.
     if (!r && !a) return null;
     if (!a) {
         return start === end ? `chr${chrom}:g.${start}del` : `chr${chrom}:g.${start}_${end}del`;
@@ -777,6 +809,7 @@ function coordinateRowToGenomicHgvs(row) {
         // Insertion between the flanking bases left after trimming.
         return `chr${chrom}:g.${end}_${end + 1}ins${a}`;
     }
+    if (r.length === 1 && a.length === 1) return `chr${chrom}:g.${start}${r}>${a}`;
     return start === end
         ? `chr${chrom}:g.${start}delins${a}`
         : `chr${chrom}:g.${start}_${end}delins${a}`;
@@ -798,12 +831,24 @@ function buildVariantCoordinateTuple(rawInput, gVariant) {
     const parseTokenInput = (raw) => {
         const row = parseCoordinateRow(raw);
         if (!row) return null;
-        const startNum = Number(row.pos);
+        let startNum = Number(row.pos);
         if (!Number.isFinite(startNum)) return null;
-        const ref = row.ref;
-        const alt = row.alt;
+        let ref = row.ref;
+        let alt = row.alt;
+        // Same-length pairs may carry shared context bases ("CT">"CA" is really a
+        // T>A one base along). VCF SNVs/MNVs need no anchor base, so trim to the
+        // minimal representation — the one gnomAD and SpliceAI index. Indels keep
+        // their anchored VCF form untouched.
+        if (ref.length === alt.length && ref.length > 1) {
+            while (ref.length > 1 && ref[0] === alt[0]) {
+                ref = ref.slice(1); alt = alt.slice(1); startNum += 1;
+            }
+            while (ref.length > 1 && ref[ref.length - 1] === alt[alt.length - 1]) {
+                ref = ref.slice(0, -1); alt = alt.slice(0, -1);
+            }
+        }
         return {
-            chrom: `chr${row.chrom}`, pos: row.pos, ref, alt,
+            chrom: `chr${row.chrom}`, pos: String(startNum), ref, alt,
             start: startNum, end: startNum + Math.max(ref.length, 1) - 1,
             type: ref.length === 1 && alt.length === 1 ? 'sub' : 'delins'
         };
@@ -1492,20 +1537,27 @@ function buildCanonicalFromAnnotation(annotation, targetProtGlobal) {
             }
         }
     }
-    // Gather candidates from dbNSFP hgvsc/hgvsp arrays.
+    // Gather candidates from dbNSFP hgvsc/hgvsp arrays. These entries are BARE
+    // c./p. strings with no accession ("c.1799T>A"), so an accession-less entry
+    // is the cDNA itself — splitting on ':' used to shove it into the transcript
+    // slot and leave cDNA empty. hgvsp is index-paired only when the arrays
+    // actually align; dbNSFP's hgvsc and hgvsp can have different lengths.
     if (annotation.dbnsfp && annotation.dbnsfp.hgvsc) {
         const hgvsc = Array.isArray(annotation.dbnsfp.hgvsc) ? annotation.dbnsfp.hgvsc : [annotation.dbnsfp.hgvsc];
         const hgvsp = annotation.dbnsfp.hgvsp ? (Array.isArray(annotation.dbnsfp.hgvsp) ? annotation.dbnsfp.hgvsp : [annotation.dbnsfp.hgvsp]) : [];
+        const aligned = hgvsp.length === hgvsc.length;
         for (let i = 0; i < hgvsc.length; i++) {
             const sc = hgvsc[i];
             if (!sc) continue;
-            const parts = String(sc).split(':');
-            const txId = parts[0];
-            const cpart = parts.slice(1).join(':');
+            const scStr = String(sc);
+            const scColon = scStr.indexOf(':');
+            const txId = scColon !== -1 ? scStr.slice(0, scColon) : '';
+            const cpart = scColon !== -1 ? scStr.slice(scColon + 1) : scStr;
             let ppart = '';
-            if (hgvsp[i]) {
-                const pparts = String(hgvsp[i]).split(':');
-                ppart = pparts.slice(1).join(':');
+            if (aligned && hgvsp[i]) {
+                const spStr = String(hgvsp[i]);
+                const spColon = spStr.indexOf(':');
+                ppart = spColon !== -1 ? spStr.slice(spColon + 1) : spStr;
             }
             candidates.push({ transcript: txId, cDNA: cpart, protein: ppart, source: 'dbnsfp' });
         }
@@ -1632,37 +1684,56 @@ function convertSpdiToMyVariant(spdi) {
         const end = start; // end position for insertion is start position
         return `chr${chr}:g.${start}_${start + 1}ins${alt}`;
     }
-    // If both ref and alt are empty (unlikely), fall back to simple representation
-    return `chr${chr}:g.${start}>${alt}`;
+    // Both ref and alt empty describes no change at all — refuse rather than
+    // emit malformed HGVS ("g.123>") that downstream parsers would choke on.
+    throw new Error(`SPDI describes no sequence change: ${spdi}`);
 }
+
+// The GRCh37 mirror is preferred: complex clinical variants are catalogued
+// relative to hg19/GRCh37, and its hgvsg/spdi come back in GRCh37 directly.
+// The main host is a degraded-mode fallback for when the mirror is down (it
+// 500s in bursts) — its coordinates are GRCh38, which the candidate conversion
+// detects from the NC_ accession version and lifts back to hg19.
+const RECODER_HOSTS = ['https://grch37.rest.ensembl.org', 'https://rest.ensembl.org'];
 
 async function fetchVariantRecoder(query) {
     const encoded = encodeURIComponent(query);
-    // Use the Ensembl GRCh37 server for variant_recoder requests.  Complex
-    // clinical variants are often catalogued relative to the hg19/GRCh37
-    // assembly, and the default GRCh38 server may return 3' UTR or other
-    // non‑canonical annotations.  Switching to grch37.rest.ensembl.org
-    // improves consistency and allows detection of variants such as
-    // BRAF c.1799_1811delinsA.
-    const url = `https://grch37.rest.ensembl.org/variant_recoder/human/${encoded}?content-type=application/json`;
-    const response = await fetchWithRetry(url, {
-        headers: {
-            'Accept': 'application/json'
+    const attemptsPerHost = 2;
+    let lastErr = null;
+    for (let hostIdx = 0; hostIdx < RECODER_HOSTS.length; hostIdx++) {
+        const url = `${RECODER_HOSTS[hostIdx]}/variant_recoder/human/${encoded}?content-type=application/json`;
+        let response;
+        try {
+            response = await fetchWithRetry(url, {
+                headers: {
+                    'Accept': 'application/json'
+                }
+            }, API_TIMEOUT_MS.recoder, {
+                attempts: attemptsPerHost,
+                onAttempt: ({ attempt }) => LookupProgress.attempt(
+                    'recoder', hostIdx * attemptsPerHost + attempt, RECODER_HOSTS.length * attemptsPerHost)
+            });
+        } catch (err) {
+            // Transport-level failure after this host's retries — try the next host.
+            lastErr = err;
+            if (err && err.retryable && hostIdx < RECODER_HOSTS.length - 1) continue;
+            throw err;
         }
-    }, API_TIMEOUT_MS.recoder, {
-        attempts: 3,
-        onAttempt: ({ attempt, attempts }) => LookupProgress.attempt('recoder', attempt, attempts)
-    });
-    if (!response.ok) {
-        const text = await response.text();
-        const err = new Error(`Variant recoder request failed (${response.status}): ${text}`);
-        err.status = response.status;
-        // A 4xx here means Ensembl parsed the request and rejected the variant;
-        // a 5xx means the service is unwell and the variant may be perfectly fine.
-        err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
-        throw err;
+        if (!response.ok) {
+            const text = await response.text();
+            const err = new Error(`Variant recoder request failed (${response.status}): ${text}`);
+            err.status = response.status;
+            // A 4xx here means Ensembl parsed the request and rejected the variant —
+            // a real answer, no point asking another host. A 5xx means the service
+            // is unwell and the variant may be perfectly fine, so fail over.
+            err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+            lastErr = err;
+            if (err.retryable && hostIdx < RECODER_HOSTS.length - 1) continue;
+            throw err;
+        }
+        return response.json();
     }
-    return response.json();
+    throw lastErr || new Error('Variant recoder request failed');
 }
 
 // Ensembl REST hosts that serve the /map assembly-conversion endpoint. The
@@ -1944,6 +2015,13 @@ function parseProteinChange(text) {
 // True when two parsed protein changes describe the same amino-acid substitution.
 function sameProteinChange(a, b) {
     return !!a && !!b && a.ref === b.ref && a.pos === b.pos && a.alt === b.alt;
+}
+
+// Apply a stable thematic class to each card so CSS can render distinct colors per section.
+function applyCardTheme(cardEl, cardTitle) {
+    if (!cardEl || !cardTitle) return;
+    const key = String(cardTitle).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (key) cardEl.setAttribute('data-card', key);
 }
 
 // Escape a string for safe interpolation into innerHTML.
@@ -2701,6 +2779,843 @@ async function fetchClinicalTrials(gene, tumorType) {
         console.warn('fetchClinicalTrials failed', e);
         return { total: 0, studies: [] };
     }
+}
+
+/*
+ * ── Shared card builders ────────────────────────────────────────────────────
+ *
+ * The gene-only mode and the full variant mode render the same PubMed, FDA
+ * drugs, Clinical Trials and Guidelines cards. These used to be two verbatim
+ * copies (~800 lines) that drifted apart one forgotten edit at a time; each
+ * card is now built once here and parameterised on the few things that differ
+ * (tab labels, search terms, which extras/cache object to populate).
+ */
+
+// PubMed card. `tabs` is 1-3 entries of { label, term, extraKey }; with a
+// single entry no tab bar is rendered. Results are stashed under
+// extras[extraKey] for the AI-review payload.
+function createPubmedCard({ container, tabs, extras }) {
+    const PUBMED_LIMIT = 5;
+    const pmCard = document.createElement('div');
+    pmCard.className = 'card';
+    const pmTitle = document.createElement('h3');
+    pmTitle.textContent = 'PubMed';
+    applyCardTheme(pmCard, 'PubMed');
+    pmCard.appendChild(pmTitle);
+    const pmContent = document.createElement('div');
+    pmContent.className = 'card-content';
+
+    const buildPmResultsPanel = (panel, searchTerm, extraKey) => {
+        const queryUrl = searchTerm
+            ? `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(searchTerm)}&sort=relevance`
+            : 'https://pubmed.ncbi.nlm.nih.gov/';
+        const linkEl = document.createElement('a');
+        linkEl.href = queryUrl;
+        linkEl.target = '_blank';
+        linkEl.rel = 'noopener noreferrer';
+        linkEl.textContent = 'Search PubMed ↗';
+        panel.appendChild(linkEl);
+        if (searchTerm) {
+            const queryLabel = document.createElement('div');
+            queryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+            queryLabel.textContent = `Query: "${searchTerm}"`;
+            panel.appendChild(queryLabel);
+        }
+        const resultsDiv = document.createElement('div');
+        if (searchTerm) {
+            const spinner = document.createElement('div');
+            spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+            spinner.textContent = 'Loading PubMed results…';
+            resultsDiv.appendChild(spinner);
+        }
+        panel.appendChild(resultsDiv);
+        if (searchTerm) {
+            fetchPubmedArticles(searchTerm, PUBMED_LIMIT).then(({ total, articles }) => {
+                extras[extraKey] = { query: searchTerm, total, articles };
+                resultsDiv.innerHTML = '';
+                if (total === 0 || articles.length === 0) {
+                    resultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No PubMed results found.</div>';
+                    return;
+                }
+                const countEl = document.createElement('div');
+                countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
+                countEl.textContent = total > PUBMED_LIMIT
+                    ? `Showing ${articles.length} of ${total.toLocaleString()} results (most relevant)`
+                    : `${articles.length} result${articles.length !== 1 ? 's' : ''}`;
+                resultsDiv.appendChild(countEl);
+                articles.forEach((art) => {
+                    const artEl = document.createElement('div');
+                    artEl.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;font-size:0.82rem;';
+                    const titleLink = document.createElement('a');
+                    titleLink.href = `https://pubmed.ncbi.nlm.nih.gov/${art.pmid}/`;
+                    titleLink.target = '_blank';
+                    titleLink.rel = 'noopener noreferrer';
+                    titleLink.style.fontWeight = '600';
+                    titleLink.textContent = art.title;
+                    artEl.appendChild(titleLink);
+                    const meta = document.createElement('div');
+                    meta.style.cssText = 'color:#6b7280;margin-top:2px;';
+                    const parts = [art.authors, art.journal, art.year].filter(Boolean);
+                    meta.textContent = parts.join(' · ') + (art.pmid ? ` · PMID ${art.pmid}` : '');
+                    artEl.appendChild(meta);
+                    if (art.abstract) {
+                        const abstractDetails = document.createElement('details');
+                        abstractDetails.style.cssText = 'margin-top:4px;';
+                        const abstractSummaryEl = document.createElement('summary');
+                        abstractSummaryEl.style.cssText = 'font-size:0.80rem;color:#4b5563;cursor:pointer;padding:2px 0;list-style:revert;';
+                        abstractSummaryEl.textContent = 'Abstract';
+                        abstractDetails.appendChild(abstractSummaryEl);
+                        const abstractText = document.createElement('div');
+                        abstractText.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f9fafb;border-radius:4px;';
+                        abstractText.textContent = art.abstract;
+                        abstractDetails.appendChild(abstractText);
+                        artEl.appendChild(abstractDetails);
+                    }
+                    resultsDiv.appendChild(artEl);
+                });
+                if (total > PUBMED_LIMIT) {
+                    const seeAll = document.createElement('a');
+                    seeAll.href = queryUrl;
+                    seeAll.target = '_blank';
+                    seeAll.rel = 'noopener noreferrer';
+                    seeAll.style.fontSize = '0.82rem';
+                    seeAll.textContent = `See all ${total.toLocaleString()} results on PubMed ↗`;
+                    resultsDiv.appendChild(seeAll);
+                }
+            }).catch(() => {
+                resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">PubMed unavailable.</div>';
+            });
+        }
+    };
+
+    if (tabs.length > 1) {
+        const tabBar = document.createElement('div');
+        tabBar.className = 'card-tabs';
+        const tabBtns = [];
+        const tabPanels = [];
+        const activateTab = (idx) => {
+            tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+            tabPanels.forEach((p, i) => p.classList.toggle('active', i === idx));
+        };
+        tabs.forEach((tab, i) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = i === 0 ? 'card-tab-btn active' : 'card-tab-btn';
+            btn.textContent = tab.label;
+            btn.addEventListener('click', () => activateTab(i));
+            tabBar.appendChild(btn);
+            tabBtns.push(btn);
+            const panel = document.createElement('div');
+            panel.className = i === 0 ? 'card-tab-panel active' : 'card-tab-panel';
+            tabPanels.push(panel);
+        });
+        pmContent.appendChild(tabBar);
+        tabs.forEach((tab, i) => {
+            buildPmResultsPanel(tabPanels[i], tab.term, tab.extraKey);
+            pmContent.appendChild(tabPanels[i]);
+        });
+    } else {
+        buildPmResultsPanel(pmContent, tabs[0].term, tabs[0].extraKey);
+    }
+
+    pmCard.appendChild(pmContent);
+    if (container) container.appendChild(pmCard);
+    return pmCard;
+}
+
+// FDA-Approved Drugs card: Companion Dx / openFDA Labels / BBKB tabs.
+// Companion-Dx records land in cardCache.fda_companion_diagnostics_records and
+// the openFDA payload in extras.openfda so the AI-review buildContext can reuse
+// them instead of re-fetching.
+function createFdaDrugsCard({ container, gene, extras, cardCache }) {
+    const fdaCard = document.createElement('div');
+    fdaCard.className = 'card';
+    const fdaTitle = document.createElement('h3');
+    fdaTitle.textContent = 'FDA-Approved Drugs (by gene)';
+    applyCardTheme(fdaCard, 'FDA-Approved Drugs (by gene)');
+    fdaCard.appendChild(fdaTitle);
+    const fdaContent = document.createElement('div');
+    fdaContent.className = 'card-content';
+
+    if (!gene) {
+        const noGeneEl = document.createElement('div');
+        noGeneEl.style.cssText = 'font-size:0.85rem;color:#6b7280;';
+        noGeneEl.textContent = 'No gene identified for FDA drug lookup.';
+        fdaContent.appendChild(noGeneEl);
+        fdaCard.appendChild(fdaContent);
+        if (container) container.appendChild(fdaCard);
+        return fdaCard;
+    }
+
+    // Tab bar
+    const fdaTabBar = document.createElement('div');
+    fdaTabBar.className = 'card-tabs';
+    const compDxBtn = document.createElement('button');
+    compDxBtn.type = 'button';
+    compDxBtn.className = 'card-tab-btn active';
+    compDxBtn.textContent = 'Companion Dx';
+    const openFdaBtn = document.createElement('button');
+    openFdaBtn.type = 'button';
+    openFdaBtn.className = 'card-tab-btn';
+    openFdaBtn.textContent = 'openFDA Labels';
+    const bbkbBtn = document.createElement('button');
+    bbkbBtn.type = 'button';
+    bbkbBtn.className = 'card-tab-btn';
+    bbkbBtn.textContent = 'BBKB';
+    fdaTabBar.appendChild(compDxBtn);
+    fdaTabBar.appendChild(openFdaBtn);
+    fdaTabBar.appendChild(bbkbBtn);
+    fdaContent.appendChild(fdaTabBar);
+
+    const compDxPanel = document.createElement('div');
+    compDxPanel.className = 'card-tab-panel active';
+    const openFdaPanel = document.createElement('div');
+    openFdaPanel.className = 'card-tab-panel';
+    const bbkbPanel = document.createElement('div');
+    bbkbPanel.className = 'card-tab-panel';
+
+    compDxBtn.addEventListener('click', () => {
+        compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
+        compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
+    });
+    openFdaBtn.addEventListener('click', () => {
+        openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
+        openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
+    });
+    bbkbBtn.addEventListener('click', () => {
+        bbkbBtn.classList.add('active'); compDxBtn.classList.remove('active'); openFdaBtn.classList.remove('active');
+        bbkbPanel.classList.add('active'); compDxPanel.classList.remove('active'); openFdaPanel.classList.remove('active');
+    });
+
+    fdaContent.appendChild(compDxPanel);
+    fdaContent.appendChild(openFdaPanel);
+    fdaContent.appendChild(bbkbPanel);
+    fdaCard.appendChild(fdaContent);
+    if (container) container.appendChild(fdaCard);
+
+    // --- Companion Dx panel ---
+    const fdaCompDxUrl = 'https://www.fda.gov/medical-devices/in-vitro-diagnostics/list-cleared-or-approved-companion-diagnostic-devices-in-vitro-and-imaging-tools';
+    const fdaLinkEl = document.createElement('a');
+    fdaLinkEl.href = fdaCompDxUrl;
+    fdaLinkEl.target = '_blank';
+    fdaLinkEl.rel = 'noopener noreferrer';
+    fdaLinkEl.textContent = 'FDA companion diagnostics list ↗';
+    compDxPanel.appendChild(fdaLinkEl);
+
+    const fdaQueryLabel = document.createElement('div');
+    fdaQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 2px;';
+    fdaQueryLabel.textContent = `Gene: ${gene}`;
+    compDxPanel.appendChild(fdaQueryLabel);
+
+    const fdaDisclaimer = document.createElement('div');
+    fdaDisclaimer.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin:0 0 6px;font-style:italic;';
+    fdaDisclaimer.textContent = 'Note: FDA list does not always note resistance mutations.';
+    compDxPanel.appendChild(fdaDisclaimer);
+
+    const fdaResultsDiv = document.createElement('div');
+    const fdaSpinner = document.createElement('div');
+    fdaSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+    fdaSpinner.textContent = 'Loading FDA drug data…';
+    fdaResultsDiv.appendChild(fdaSpinner);
+    compDxPanel.appendChild(fdaResultsDiv);
+
+    fetchFdaCompanionDiagnostics(gene).then((records) => {
+        if (cardCache) cardCache.fda_companion_diagnostics_records = records;
+        fdaResultsDiv.innerHTML = '';
+        if (!records || records.length === 0) {
+            const noResults = document.createElement('div');
+            noResults.style.cssText = 'font-size:0.85rem;color:#6b7280;';
+            noResults.textContent = `No FDA companion diagnostic records found for ${gene}.`;
+            fdaResultsDiv.appendChild(noResults);
+            return;
+        }
+        const countEl = document.createElement('div');
+        countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
+        countEl.textContent = `${records.length} record${records.length !== 1 ? 's' : ''}`;
+        fdaResultsDiv.appendChild(countEl);
+
+        const table = document.createElement('table');
+        table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem;';
+        const thead = document.createElement('thead');
+        const headerRow = document.createElement('tr');
+        ['Drug', 'Disease', 'Biomarker detail'].forEach((col) => {
+            const th = document.createElement('th');
+            th.style.cssText = 'text-align:left;padding:4px 6px;border-bottom:2px solid #fca5a5;background:#fff7f7;color:#7f1d1d;font-weight:600;';
+            th.textContent = col;
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+
+        const FDA_PREVIEW_ROWS = 5;
+        const buildRow = (rec, i) => {
+            const tr = document.createElement('tr');
+            tr.style.background = i % 2 === 0 ? '#fff' : '#fff7f7';
+            const cellStyle = 'padding:4px 6px;vertical-align:top;border-bottom:1px solid #fee2e2;';
+            const tdDrug = document.createElement('td');
+            tdDrug.style.cssText = cellStyle + 'font-weight:600;';
+            const drugsArr = Array.isArray(rec.therapy?.drugs) ? rec.therapy.drugs : [];
+            tdDrug.textContent = drugsArr.length
+                ? drugsArr.map(d => d.trade_name ? `${d.trade_name} (${d.generic_name})` : d.generic_name || d.raw || '').filter(Boolean).join(', ')
+                : (rec.therapy?.raw || '—');
+            const tdDisease = document.createElement('td');
+            tdDisease.style.cssText = cellStyle + 'color:#374151;';
+            const rawDisease = rec.indication?.raw || rec.indication?.disease || '—';
+            tdDisease.textContent = rawDisease.replace(/\s*[-–]\s*(Tissue|Plasma|Blood|Serum|Urine|FFPE|Fresh Frozen|Whole Blood|ctDNA)\s*$/i, '').trim() || rawDisease;
+            const tdDetail = document.createElement('td');
+            tdDetail.style.cssText = cellStyle + 'color:#374151;';
+            tdDetail.textContent = rec.biomarker?.details || rec.biomarker?.name || '—';
+            tr.appendChild(tdDrug);
+            tr.appendChild(tdDisease);
+            tr.appendChild(tdDetail);
+            return tr;
+        };
+
+        const tbody = document.createElement('tbody');
+        records.slice(0, FDA_PREVIEW_ROWS).forEach((rec, i) => tbody.appendChild(buildRow(rec, i)));
+        table.appendChild(tbody);
+        fdaResultsDiv.appendChild(table);
+
+        if (records.length > FDA_PREVIEW_ROWS) {
+            const details = document.createElement('details');
+            details.style.cssText = 'margin-top:2px;';
+            const summary = document.createElement('summary');
+            summary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
+            summary.textContent = `Show ${records.length - FDA_PREVIEW_ROWS} more…`;
+            details.appendChild(summary);
+            const extraTable = document.createElement('table');
+            extraTable.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem;';
+            const extraTbody = document.createElement('tbody');
+            records.slice(FDA_PREVIEW_ROWS).forEach((rec, i) => extraTbody.appendChild(buildRow(rec, FDA_PREVIEW_ROWS + i)));
+            extraTable.appendChild(extraTbody);
+            details.appendChild(extraTable);
+            fdaResultsDiv.appendChild(details);
+        }
+
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+        note.textContent = 'Source: FDA companion diagnostics list. Verify against current FDA labeling before clinical use.';
+        fdaResultsDiv.appendChild(note);
+    }).catch(() => {
+        fdaResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">FDA drug data unavailable.</div>';
+    });
+
+    // --- BBKB panel ---
+    renderBbkbBiomarkerTherapies(bbkbPanel, gene, extras);
+
+    // --- openFDA Labels panel ---
+    const ofLinkEl = document.createElement('a');
+    ofLinkEl.href = 'https://open.fda.gov/apis/drug/label/';
+    ofLinkEl.target = '_blank';
+    ofLinkEl.rel = 'noopener noreferrer';
+    ofLinkEl.textContent = 'openFDA drug label database ↗';
+    openFdaPanel.appendChild(ofLinkEl);
+
+    const ofQueryLabel = document.createElement('div');
+    ofQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+    ofQueryLabel.textContent = `Searching indications_and_usage for: "${gene}"`;
+    openFdaPanel.appendChild(ofQueryLabel);
+
+    const ofResultsDiv = document.createElement('div');
+    const ofSpinner = document.createElement('div');
+    ofSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+    ofSpinner.textContent = 'Loading openFDA results…';
+    ofResultsDiv.appendChild(ofSpinner);
+    openFdaPanel.appendChild(ofResultsDiv);
+
+    fetchOpenFdaDrugLabels(gene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults }) => {
+        extras.openfda = { gene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
+        ofResultsDiv.innerHTML = '';
+        if (!ofResults || ofResults.length === 0) {
+            ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${escapeHtml(gene)}.</div>`;
+            return;
+        }
+        const OF_PREVIEW = 7;
+        const ofCountEl = document.createElement('div');
+        ofCountEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
+        const shownOf = `${Math.min(ofResults.length, OF_PREVIEW)} of ${ofResults.length} result${ofResults.length !== 1 ? 's' : ''}`;
+        const excludedReasons = [];
+        if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
+        if (excludedBoundary) excludedReasons.push(`${excludedBoundary} substring of larger word`);
+        if (excludedFalsePositive) excludedReasons.push(`${excludedFalsePositive} false-positive phrase`);
+        if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
+        const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
+        ofCountEl.textContent = shownOf + excludedNote;
+        ofResultsDiv.appendChild(ofCountEl);
+
+        const buildDrugEl = (item) => {
+            const drugEl = document.createElement('div');
+            drugEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#fff7f7;border:1px solid #fee2e2;border-radius:4px;font-size:0.82rem;';
+            const nameEl = document.createElement('div');
+            nameEl.style.cssText = 'font-weight:700;color:#7f1d1d;margin-bottom:2px;';
+            const brandPart = item.brand_name ? item.brand_name : '';
+            const genericPart = item.generic_name ? (brandPart ? `(${item.generic_name})` : item.generic_name) : '';
+            nameEl.textContent = [brandPart, genericPart].filter(Boolean).join(' ') || 'Unknown drug';
+            drugEl.appendChild(nameEl);
+            const metaParts = [item.manufacturer, item.route].filter(Boolean);
+            if (metaParts.length) {
+                const metaEl = document.createElement('div');
+                metaEl.style.cssText = 'color:#6b7280;margin-bottom:4px;';
+                metaEl.textContent = metaParts.join(' · ');
+                drugEl.appendChild(metaEl);
+            }
+            if (item.indications_and_usage) {
+                const indDetails = document.createElement('details');
+                indDetails.style.cssText = 'margin-top:2px;';
+                const indSummary = document.createElement('summary');
+                indSummary.style.cssText = 'cursor:pointer;color:#991b1b;font-weight:600;font-size:0.8rem;list-style:revert;padding:2px 0;';
+                indSummary.textContent = 'Indications & Usage';
+                indDetails.appendChild(indSummary);
+                const indText = document.createElement('div');
+                indText.style.cssText = 'margin-top:4px;color:#374151;line-height:1.5;white-space:pre-wrap;font-size:0.79rem;max-height:300px;overflow-y:auto;';
+                indText.textContent = item.indications_and_usage;
+                indDetails.appendChild(indText);
+                drugEl.appendChild(indDetails);
+            }
+            return drugEl;
+        };
+
+        ofResults.slice(0, OF_PREVIEW).forEach((item) => ofResultsDiv.appendChild(buildDrugEl(item)));
+        if (ofResults.length > OF_PREVIEW) {
+            const ofMoreDetails = document.createElement('details');
+            ofMoreDetails.style.cssText = 'margin-top:2px;';
+            const ofMoreSummary = document.createElement('summary');
+            ofMoreSummary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
+            ofMoreSummary.textContent = `Show ${ofResults.length - OF_PREVIEW} more…`;
+            ofMoreDetails.appendChild(ofMoreSummary);
+            ofResults.slice(OF_PREVIEW).forEach((item) => ofMoreDetails.appendChild(buildDrugEl(item)));
+            ofResultsDiv.appendChild(ofMoreDetails);
+        }
+        const ofNote = document.createElement('div');
+        ofNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+        ofNote.textContent = 'Source: openFDA drug label API. Results show labels mentioning this gene in indications. Verify against current FDA labeling.';
+        ofResultsDiv.appendChild(ofNote);
+    }).catch(() => {
+        ofResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">openFDA data unavailable.</div>';
+    });
+
+    return fdaCard;
+}
+
+// Clinical Trials card. When `gene` is empty only the search link renders
+// (matching the variant mode's no-gene behaviour). Fetched studies are stashed
+// in cardCache.clinical_trials for the AI-review buildContext.
+function createClinicalTrialsCard({ container, gene, tumorType, cardCache }) {
+    const CT_PREVIEW = 5;
+    const ctCard = document.createElement('div');
+    ctCard.className = 'card';
+    const ctTitle = document.createElement('h3');
+    ctTitle.textContent = 'Clinical Trials';
+    applyCardTheme(ctCard, 'Clinical Trials');
+    ctCard.appendChild(ctTitle);
+    const ctContent = document.createElement('div');
+    ctContent.className = 'card-content';
+
+    const ctBaseUrl = gene
+        ? `https://clinicaltrials.gov/search?query=${encodeURIComponent([gene, tumorType].filter(Boolean).join(' '))}&recrs=b&type=Intr`
+        : 'https://clinicaltrials.gov/';
+
+    const ctLinkEl = document.createElement('a');
+    ctLinkEl.href = ctBaseUrl;
+    ctLinkEl.target = '_blank';
+    ctLinkEl.rel = 'noopener noreferrer';
+    ctLinkEl.textContent = 'Search ClinicalTrials.gov ↗';
+    ctContent.appendChild(ctLinkEl);
+
+    if (gene) {
+        const ctQueryLabel = document.createElement('div');
+        ctQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+        const queryParts = [gene, tumorType].filter(Boolean);
+        ctQueryLabel.textContent = `Query: "${queryParts.join(' + ')}" · Interventional · Recruiting · Phase 2+ · US`;
+        ctContent.appendChild(ctQueryLabel);
+    }
+
+    const ctResultsDiv = document.createElement('div');
+    if (gene) {
+        const ctSpinner = document.createElement('div');
+        ctSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+        ctSpinner.textContent = 'Loading clinical trials…';
+        ctResultsDiv.appendChild(ctSpinner);
+    }
+    ctContent.appendChild(ctResultsDiv);
+    ctCard.appendChild(ctContent);
+    if (container) container.appendChild(ctCard);
+
+    if (gene) {
+        fetchClinicalTrials(gene, tumorType).then(({ total, studies }) => {
+            if (cardCache) cardCache.clinical_trials = { total, studies };
+            ctResultsDiv.innerHTML = '';
+            if (total === 0 || studies.length === 0) {
+                ctResultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No recruiting Phase 2+ interventional trials found in the US.</div>';
+                return;
+            }
+            const countEl = document.createElement('div');
+            countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
+            countEl.textContent = `${total} recruiting trial${total !== 1 ? 's' : ''} found`;
+            ctResultsDiv.appendChild(countEl);
+
+            const buildTrialEl = (trial) => {
+                const el = document.createElement('div');
+                el.style.cssText = 'margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #ccfbf1;font-size:0.82rem;';
+                const titleLine = document.createElement('div');
+                if (trial.url) {
+                    const link = document.createElement('a');
+                    link.href = trial.url;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.style.fontWeight = '600';
+                    link.textContent = trial.title || trial.nctId;
+                    titleLine.appendChild(link);
+                } else {
+                    titleLine.style.fontWeight = '600';
+                    titleLine.textContent = trial.title || trial.nctId;
+                }
+                el.appendChild(titleLine);
+                const meta = document.createElement('div');
+                meta.style.cssText = 'color:#6b7280;margin-top:3px;';
+                const phaseParts = Array.isArray(trial.phases) && trial.phases.length
+                    ? trial.phases.map(p => String(p).replace('PHASE', 'Phase ')).join('/')
+                    : 'Phase N/A';
+                const drugNames = (trial.interventions || [])
+                    .filter(i => i.type === 'DRUG' || i.type === 'BIOLOGICAL' || i.type === 'COMBINATION_PRODUCT')
+                    .map(i => i.name)
+                    .filter(Boolean)
+                    .slice(0, 4);
+                const metaParts = [
+                    trial.nctId,
+                    phaseParts,
+                    drugNames.length ? drugNames.join(', ') : null,
+                    trial.usLocationCount ? `${trial.usLocationCount} US site${trial.usLocationCount !== 1 ? 's' : ''}` : null
+                ].filter(Boolean);
+                meta.textContent = metaParts.join(' · ');
+                el.appendChild(meta);
+                const hasExpandable = trial.briefSummary || (trial.conditions && trial.conditions.length > 0) || trial.inclusionCriteria;
+                if (hasExpandable) {
+                    const trialDetails = document.createElement('details');
+                    trialDetails.style.cssText = 'margin-top:5px;';
+                    const trialDetailsSummary = document.createElement('summary');
+                    trialDetailsSummary.style.cssText = 'font-size:0.80rem;color:#0f766e;cursor:pointer;padding:2px 0;list-style:revert;';
+                    trialDetailsSummary.textContent = 'Summary, conditions & eligibility';
+                    trialDetails.appendChild(trialDetailsSummary);
+                    const expandContent = document.createElement('div');
+                    expandContent.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f0fdfa;border-radius:4px;';
+                    if (trial.conditions && trial.conditions.length > 0) {
+                        const condLabel = document.createElement('div');
+                        condLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
+                        condLabel.textContent = 'Conditions:';
+                        expandContent.appendChild(condLabel);
+                        const condVal = document.createElement('div');
+                        condVal.style.cssText = 'margin-bottom:6px;';
+                        condVal.textContent = trial.conditions.join(', ');
+                        expandContent.appendChild(condVal);
+                    }
+                    if (trial.briefSummary) {
+                        const summLabel = document.createElement('div');
+                        summLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
+                        summLabel.textContent = 'Summary:';
+                        expandContent.appendChild(summLabel);
+                        const summVal = document.createElement('div');
+                        summVal.style.cssText = 'margin-bottom:6px;';
+                        summVal.textContent = trial.briefSummary;
+                        expandContent.appendChild(summVal);
+                    }
+                    if (trial.inclusionCriteria) {
+                        const inclLabel = document.createElement('div');
+                        inclLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
+                        inclLabel.textContent = 'Inclusion Criteria:';
+                        expandContent.appendChild(inclLabel);
+                        const inclVal = document.createElement('pre');
+                        inclVal.style.cssText = 'white-space:pre-wrap;font-family:inherit;margin:0;';
+                        inclVal.textContent = trial.inclusionCriteria;
+                        expandContent.appendChild(inclVal);
+                    }
+                    trialDetails.appendChild(expandContent);
+                    el.appendChild(trialDetails);
+                }
+                return el;
+            };
+
+            studies.slice(0, CT_PREVIEW).forEach(trial => ctResultsDiv.appendChild(buildTrialEl(trial)));
+            if (studies.length > CT_PREVIEW) {
+                const moreDetails = document.createElement('details');
+                moreDetails.style.cssText = 'margin-top:4px;';
+                const moreSummary = document.createElement('summary');
+                moreSummary.style.cssText = 'font-size:0.82rem;color:#0f766e;cursor:pointer;padding:4px 2px;list-style:revert;';
+                moreSummary.textContent = `Show ${studies.length - CT_PREVIEW} more…`;
+                moreDetails.appendChild(moreSummary);
+                studies.slice(CT_PREVIEW).forEach(trial => moreDetails.appendChild(buildTrialEl(trial)));
+                ctResultsDiv.appendChild(moreDetails);
+            }
+            const ctNote = document.createElement('div');
+            ctNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+            ctNote.textContent = 'Source: ClinicalTrials.gov. Eligibility criteria not evaluated — verify before clinical use.';
+            ctResultsDiv.appendChild(ctNote);
+        }).catch(() => {
+            ctResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">Clinical trials data unavailable.</div>';
+        });
+    }
+
+    return ctCard;
+}
+
+// Guidelines card. `getGene` is resolved at selection time (the variant mode's
+// gene may arrive after render); results land in extras.guidelines.
+function createGuidelinesCard({ container, tumorType, getGene, extras }) {
+    const GUIDELINES_BASE = 'https://www.drdoubleb.com/guidelines';
+    const guidelinesCard = document.createElement('div');
+    guidelinesCard.className = 'card';
+    const guidelinesTitle = document.createElement('h3');
+    guidelinesTitle.textContent = 'Guidelines';
+    applyCardTheme(guidelinesCard, 'Guidelines');
+    guidelinesCard.appendChild(guidelinesTitle);
+
+    const guidelinesContent = document.createElement('div');
+    guidelinesContent.className = 'card-content';
+
+    const guidelinesIntro = document.createElement('p');
+    guidelinesIntro.style.cssText = 'font-size:0.85rem;color:#6b7280;margin-bottom:8px;';
+    guidelinesIntro.textContent = 'Select a cancer type to retrieve guideline recommendations for this gene.';
+    guidelinesContent.appendChild(guidelinesIntro);
+
+    const dropdownRow = document.createElement('div');
+    dropdownRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;';
+
+    const cancerSelect = document.createElement('select');
+    cancerSelect.style.cssText = 'font-size:0.85rem;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px;flex:1;max-width:320px;';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Loading cancer types…';
+    defaultOpt.disabled = true;
+    defaultOpt.selected = true;
+    cancerSelect.appendChild(defaultOpt);
+    dropdownRow.appendChild(cancerSelect);
+    guidelinesContent.appendChild(dropdownRow);
+
+    const guidelinesResults = document.createElement('div');
+    guidelinesContent.appendChild(guidelinesResults);
+
+    guidelinesCard.appendChild(guidelinesContent);
+    if (container) container.appendChild(guidelinesCard);
+
+    (async () => {
+        try {
+            const resp = await fetch(`${GUIDELINES_BASE}/api/cancer-types.php`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            cancerSelect.innerHTML = '';
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = `— Select cancer type (${data.count} available) —`;
+            placeholder.disabled = true;
+            placeholder.selected = true;
+            cancerSelect.appendChild(placeholder);
+            (data.cancer_types || []).forEach(ct => {
+                const opt = document.createElement('option');
+                opt.value = ct.name;
+                opt.textContent = ct.name + (ct.record_count ? ` (${ct.record_count} records)` : '');
+                cancerSelect.appendChild(opt);
+            });
+            if (tumorType) {
+                const tumorLower = tumorType.toLowerCase().trim();
+                const matched = (data.cancer_types || []).find(ct =>
+                    (ct.aliases || []).some(a => a.toLowerCase() === tumorLower) ||
+                    ct.name.toLowerCase() === tumorLower ||
+                    ct.name.toLowerCase().includes(tumorLower) ||
+                    tumorLower.includes(ct.name.toLowerCase())
+                );
+                if (matched) {
+                    cancerSelect.value = matched.name;
+                    cancerSelect.dispatchEvent(new Event('change'));
+                }
+            }
+        } catch (err) {
+            cancerSelect.innerHTML = '';
+            const errOpt = document.createElement('option');
+            errOpt.textContent = 'Failed to load cancer types';
+            errOpt.disabled = true;
+            errOpt.selected = true;
+            cancerSelect.appendChild(errOpt);
+        }
+    })();
+
+    cancerSelect.addEventListener('change', async () => {
+        const selectedCancer = cancerSelect.value;
+        if (!selectedCancer) return;
+        const gene = getGene();
+        if (!gene) {
+            guidelinesResults.innerHTML = '<div style="font-size:0.85rem;color:#9ca3af;">No gene available for guideline lookup.</div>';
+            return;
+        }
+        guidelinesResults.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;padding:4px 0;">Loading guidelines…</div>';
+        try {
+            const params = new URLSearchParams({ cancer: selectedCancer, gene });
+            const resp = await fetch(`${GUIDELINES_BASE}/api/search.php?${params}`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+
+            extras.guidelines = {
+                cancer_type: selectedCancer,
+                gene,
+                query: data.query,
+                count: data.count,
+                results: data.results
+            };
+
+            guidelinesResults.innerHTML = '';
+
+            if (!data.results || data.results.length === 0) {
+                const noResults = document.createElement('div');
+                noResults.style.cssText = 'font-size:0.85rem;color:#9ca3af;';
+                noResults.textContent = `No guideline records found for ${gene} in ${selectedCancer}.`;
+                guidelinesResults.appendChild(noResults);
+                return;
+            }
+
+            const countEl = document.createElement('div');
+            countEl.style.cssText = 'font-size:0.85rem;font-weight:600;color:#3f6212;margin-bottom:8px;';
+            countEl.textContent = `${data.count} guideline record${data.count !== 1 ? 's' : ''} for ${gene} in ${selectedCancer}`;
+            guidelinesResults.appendChild(countEl);
+
+            const renderKV = (obj, kvContainer, depth) => {
+                Object.entries(obj).forEach(([key, val]) => {
+                    if (val === null || val === undefined || val === '' || (Array.isArray(val) && val.length === 0) || (typeof val === 'object' && !Array.isArray(val) && Object.keys(val).length === 0)) return;
+                    const fmtKey = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                    if (typeof val === 'object' && !Array.isArray(val)) {
+                        const subTitle = document.createElement('div');
+                        subTitle.style.cssText = `padding-left:${depth * 12}px;font-weight:600;color:#374151;margin-top:3px;`;
+                        subTitle.textContent = fmtKey + ':';
+                        kvContainer.appendChild(subTitle);
+                        renderKV(val, kvContainer, depth + 1);
+                    } else if (Array.isArray(val) && val.some(v => v !== null && typeof v === 'object')) {
+                        // Array of objects — render each item as a nested block
+                        const subTitle = document.createElement('div');
+                        subTitle.style.cssText = `padding-left:${depth * 12}px;font-weight:600;color:#374151;margin-top:3px;`;
+                        subTitle.textContent = fmtKey + ':';
+                        kvContainer.appendChild(subTitle);
+                        val.forEach(item => {
+                            if (item !== null && typeof item === 'object') {
+                                renderKV(item, kvContainer, depth + 1);
+                            } else if (item !== null && item !== '') {
+                                const row = document.createElement('div');
+                                row.style.cssText = `padding-left:${(depth + 1) * 12}px;margin:2px 0;color:#1f2937;`;
+                                row.textContent = String(item);
+                                kvContainer.appendChild(row);
+                            }
+                        });
+                    } else {
+                        const row = document.createElement('div');
+                        row.style.cssText = `padding-left:${depth * 12}px;margin:2px 0;`;
+                        const labelEl = document.createElement('span');
+                        labelEl.style.cssText = 'font-weight:600;color:#374151;';
+                        labelEl.textContent = fmtKey + ': ';
+                        const valEl = document.createElement('span');
+                        valEl.style.cssText = 'color:#1f2937;';
+                        valEl.textContent = Array.isArray(val) ? val.filter(v => v !== null && v !== '').join(', ') : String(val);
+                        row.appendChild(labelEl);
+                        row.appendChild(valEl);
+                        kvContainer.appendChild(row);
+                    }
+                });
+            };
+
+            const renderSection = (title, obj, sectionContainer) => {
+                if (!obj || typeof obj !== 'object' || Object.keys(obj).length === 0) return;
+                const sectionTitle = document.createElement('div');
+                sectionTitle.style.cssText = 'font-weight:700;color:#166534;margin:6px 0 2px;font-size:0.79rem;text-transform:uppercase;letter-spacing:0.04em;border-top:1px solid #bbf7d0;padding-top:5px;';
+                sectionTitle.textContent = title;
+                sectionContainer.appendChild(sectionTitle);
+                renderKV(obj, sectionContainer, 0);
+            };
+
+            data.results.forEach((record, idx) => {
+                const recordEl = document.createElement('div');
+                recordEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;font-size:0.82rem;';
+                const headerEl = document.createElement('div');
+                headerEl.style.cssText = 'font-weight:700;color:#166534;margin-bottom:4px;';
+                const markerDisplay = (record.biomarker && (record.biomarker.display_name || record.biomarker.symbol)) || `Record ${idx + 1}`;
+                const tumorDisplay = (record.tumor && (record.tumor.name || record.tumor.subtype)) || selectedCancer;
+                headerEl.textContent = `${markerDisplay} — ${tumorDisplay}`;
+                recordEl.appendChild(headerEl);
+
+                const buildKVRow = (label, value) => {
+                    if (!value) return;
+                    const row = document.createElement('div');
+                    row.style.cssText = 'margin-bottom:3px;';
+                    const lbl = document.createElement('span');
+                    lbl.style.cssText = 'font-weight:600;';
+                    lbl.textContent = label + ': ';
+                    row.appendChild(lbl);
+                    row.appendChild(document.createTextNode(value));
+                    recordEl.appendChild(row);
+                };
+
+                if (Array.isArray(record.therapy) && record.therapy.length > 0) {
+                    buildKVRow('Recommended therapy', record.therapy.map(t => t.name).filter(Boolean).join(', '));
+                    const cat = record.therapy.map(t => t.evidence_or_category).filter(Boolean).join(', ');
+                    if (cat) buildKVRow('Category', cat);
+                    const setting = record.therapy.map(t => t.setting).filter(Boolean).join(', ');
+                    if (setting) buildKVRow('Therapy setting', setting);
+                }
+                if (record.testing) {
+                    const te = record.testing;
+                    if (te.recommended) buildKVRow('Recommended test', te.recommended);
+                    if (Array.isArray(te.methods) && te.methods.length > 0) {
+                        buildKVRow('Method', te.methods.map(m => m.method).filter(Boolean).join(', '));
+                    }
+                }
+                if (record.clinical_significance && record.clinical_significance.summary) {
+                    buildKVRow('Clinical significance', record.clinical_significance.summary);
+                }
+
+                const detailsEl = document.createElement('details');
+                detailsEl.style.cssText = 'margin-top:6px;';
+                const detailsSummary = document.createElement('summary');
+                detailsSummary.style.cssText = 'font-size:0.80rem;color:#15803d;cursor:pointer;padding:2px 0;list-style:revert;';
+                detailsSummary.textContent = 'Full record details';
+                detailsEl.appendChild(detailsSummary);
+                const detailsBody = document.createElement('div');
+                detailsBody.style.cssText = 'font-size:0.79rem;padding:4px 2px;margin-top:4px;max-height:350px;overflow-y:auto;line-height:1.6;';
+                if (record.id) {
+                    const idRow = document.createElement('div');
+                    idRow.style.cssText = 'font-size:0.74rem;color:#9ca3af;margin-bottom:2px;';
+                    idRow.textContent = `Record ID: ${record.id}`;
+                    detailsBody.appendChild(idRow);
+                }
+                const sectionDefs = [['Tumor', record.tumor], ['Biomarker', record.biomarker], ['Clinical Significance', record.clinical_significance], ['Testing', record.testing], ['Therapy', record.therapy], ['Eligibility Context', record.eligibility_context], ['Interpretive States', record.interpretive_states], ['Guideline Source', record.guideline_metadata]];
+                sectionDefs.forEach(([title, obj]) => renderSection(title, obj, detailsBody));
+                const skipKeys = new Set(['id', 'tumor', 'biomarker', 'clinical_significance', 'testing', 'therapy', 'eligibility_context', 'interpretive_states', 'guideline_metadata', 'dataset_file', 'dataset_record_index', 'dataset_name']);
+                Object.keys(record).filter(k => !skipKeys.has(k)).forEach(k => {
+                    const val = record[k];
+                    if (val && typeof val === 'object') {
+                        renderSection(k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()), val, detailsBody);
+                    } else if (val !== null && val !== undefined && val !== '') {
+                        const row = document.createElement('div');
+                        row.style.cssText = 'margin:2px 0;';
+                        const labelEl = document.createElement('span');
+                        labelEl.style.cssText = 'font-weight:600;color:#374151;';
+                        labelEl.textContent = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) + ': ';
+                        row.appendChild(labelEl);
+                        row.appendChild(document.createTextNode(String(val)));
+                        detailsBody.appendChild(row);
+                    }
+                });
+                detailsEl.appendChild(detailsBody);
+                recordEl.appendChild(detailsEl);
+                guidelinesResults.appendChild(recordEl);
+            });
+
+            const sourceNote = document.createElement('div');
+            sourceNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+            sourceNote.textContent = 'Source: drdoubleb.com/guidelines. For reference only — verify against current published guidelines.';
+            guidelinesResults.appendChild(sourceNote);
+        } catch (err) {
+            guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${escapeHtml(err.message)}</div>`;
+            extras.guidelines = { error: err.message, cancer_type: selectedCancer, gene };
+        }
+    });
+
+    return guidelinesCard;
 }
 
 const OPENROUTER_MODEL_OPTIONS = [
@@ -3917,13 +4832,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // Holds a list of transcript annotations (transcript ID, cDNA, protein) fetched via the Ensembl variant recoder.
     // This will be populated when the user submits a variant and used to build the transcripts list in the variant card.
     let transcriptsFromRecoder = [];
+    // Raw variant_recoder response from the most recent call, keyed by the query
+    // it answered. getTranscriptsList() runs at the start of every lookup, and
+    // the pipeline used to call fetchVariantRecoder AGAIN for the same query a
+    // moment later — a duplicated 12s-class (40s+ cold) Ensembl round-trip on
+    // most non-genomic lookups. Cache both success and failure so the second
+    // consumer reuses the answer instead of re-asking (or re-retrying) Ensembl.
+    let lastRecoderResult = { query: null, data: null, error: null };
 
-    // Apply a stable thematic class to each card so CSS can render distinct colors per section.
-    const applyCardTheme = (cardEl, cardTitle) => {
-        if (!cardEl || !cardTitle) return;
-        const key = String(cardTitle).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-        if (key) cardEl.setAttribute('data-card', key);
-    };
 
     /**
      * Fetch transcripts for a given variant using the Ensembl variant recoder. Returns an array of
@@ -3933,6 +4849,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function getTranscriptsList(q) {
         try {
             const recResults = await fetchVariantRecoder(q);
+            lastRecoderResult = { query: q, data: recResults, error: null };
             // The Ensembl variant_recoder response is an array with a single object.
             // Historically the transcripts were stored under recResults[0].A, but newer
             // versions use lettered keys (A, B, C, ... or even G) depending on the
@@ -4050,6 +4967,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Record it though: an empty transcript list because Ensembl is down
             // must not be presented the same way as one because the variant is
             // genuinely unknown.
+            lastRecoderResult = { query: q, data: null, error: err };
             LookupProgress.step('recoder', 'fail', describeUpstreamFailure(err));
             if (err && err.retryable) LookupProgress.markUpstreamOutage('recoder');
         }
@@ -4402,6 +5320,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Local aiReviewExtras for gene-only mode (populated by async card callbacks)
             const geneOnlyAiExtras = {};
+            // Card results reused by the AI-review buildContext but not spread into
+            // supplemental_card_data (they appear top-level in the payload already).
+            const geneOnlyCardCache = {};
 
             // ── Card: CIViC ────────────────────────────────────────────────
             {
@@ -4635,826 +5556,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // ── Card: PubMed ───────────────────────────────────────────────
             {
-                const PUBMED_LIMIT = 5;
-                const pmCard = document.createElement('div');
-                pmCard.className = 'card';
-                const pmTitle = document.createElement('h3');
-                pmTitle.textContent = 'PubMed';
-                applyCardTheme(pmCard, 'PubMed');
-                pmCard.appendChild(pmTitle);
-                const pmContent = document.createElement('div');
-                pmContent.className = 'card-content';
-
                 const pmSearchTerm = altType ? `${gene} ${altType}` : gene;
                 const pmTumorSearchTerm = tumorType ? `${gene} ${tumorType}` : '';
                 const pmVariantTumorSearchTerm = (tumorType && altType) ? `${gene} ${altType} ${tumorType}` : '';
-                const hasPmTumorTab = !!(pmTumorSearchTerm && pmSearchTerm !== pmTumorSearchTerm);
-                const hasPmVariantTumorTab = !!(pmVariantTumorSearchTerm
-                    && pmVariantTumorSearchTerm !== pmSearchTerm
-                    && pmVariantTumorSearchTerm !== pmTumorSearchTerm);
-
-                const buildPmResultsPanel = (container, searchTerm, extraKey) => {
-                    const queryUrl = searchTerm
-                        ? `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(searchTerm)}&sort=relevance`
-                        : 'https://pubmed.ncbi.nlm.nih.gov/';
-                    const linkEl = document.createElement('a');
-                    linkEl.href = queryUrl;
-                    linkEl.target = '_blank';
-                    linkEl.rel = 'noopener noreferrer';
-                    linkEl.textContent = 'Search PubMed ↗';
-                    container.appendChild(linkEl);
-                    if (searchTerm) {
-                        const queryLabel = document.createElement('div');
-                        queryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
-                        queryLabel.textContent = `Query: "${searchTerm}"`;
-                        container.appendChild(queryLabel);
+                const pmTabs = [{ label: altType ? 'Gene + Alteration' : 'Gene', term: pmSearchTerm, extraKey: 'pubmed' }];
+                if (pmTumorSearchTerm && pmSearchTerm !== pmTumorSearchTerm) {
+                    pmTabs.push({ label: 'Gene + Tumor Type', term: pmTumorSearchTerm, extraKey: 'pubmed_tumor_type' });
+                    if (pmVariantTumorSearchTerm
+                        && pmVariantTumorSearchTerm !== pmSearchTerm
+                        && pmVariantTumorSearchTerm !== pmTumorSearchTerm) {
+                        pmTabs.push({ label: 'Gene + Alteration + Tumor Type', term: pmVariantTumorSearchTerm, extraKey: 'pubmed_variant_tumor_type' });
                     }
-                    const resultsDiv = document.createElement('div');
-                    if (searchTerm) {
-                        const spinner = document.createElement('div');
-                        spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
-                        spinner.textContent = 'Loading PubMed results…';
-                        resultsDiv.appendChild(spinner);
-                    }
-                    container.appendChild(resultsDiv);
-                    if (searchTerm) {
-                        fetchPubmedArticles(searchTerm, PUBMED_LIMIT).then(({ total, articles }) => {
-                            geneOnlyAiExtras[extraKey] = { query: searchTerm, total, articles };
-                            resultsDiv.innerHTML = '';
-                            if (total === 0 || articles.length === 0) {
-                                resultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No PubMed results found.</div>';
-                                return;
-                            }
-                            const countEl = document.createElement('div');
-                            countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
-                            countEl.textContent = total > PUBMED_LIMIT
-                                ? `Showing ${articles.length} of ${total.toLocaleString()} results (most relevant)`
-                                : `${articles.length} result${articles.length !== 1 ? 's' : ''}`;
-                            resultsDiv.appendChild(countEl);
-                            articles.forEach((art) => {
-                                const artEl = document.createElement('div');
-                                artEl.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;font-size:0.82rem;';
-                                const titleLink = document.createElement('a');
-                                titleLink.href = `https://pubmed.ncbi.nlm.nih.gov/${art.pmid}/`;
-                                titleLink.target = '_blank';
-                                titleLink.rel = 'noopener noreferrer';
-                                titleLink.style.fontWeight = '600';
-                                titleLink.textContent = art.title;
-                                artEl.appendChild(titleLink);
-                                const meta = document.createElement('div');
-                                meta.style.cssText = 'color:#6b7280;margin-top:2px;';
-                                const parts = [art.authors, art.journal, art.year].filter(Boolean);
-                                meta.textContent = parts.join(' · ') + (art.pmid ? ` · PMID ${art.pmid}` : '');
-                                artEl.appendChild(meta);
-                                if (art.abstract) {
-                                    const abstractDetails = document.createElement('details');
-                                    abstractDetails.style.cssText = 'margin-top:4px;';
-                                    const abstractSummaryEl = document.createElement('summary');
-                                    abstractSummaryEl.style.cssText = 'font-size:0.80rem;color:#4b5563;cursor:pointer;padding:2px 0;list-style:revert;';
-                                    abstractSummaryEl.textContent = 'Abstract';
-                                    abstractDetails.appendChild(abstractSummaryEl);
-                                    const abstractText = document.createElement('div');
-                                    abstractText.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f9fafb;border-radius:4px;';
-                                    abstractText.textContent = art.abstract;
-                                    abstractDetails.appendChild(abstractText);
-                                    artEl.appendChild(abstractDetails);
-                                }
-                                resultsDiv.appendChild(artEl);
-                            });
-                            if (total > PUBMED_LIMIT) {
-                                const seeAll = document.createElement('a');
-                                seeAll.href = queryUrl;
-                                seeAll.target = '_blank';
-                                seeAll.rel = 'noopener noreferrer';
-                                seeAll.style.fontSize = '0.82rem';
-                                seeAll.textContent = `See all ${total.toLocaleString()} results on PubMed ↗`;
-                                resultsDiv.appendChild(seeAll);
-                            }
-                        }).catch(() => {
-                            resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">PubMed unavailable.</div>';
-                        });
-                    }
-                };
-
-                if (hasPmTumorTab) {
-                    const tabBar = document.createElement('div');
-                    tabBar.className = 'card-tabs';
-                    const variantBtn = document.createElement('button');
-                    variantBtn.type = 'button';
-                    variantBtn.className = 'card-tab-btn active';
-                    variantBtn.textContent = altType ? 'Gene + Alteration' : 'Gene';
-                    const tumorBtn = document.createElement('button');
-                    tumorBtn.type = 'button';
-                    tumorBtn.className = 'card-tab-btn';
-                    tumorBtn.textContent = 'Gene + Tumor Type';
-                    tabBar.appendChild(variantBtn);
-                    tabBar.appendChild(tumorBtn);
-
-                    let variantTumorBtn = null;
-                    let variantTumorPanel = null;
-                    if (hasPmVariantTumorTab) {
-                        variantTumorBtn = document.createElement('button');
-                        variantTumorBtn.type = 'button';
-                        variantTumorBtn.className = 'card-tab-btn';
-                        variantTumorBtn.textContent = 'Gene + Alteration + Tumor Type';
-                        tabBar.appendChild(variantTumorBtn);
-                    }
-                    pmContent.appendChild(tabBar);
-
-                    const variantPanel = document.createElement('div');
-                    variantPanel.className = 'card-tab-panel active';
-                    const tumorPanel = document.createElement('div');
-                    tumorPanel.className = 'card-tab-panel';
-                    if (hasPmVariantTumorTab) {
-                        variantTumorPanel = document.createElement('div');
-                        variantTumorPanel.className = 'card-tab-panel';
-                    }
-
-                    const tabBtns = [variantBtn, tumorBtn, variantTumorBtn].filter(Boolean);
-                    const tabPanels = [variantPanel, tumorPanel, variantTumorPanel].filter(Boolean);
-                    const activateTab = (idx) => {
-                        tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
-                        tabPanels.forEach((p, i) => p.classList.toggle('active', i === idx));
-                    };
-                    variantBtn.addEventListener('click', () => activateTab(0));
-                    tumorBtn.addEventListener('click', () => activateTab(1));
-                    if (variantTumorBtn) variantTumorBtn.addEventListener('click', () => activateTab(2));
-
-                    buildPmResultsPanel(variantPanel, pmSearchTerm, 'pubmed');
-                    buildPmResultsPanel(tumorPanel, pmTumorSearchTerm, 'pubmed_tumor_type');
-                    pmContent.appendChild(variantPanel);
-                    pmContent.appendChild(tumorPanel);
-                    if (variantTumorPanel) {
-                        buildPmResultsPanel(variantTumorPanel, pmVariantTumorSearchTerm, 'pubmed_variant_tumor_type');
-                        pmContent.appendChild(variantTumorPanel);
-                    }
-                } else {
-                    buildPmResultsPanel(pmContent, pmSearchTerm, 'pubmed');
                 }
-
-                pmCard.appendChild(pmContent);
-                if (cardsContainer) cardsContainer.appendChild(pmCard);
+                createPubmedCard({ container: cardsContainer, tabs: pmTabs, extras: geneOnlyAiExtras });
             }
 
             // ── Card: FDA-Approved Drugs (by gene) ─────────────────────────
-            {
-                const fdaCard = document.createElement('div');
-                fdaCard.className = 'card';
-                const fdaTitle = document.createElement('h3');
-                fdaTitle.textContent = 'FDA-Approved Drugs (by gene)';
-                applyCardTheme(fdaCard, 'FDA-Approved Drugs (by gene)');
-                fdaCard.appendChild(fdaTitle);
-                const fdaContent = document.createElement('div');
-                fdaContent.className = 'card-content';
-
-                // Tab bar
-                const fdaTabBar = document.createElement('div');
-                fdaTabBar.className = 'card-tabs';
-                const compDxBtn = document.createElement('button');
-                compDxBtn.type = 'button';
-                compDxBtn.className = 'card-tab-btn active';
-                compDxBtn.textContent = 'Companion Dx';
-                const openFdaBtn = document.createElement('button');
-                openFdaBtn.type = 'button';
-                openFdaBtn.className = 'card-tab-btn';
-                openFdaBtn.textContent = 'openFDA Labels';
-                const bbkbBtn = document.createElement('button');
-                bbkbBtn.type = 'button';
-                bbkbBtn.className = 'card-tab-btn';
-                bbkbBtn.textContent = 'BBKB';
-                fdaTabBar.appendChild(compDxBtn);
-                fdaTabBar.appendChild(openFdaBtn);
-                fdaTabBar.appendChild(bbkbBtn);
-                fdaContent.appendChild(fdaTabBar);
-
-                const compDxPanel = document.createElement('div');
-                compDxPanel.className = 'card-tab-panel active';
-                const openFdaPanel = document.createElement('div');
-                openFdaPanel.className = 'card-tab-panel';
-                const bbkbPanel = document.createElement('div');
-                bbkbPanel.className = 'card-tab-panel';
-
-                compDxBtn.addEventListener('click', () => {
-                    compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
-                    compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
-                });
-                openFdaBtn.addEventListener('click', () => {
-                    openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
-                    openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
-                });
-                bbkbBtn.addEventListener('click', () => {
-                    bbkbBtn.classList.add('active'); compDxBtn.classList.remove('active'); openFdaBtn.classList.remove('active');
-                    bbkbPanel.classList.add('active'); compDxPanel.classList.remove('active'); openFdaPanel.classList.remove('active');
-                });
-
-                fdaContent.appendChild(compDxPanel);
-                fdaContent.appendChild(openFdaPanel);
-                fdaContent.appendChild(bbkbPanel);
-                fdaCard.appendChild(fdaContent);
-                if (cardsContainer) cardsContainer.appendChild(fdaCard);
-
-                // Companion Dx panel
-                const fdaCompDxUrl = 'https://www.fda.gov/medical-devices/in-vitro-diagnostics/list-cleared-or-approved-companion-diagnostic-devices-in-vitro-and-imaging-tools';
-                const fdaLinkEl = document.createElement('a');
-                fdaLinkEl.href = fdaCompDxUrl;
-                fdaLinkEl.target = '_blank';
-                fdaLinkEl.rel = 'noopener noreferrer';
-                fdaLinkEl.textContent = 'FDA companion diagnostics list ↗';
-                compDxPanel.appendChild(fdaLinkEl);
-
-                const fdaQueryLabel = document.createElement('div');
-                fdaQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 2px;';
-                fdaQueryLabel.textContent = `Gene: ${gene}`;
-                compDxPanel.appendChild(fdaQueryLabel);
-
-                const fdaDisclaimer = document.createElement('div');
-                fdaDisclaimer.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin:0 0 6px;font-style:italic;';
-                fdaDisclaimer.textContent = 'Note: FDA list does not always note resistance mutations.';
-                compDxPanel.appendChild(fdaDisclaimer);
-
-                const fdaResultsDiv = document.createElement('div');
-                const fdaSpinner = document.createElement('div');
-                fdaSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
-                fdaSpinner.textContent = 'Loading FDA drug data…';
-                fdaResultsDiv.appendChild(fdaSpinner);
-                compDxPanel.appendChild(fdaResultsDiv);
-
-                fetchFdaCompanionDiagnostics(gene).then((records) => {
-                    fdaResultsDiv.innerHTML = '';
-                    if (!records || records.length === 0) {
-                        const noResults = document.createElement('div');
-                        noResults.style.cssText = 'font-size:0.85rem;color:#6b7280;';
-                        noResults.textContent = `No FDA companion diagnostic records found for ${gene}.`;
-                        fdaResultsDiv.appendChild(noResults);
-                        return;
-                    }
-                    const countEl = document.createElement('div');
-                    countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
-                    countEl.textContent = `${records.length} record${records.length !== 1 ? 's' : ''}`;
-                    fdaResultsDiv.appendChild(countEl);
-
-                    const table = document.createElement('table');
-                    table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem;';
-                    const thead = document.createElement('thead');
-                    const headerRow = document.createElement('tr');
-                    ['Drug', 'Disease', 'Biomarker detail'].forEach((col) => {
-                        const th = document.createElement('th');
-                        th.style.cssText = 'text-align:left;padding:4px 6px;border-bottom:2px solid #fca5a5;background:#fff7f7;color:#7f1d1d;font-weight:600;';
-                        th.textContent = col;
-                        headerRow.appendChild(th);
-                    });
-                    thead.appendChild(headerRow);
-                    table.appendChild(thead);
-
-                    const FDA_PREVIEW_ROWS = 5;
-                    const buildRow = (rec, i) => {
-                        const tr = document.createElement('tr');
-                        tr.style.background = i % 2 === 0 ? '#fff' : '#fff7f7';
-                        const cellStyle = 'padding:4px 6px;vertical-align:top;border-bottom:1px solid #fee2e2;';
-                        const tdDrug = document.createElement('td');
-                        tdDrug.style.cssText = cellStyle + 'font-weight:600;';
-                        const drugsArr = Array.isArray(rec.therapy?.drugs) ? rec.therapy.drugs : [];
-                        tdDrug.textContent = drugsArr.length
-                            ? drugsArr.map(d => d.trade_name ? `${d.trade_name} (${d.generic_name})` : d.generic_name || d.raw || '').filter(Boolean).join(', ')
-                            : (rec.therapy?.raw || '—');
-                        const tdDisease = document.createElement('td');
-                        tdDisease.style.cssText = cellStyle + 'color:#374151;';
-                        const rawDisease = rec.indication?.raw || rec.indication?.disease || '—';
-                        tdDisease.textContent = rawDisease.replace(/\s*[-–]\s*(Tissue|Plasma|Blood|Serum|Urine|FFPE|Fresh Frozen|Whole Blood|ctDNA)\s*$/i, '').trim() || rawDisease;
-                        const tdDetail = document.createElement('td');
-                        tdDetail.style.cssText = cellStyle + 'color:#374151;';
-                        tdDetail.textContent = rec.biomarker?.details || rec.biomarker?.name || '—';
-                        tr.appendChild(tdDrug);
-                        tr.appendChild(tdDisease);
-                        tr.appendChild(tdDetail);
-                        return tr;
-                    };
-
-                    const tbody = document.createElement('tbody');
-                    records.slice(0, FDA_PREVIEW_ROWS).forEach((rec, i) => tbody.appendChild(buildRow(rec, i)));
-                    table.appendChild(tbody);
-                    fdaResultsDiv.appendChild(table);
-
-                    if (records.length > FDA_PREVIEW_ROWS) {
-                        const details = document.createElement('details');
-                        details.style.cssText = 'margin-top:2px;';
-                        const summary = document.createElement('summary');
-                        summary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
-                        summary.textContent = `Show ${records.length - FDA_PREVIEW_ROWS} more…`;
-                        details.appendChild(summary);
-                        const extraTable = document.createElement('table');
-                        extraTable.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem;';
-                        const extraTbody = document.createElement('tbody');
-                        records.slice(FDA_PREVIEW_ROWS).forEach((rec, i) => extraTbody.appendChild(buildRow(rec, FDA_PREVIEW_ROWS + i)));
-                        extraTable.appendChild(extraTbody);
-                        details.appendChild(extraTable);
-                        fdaResultsDiv.appendChild(details);
-                    }
-
-                    const note = document.createElement('div');
-                    note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
-                    note.textContent = 'Source: FDA companion diagnostics list. Verify against current FDA labeling before clinical use.';
-                    fdaResultsDiv.appendChild(note);
-                }).catch(() => {
-                    fdaResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">FDA drug data unavailable.</div>';
-                });
-
-                // BBKB panel
-                renderBbkbBiomarkerTherapies(bbkbPanel, gene, geneOnlyAiExtras);
-
-                // openFDA Labels panel
-                const ofLinkEl = document.createElement('a');
-                ofLinkEl.href = 'https://open.fda.gov/apis/drug/label/';
-                ofLinkEl.target = '_blank';
-                ofLinkEl.rel = 'noopener noreferrer';
-                ofLinkEl.textContent = 'openFDA drug label database ↗';
-                openFdaPanel.appendChild(ofLinkEl);
-
-                const ofQueryLabel = document.createElement('div');
-                ofQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
-                ofQueryLabel.textContent = `Searching indications_and_usage for: "${gene}"`;
-                openFdaPanel.appendChild(ofQueryLabel);
-
-                const ofResultsDiv = document.createElement('div');
-                const ofSpinner = document.createElement('div');
-                ofSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
-                ofSpinner.textContent = 'Loading openFDA results…';
-                ofResultsDiv.appendChild(ofSpinner);
-                openFdaPanel.appendChild(ofResultsDiv);
-
-                fetchOpenFdaDrugLabels(gene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults }) => {
-                    geneOnlyAiExtras.openfda = { gene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
-                    ofResultsDiv.innerHTML = '';
-                    if (!ofResults || ofResults.length === 0) {
-                        ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${escapeHtml(gene)}.</div>`;
-                        return;
-                    }
-                    const OF_PREVIEW = 7;
-                    const ofCountEl = document.createElement('div');
-                    ofCountEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
-                    const shownOf = `${Math.min(ofResults.length, OF_PREVIEW)} of ${ofResults.length} result${ofResults.length !== 1 ? 's' : ''}`;
-                    const excludedReasons = [];
-                    if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
-                    if (excludedBoundary) excludedReasons.push(`${excludedBoundary} substring of larger word`);
-                    if (excludedFalsePositive) excludedReasons.push(`${excludedFalsePositive} false-positive phrase`);
-                    if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
-                    const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
-                    ofCountEl.textContent = shownOf + excludedNote;
-                    ofResultsDiv.appendChild(ofCountEl);
-
-                    const buildDrugEl = (item) => {
-                        const drugEl = document.createElement('div');
-                        drugEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#fff7f7;border:1px solid #fee2e2;border-radius:4px;font-size:0.82rem;';
-                        const nameEl = document.createElement('div');
-                        nameEl.style.cssText = 'font-weight:700;color:#7f1d1d;margin-bottom:2px;';
-                        const brandPart = item.brand_name ? item.brand_name : '';
-                        const genericPart = item.generic_name ? (brandPart ? `(${item.generic_name})` : item.generic_name) : '';
-                        nameEl.textContent = [brandPart, genericPart].filter(Boolean).join(' ') || 'Unknown drug';
-                        drugEl.appendChild(nameEl);
-                        const metaParts = [item.manufacturer, item.route].filter(Boolean);
-                        if (metaParts.length) {
-                            const metaEl = document.createElement('div');
-                            metaEl.style.cssText = 'color:#6b7280;margin-bottom:4px;';
-                            metaEl.textContent = metaParts.join(' · ');
-                            drugEl.appendChild(metaEl);
-                        }
-                        if (item.indications_and_usage) {
-                            const indDetails = document.createElement('details');
-                            indDetails.style.cssText = 'margin-top:2px;';
-                            const indSummary = document.createElement('summary');
-                            indSummary.style.cssText = 'cursor:pointer;color:#991b1b;font-weight:600;font-size:0.8rem;list-style:revert;padding:2px 0;';
-                            indSummary.textContent = 'Indications & Usage';
-                            indDetails.appendChild(indSummary);
-                            const indText = document.createElement('div');
-                            indText.style.cssText = 'margin-top:4px;color:#374151;line-height:1.5;white-space:pre-wrap;font-size:0.79rem;max-height:300px;overflow-y:auto;';
-                            indText.textContent = item.indications_and_usage;
-                            indDetails.appendChild(indText);
-                            drugEl.appendChild(indDetails);
-                        }
-                        return drugEl;
-                    };
-
-                    ofResults.slice(0, OF_PREVIEW).forEach((item) => ofResultsDiv.appendChild(buildDrugEl(item)));
-                    if (ofResults.length > OF_PREVIEW) {
-                        const ofMoreDetails = document.createElement('details');
-                        ofMoreDetails.style.cssText = 'margin-top:2px;';
-                        const ofMoreSummary = document.createElement('summary');
-                        ofMoreSummary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
-                        ofMoreSummary.textContent = `Show ${ofResults.length - OF_PREVIEW} more…`;
-                        ofMoreDetails.appendChild(ofMoreSummary);
-                        ofResults.slice(OF_PREVIEW).forEach((item) => ofMoreDetails.appendChild(buildDrugEl(item)));
-                        ofResultsDiv.appendChild(ofMoreDetails);
-                    }
-                    const ofNote = document.createElement('div');
-                    ofNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
-                    ofNote.textContent = 'Source: openFDA drug label API. Results show labels mentioning this gene in indications. Verify against current FDA labeling.';
-                    ofResultsDiv.appendChild(ofNote);
-                }).catch(() => {
-                    ofResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">openFDA data unavailable.</div>';
-                });
-            }
+            createFdaDrugsCard({ container: cardsContainer, gene, extras: geneOnlyAiExtras, cardCache: geneOnlyCardCache });
 
             // ── Card: Clinical Trials ──────────────────────────────────────
-            {
-                const CT_PREVIEW = 5;
-                const ctCard = document.createElement('div');
-                ctCard.className = 'card';
-                const ctTitle = document.createElement('h3');
-                ctTitle.textContent = 'Clinical Trials';
-                applyCardTheme(ctCard, 'Clinical Trials');
-                ctCard.appendChild(ctTitle);
-                const ctContent = document.createElement('div');
-                ctContent.className = 'card-content';
-
-                const ctBaseUrl = `https://clinicaltrials.gov/search?query=${encodeURIComponent([gene, tumorType].filter(Boolean).join(' '))}&recrs=b&type=Intr`;
-                const ctLinkEl = document.createElement('a');
-                ctLinkEl.href = ctBaseUrl;
-                ctLinkEl.target = '_blank';
-                ctLinkEl.rel = 'noopener noreferrer';
-                ctLinkEl.textContent = 'Search ClinicalTrials.gov ↗';
-                ctContent.appendChild(ctLinkEl);
-
-                const ctQueryLabel = document.createElement('div');
-                ctQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
-                const queryParts = [gene, tumorType].filter(Boolean);
-                ctQueryLabel.textContent = `Query: "${queryParts.join(' + ')}" · Interventional · Recruiting · Phase 2+ · US`;
-                ctContent.appendChild(ctQueryLabel);
-
-                const ctResultsDiv = document.createElement('div');
-                const ctSpinner = document.createElement('div');
-                ctSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
-                ctSpinner.textContent = 'Loading clinical trials…';
-                ctResultsDiv.appendChild(ctSpinner);
-                ctContent.appendChild(ctResultsDiv);
-                ctCard.appendChild(ctContent);
-                if (cardsContainer) cardsContainer.appendChild(ctCard);
-
-                fetchClinicalTrials(gene, tumorType).then(({ total, studies }) => {
-                    ctResultsDiv.innerHTML = '';
-                    if (total === 0 || studies.length === 0) {
-                        ctResultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No recruiting Phase 2+ interventional trials found in the US.</div>';
-                        return;
-                    }
-                    const countEl = document.createElement('div');
-                    countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
-                    countEl.textContent = `${total} recruiting trial${total !== 1 ? 's' : ''} found`;
-                    ctResultsDiv.appendChild(countEl);
-
-                    const buildTrialEl = (trial) => {
-                        const el = document.createElement('div');
-                        el.style.cssText = 'margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #ccfbf1;font-size:0.82rem;';
-                        const titleLine = document.createElement('div');
-                        if (trial.url) {
-                            const link = document.createElement('a');
-                            link.href = trial.url;
-                            link.target = '_blank';
-                            link.rel = 'noopener noreferrer';
-                            link.style.fontWeight = '600';
-                            link.textContent = trial.title || trial.nctId;
-                            titleLine.appendChild(link);
-                        } else {
-                            titleLine.style.fontWeight = '600';
-                            titleLine.textContent = trial.title || trial.nctId;
-                        }
-                        el.appendChild(titleLine);
-                        const meta = document.createElement('div');
-                        meta.style.cssText = 'color:#6b7280;margin-top:3px;';
-                        const phaseParts = Array.isArray(trial.phases) && trial.phases.length
-                            ? trial.phases.map(p => String(p).replace('PHASE', 'Phase ')).join('/')
-                            : 'Phase N/A';
-                        const drugNames = (trial.interventions || [])
-                            .filter(i => i.type === 'DRUG' || i.type === 'BIOLOGICAL' || i.type === 'COMBINATION_PRODUCT')
-                            .map(i => i.name)
-                            .filter(Boolean)
-                            .slice(0, 4);
-                        const metaParts = [
-                            trial.nctId,
-                            phaseParts,
-                            drugNames.length ? drugNames.join(', ') : null,
-                            trial.usLocationCount ? `${trial.usLocationCount} US site${trial.usLocationCount !== 1 ? 's' : ''}` : null
-                        ].filter(Boolean);
-                        meta.textContent = metaParts.join(' · ');
-                        el.appendChild(meta);
-                        const hasExpandable = trial.briefSummary || (trial.conditions && trial.conditions.length > 0) || trial.inclusionCriteria;
-                        if (hasExpandable) {
-                            const trialDetails = document.createElement('details');
-                            trialDetails.style.cssText = 'margin-top:5px;';
-                            const trialDetailsSummary = document.createElement('summary');
-                            trialDetailsSummary.style.cssText = 'font-size:0.80rem;color:#0f766e;cursor:pointer;padding:2px 0;list-style:revert;';
-                            trialDetailsSummary.textContent = 'Summary, conditions & eligibility';
-                            trialDetails.appendChild(trialDetailsSummary);
-                            const expandContent = document.createElement('div');
-                            expandContent.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f0fdfa;border-radius:4px;';
-                            if (trial.conditions && trial.conditions.length > 0) {
-                                const condLabel = document.createElement('div');
-                                condLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
-                                condLabel.textContent = 'Conditions:';
-                                expandContent.appendChild(condLabel);
-                                const condVal = document.createElement('div');
-                                condVal.style.cssText = 'margin-bottom:6px;';
-                                condVal.textContent = trial.conditions.join(', ');
-                                expandContent.appendChild(condVal);
-                            }
-                            if (trial.briefSummary) {
-                                const summLabel = document.createElement('div');
-                                summLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
-                                summLabel.textContent = 'Summary:';
-                                expandContent.appendChild(summLabel);
-                                const summVal = document.createElement('div');
-                                summVal.style.cssText = 'margin-bottom:6px;';
-                                summVal.textContent = trial.briefSummary;
-                                expandContent.appendChild(summVal);
-                            }
-                            if (trial.inclusionCriteria) {
-                                const inclLabel = document.createElement('div');
-                                inclLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
-                                inclLabel.textContent = 'Inclusion Criteria:';
-                                expandContent.appendChild(inclLabel);
-                                const inclVal = document.createElement('pre');
-                                inclVal.style.cssText = 'white-space:pre-wrap;font-family:inherit;margin:0;';
-                                inclVal.textContent = trial.inclusionCriteria;
-                                expandContent.appendChild(inclVal);
-                            }
-                            trialDetails.appendChild(expandContent);
-                            el.appendChild(trialDetails);
-                        }
-                        return el;
-                    };
-
-                    studies.slice(0, CT_PREVIEW).forEach(trial => ctResultsDiv.appendChild(buildTrialEl(trial)));
-                    if (studies.length > CT_PREVIEW) {
-                        const moreDetails = document.createElement('details');
-                        moreDetails.style.cssText = 'margin-top:4px;';
-                        const moreSummary = document.createElement('summary');
-                        moreSummary.style.cssText = 'font-size:0.82rem;color:#0f766e;cursor:pointer;padding:4px 2px;list-style:revert;';
-                        moreSummary.textContent = `Show ${studies.length - CT_PREVIEW} more…`;
-                        moreDetails.appendChild(moreSummary);
-                        studies.slice(CT_PREVIEW).forEach(trial => moreDetails.appendChild(buildTrialEl(trial)));
-                        ctResultsDiv.appendChild(moreDetails);
-                    }
-                    const ctNote = document.createElement('div');
-                    ctNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
-                    ctNote.textContent = 'Source: ClinicalTrials.gov. Eligibility criteria not evaluated — verify before clinical use.';
-                    ctResultsDiv.appendChild(ctNote);
-                }).catch(() => {
-                    ctResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">Clinical trials data unavailable.</div>';
-                });
-            }
+            createClinicalTrialsCard({ container: cardsContainer, gene, tumorType, cardCache: geneOnlyCardCache });
 
             // ── Card: Guidelines ───────────────────────────────────────────
-            {
-                const GUIDELINES_BASE = 'https://www.drdoubleb.com/guidelines';
-                const guidelinesCard = document.createElement('div');
-                guidelinesCard.className = 'card';
-                const guidelinesTitle = document.createElement('h3');
-                guidelinesTitle.textContent = 'Guidelines';
-                applyCardTheme(guidelinesCard, 'Guidelines');
-                guidelinesCard.appendChild(guidelinesTitle);
-
-                const guidelinesContent = document.createElement('div');
-                guidelinesContent.className = 'card-content';
-
-                const guidelinesIntro = document.createElement('p');
-                guidelinesIntro.style.cssText = 'font-size:0.85rem;color:#6b7280;margin-bottom:8px;';
-                guidelinesIntro.textContent = 'Select a cancer type to retrieve guideline recommendations for this gene.';
-                guidelinesContent.appendChild(guidelinesIntro);
-
-                const dropdownRow = document.createElement('div');
-                dropdownRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;';
-
-                const cancerSelect = document.createElement('select');
-                cancerSelect.style.cssText = 'font-size:0.85rem;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px;flex:1;max-width:320px;';
-
-                const defaultOpt = document.createElement('option');
-                defaultOpt.value = '';
-                defaultOpt.textContent = 'Loading cancer types…';
-                defaultOpt.disabled = true;
-                defaultOpt.selected = true;
-                cancerSelect.appendChild(defaultOpt);
-                dropdownRow.appendChild(cancerSelect);
-                guidelinesContent.appendChild(dropdownRow);
-
-                const guidelinesResults = document.createElement('div');
-                guidelinesContent.appendChild(guidelinesResults);
-
-                guidelinesCard.appendChild(guidelinesContent);
-                if (cardsContainer) cardsContainer.appendChild(guidelinesCard);
-
-                (async () => {
-                    try {
-                        const resp = await fetch(`${GUIDELINES_BASE}/api/cancer-types.php`);
-                        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                        const data = await resp.json();
-                        cancerSelect.innerHTML = '';
-                        const placeholder = document.createElement('option');
-                        placeholder.value = '';
-                        placeholder.textContent = `— Select cancer type (${data.count} available) —`;
-                        placeholder.disabled = true;
-                        placeholder.selected = true;
-                        cancerSelect.appendChild(placeholder);
-                        (data.cancer_types || []).forEach(ct => {
-                            const opt = document.createElement('option');
-                            opt.value = ct.name;
-                            opt.textContent = ct.name + (ct.record_count ? ` (${ct.record_count} records)` : '');
-                            cancerSelect.appendChild(opt);
-                        });
-                        if (tumorType) {
-                            const tumorLower = tumorType.toLowerCase().trim();
-                            const matched = (data.cancer_types || []).find(ct =>
-                                (ct.aliases || []).some(a => a.toLowerCase() === tumorLower) ||
-                                ct.name.toLowerCase() === tumorLower ||
-                                ct.name.toLowerCase().includes(tumorLower) ||
-                                tumorLower.includes(ct.name.toLowerCase())
-                            );
-                            if (matched) {
-                                cancerSelect.value = matched.name;
-                                cancerSelect.dispatchEvent(new Event('change'));
-                            }
-                        }
-                    } catch (err) {
-                        cancerSelect.innerHTML = '';
-                        const errOpt = document.createElement('option');
-                        errOpt.textContent = 'Failed to load cancer types';
-                        errOpt.disabled = true;
-                        errOpt.selected = true;
-                        cancerSelect.appendChild(errOpt);
-                    }
-                })();
-
-                cancerSelect.addEventListener('change', async () => {
-                    const selectedCancer = cancerSelect.value;
-                    if (!selectedCancer) return;
-                    if (!gene) {
-                        guidelinesResults.innerHTML = '<div style="font-size:0.85rem;color:#9ca3af;">No gene available for guideline lookup.</div>';
-                        return;
-                    }
-                    guidelinesResults.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;padding:4px 0;">Loading guidelines…</div>';
-                    try {
-                        const params = new URLSearchParams({ cancer: selectedCancer, gene });
-                        const resp = await fetch(`${GUIDELINES_BASE}/api/search.php?${params}`);
-                        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                        const data = await resp.json();
-
-                        geneOnlyAiExtras.guidelines = {
-                            cancer_type: selectedCancer,
-                            gene,
-                            query: data.query,
-                            count: data.count,
-                            results: data.results
-                        };
-
-                        guidelinesResults.innerHTML = '';
-
-                        if (!data.results || data.results.length === 0) {
-                            const noResults = document.createElement('div');
-                            noResults.style.cssText = 'font-size:0.85rem;color:#9ca3af;';
-                            noResults.textContent = `No guideline records found for ${gene} in ${selectedCancer}.`;
-                            guidelinesResults.appendChild(noResults);
-                            return;
-                        }
-
-                        const countEl = document.createElement('div');
-                        countEl.style.cssText = 'font-size:0.85rem;font-weight:600;color:#3f6212;margin-bottom:8px;';
-                        countEl.textContent = `${data.count} guideline record${data.count !== 1 ? 's' : ''} for ${gene} in ${selectedCancer}`;
-                        guidelinesResults.appendChild(countEl);
-
-                        const renderKV = (obj, container, depth) => {
-                            Object.entries(obj).forEach(([key, val]) => {
-                                if (val === null || val === undefined || val === '' || (Array.isArray(val) && val.length === 0) || (typeof val === 'object' && !Array.isArray(val) && Object.keys(val).length === 0)) return;
-                                const fmtKey = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-                                if (typeof val === 'object' && !Array.isArray(val)) {
-                                    const subTitle = document.createElement('div');
-                                    subTitle.style.cssText = `padding-left:${depth * 12}px;font-weight:600;color:#374151;margin-top:3px;`;
-                                    subTitle.textContent = fmtKey + ':';
-                                    container.appendChild(subTitle);
-                                    renderKV(val, container, depth + 1);
-                                } else if (Array.isArray(val) && val.some(v => v !== null && typeof v === 'object')) {
-                                    const subTitle = document.createElement('div');
-                                    subTitle.style.cssText = `padding-left:${depth * 12}px;font-weight:600;color:#374151;margin-top:3px;`;
-                                    subTitle.textContent = fmtKey + ':';
-                                    container.appendChild(subTitle);
-                                    val.forEach(item => {
-                                        if (item !== null && typeof item === 'object') {
-                                            renderKV(item, container, depth + 1);
-                                        } else if (item !== null && item !== '') {
-                                            const row = document.createElement('div');
-                                            row.style.cssText = `padding-left:${(depth + 1) * 12}px;margin:2px 0;color:#1f2937;`;
-                                            row.textContent = String(item);
-                                            container.appendChild(row);
-                                        }
-                                    });
-                                } else {
-                                    const row = document.createElement('div');
-                                    row.style.cssText = `padding-left:${depth * 12}px;margin:2px 0;`;
-                                    const labelEl = document.createElement('span');
-                                    labelEl.style.cssText = 'font-weight:600;color:#374151;';
-                                    labelEl.textContent = fmtKey + ': ';
-                                    const valEl = document.createElement('span');
-                                    valEl.style.cssText = 'color:#1f2937;';
-                                    valEl.textContent = Array.isArray(val) ? val.filter(v => v !== null && v !== '').join(', ') : String(val);
-                                    row.appendChild(labelEl);
-                                    row.appendChild(valEl);
-                                    container.appendChild(row);
-                                }
-                            });
-                        };
-
-                        const renderSection = (title, obj, container) => {
-                            if (!obj || typeof obj !== 'object' || Object.keys(obj).length === 0) return;
-                            const sectionTitle = document.createElement('div');
-                            sectionTitle.style.cssText = 'font-weight:700;color:#166534;margin:6px 0 2px;font-size:0.79rem;text-transform:uppercase;letter-spacing:0.04em;border-top:1px solid #bbf7d0;padding-top:5px;';
-                            sectionTitle.textContent = title;
-                            container.appendChild(sectionTitle);
-                            renderKV(obj, container, 0);
-                        };
-
-                        data.results.forEach((record, idx) => {
-                            const recordEl = document.createElement('div');
-                            recordEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;font-size:0.82rem;';
-                            const headerEl = document.createElement('div');
-                            headerEl.style.cssText = 'font-weight:700;color:#166534;margin-bottom:4px;';
-                            const markerDisplay = (record.biomarker && (record.biomarker.display_name || record.biomarker.symbol)) || `Record ${idx + 1}`;
-                            const tumorDisplay = (record.tumor && (record.tumor.name || record.tumor.subtype)) || selectedCancer;
-                            headerEl.textContent = `${markerDisplay} — ${tumorDisplay}`;
-                            recordEl.appendChild(headerEl);
-
-                            const buildKVRow = (label, value) => {
-                                if (!value) return;
-                                const row = document.createElement('div');
-                                row.style.cssText = 'margin-bottom:3px;';
-                                const lbl = document.createElement('span');
-                                lbl.style.cssText = 'font-weight:600;';
-                                lbl.textContent = label + ': ';
-                                row.appendChild(lbl);
-                                row.appendChild(document.createTextNode(value));
-                                recordEl.appendChild(row);
-                            };
-
-                            if (Array.isArray(record.therapy) && record.therapy.length > 0) {
-                                buildKVRow('Recommended therapy', record.therapy.map(t => t.name).filter(Boolean).join(', '));
-                                const cat = record.therapy.map(t => t.evidence_or_category).filter(Boolean).join(', ');
-                                if (cat) buildKVRow('Category', cat);
-                                const setting = record.therapy.map(t => t.setting).filter(Boolean).join(', ');
-                                if (setting) buildKVRow('Therapy setting', setting);
-                            }
-                            if (record.testing) {
-                                const te = record.testing;
-                                if (te.recommended) buildKVRow('Recommended test', te.recommended);
-                                if (Array.isArray(te.methods) && te.methods.length > 0) {
-                                    buildKVRow('Method', te.methods.map(m => m.method).filter(Boolean).join(', '));
-                                }
-                            }
-                            if (record.clinical_significance && record.clinical_significance.summary) {
-                                buildKVRow('Clinical significance', record.clinical_significance.summary);
-                            }
-
-                            const detailsEl = document.createElement('details');
-                            detailsEl.style.cssText = 'margin-top:6px;';
-                            const detailsSummary = document.createElement('summary');
-                            detailsSummary.style.cssText = 'font-size:0.80rem;color:#15803d;cursor:pointer;padding:2px 0;list-style:revert;';
-                            detailsSummary.textContent = 'Full record details';
-                            detailsEl.appendChild(detailsSummary);
-                            const detailsBody = document.createElement('div');
-                            detailsBody.style.cssText = 'font-size:0.79rem;padding:4px 2px;margin-top:4px;max-height:350px;overflow-y:auto;line-height:1.6;';
-                            if (record.id) {
-                                const idRow = document.createElement('div');
-                                idRow.style.cssText = 'font-size:0.74rem;color:#9ca3af;margin-bottom:2px;';
-                                idRow.textContent = `Record ID: ${record.id}`;
-                                detailsBody.appendChild(idRow);
-                            }
-                            const sectionDefs = [['Tumor', record.tumor], ['Biomarker', record.biomarker], ['Clinical Significance', record.clinical_significance], ['Testing', record.testing], ['Therapy', record.therapy], ['Eligibility Context', record.eligibility_context], ['Interpretive States', record.interpretive_states], ['Guideline Source', record.guideline_metadata]];
-                            sectionDefs.forEach(([title, obj]) => renderSection(title, obj, detailsBody));
-                            const skipKeys = new Set(['id', 'tumor', 'biomarker', 'clinical_significance', 'testing', 'therapy', 'eligibility_context', 'interpretive_states', 'guideline_metadata', 'dataset_file', 'dataset_record_index', 'dataset_name']);
-                            Object.keys(record).filter(k => !skipKeys.has(k)).forEach(k => {
-                                const val = record[k];
-                                if (val && typeof val === 'object') {
-                                    renderSection(k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()), val, detailsBody);
-                                } else if (val !== null && val !== undefined && val !== '') {
-                                    const row = document.createElement('div');
-                                    row.style.cssText = 'margin:2px 0;';
-                                    const labelEl = document.createElement('span');
-                                    labelEl.style.cssText = 'font-weight:600;color:#374151;';
-                                    labelEl.textContent = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) + ': ';
-                                    row.appendChild(labelEl);
-                                    row.appendChild(document.createTextNode(String(val)));
-                                    detailsBody.appendChild(row);
-                                }
-                            });
-                            detailsEl.appendChild(detailsBody);
-                            recordEl.appendChild(detailsEl);
-                            guidelinesResults.appendChild(recordEl);
-                        });
-
-                        const sourceNote = document.createElement('div');
-                        sourceNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
-                        sourceNote.textContent = 'Source: drdoubleb.com/guidelines. For reference only — verify against current published guidelines.';
-                        guidelinesResults.appendChild(sourceNote);
-                    } catch (err) {
-                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${escapeHtml(err.message)}</div>`;
-                        geneOnlyAiExtras.guidelines = { error: err.message, cancer_type: selectedCancer, gene };
-                    }
-                });
-            }
+            createGuidelinesCard({ container: cardsContainer, tumorType, getGene: () => gene, extras: geneOnlyAiExtras });
 
             // ── Card: Optional AI Review (gene-only mode) ──────────────────
             createAiReviewCard({
@@ -5463,11 +5587,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 introText: 'Send the retrieved gene-level data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
                 loadingText: 'Gathering gene-level context for AI review…',
                 buildContext: async (userNotes) => {
-                    // Supplemental context for gene-only mode: skip coordinate-dependent calls
+                    // Supplemental context for gene-only mode: skip coordinate-dependent
+                    // calls, and reuse what the cards already fetched — a fresh fetch is
+                    // the fallback, not the default.
+                    const fdaPromise = Array.isArray(geneOnlyCardCache.fda_companion_diagnostics_records)
+                        ? Promise.resolve(geneOnlyCardCache.fda_companion_diagnostics_records)
+                        : fetchFdaCompanionDiagnostics(gene).catch(() => []);
+                    const bbkbPromise = (geneOnlyAiExtras.bbkb_biomarker_therapies && Array.isArray(geneOnlyAiExtras.bbkb_biomarker_therapies.results))
+                        ? Promise.resolve(geneOnlyAiExtras.bbkb_biomarker_therapies)
+                        : fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] }));
+                    const trialsPromise = (geneOnlyCardCache.clinical_trials && Array.isArray(geneOnlyCardCache.clinical_trials.studies))
+                        ? Promise.resolve(geneOnlyCardCache.clinical_trials)
+                        : fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }));
                     const [fdaRecords, bbkbTherapies, clinicalTrialData] = await Promise.all([
-                        fetchFdaCompanionDiagnostics(gene).catch(() => []),
-                        fetchBbkbBiomarkerTherapies(gene).catch(() => ({ total_matched: 0, returned: 0, results: [] })),
-                        fetchClinicalTrials(gene, tumorType).catch(() => ({ total: 0, studies: [] }))
+                        fdaPromise,
+                        bbkbPromise,
+                        trialsPromise
                     ]);
                     const pubmedTerm = altType ? `${gene} ${altType}` : gene;
                     // Prefer the PubMed card's already-fetched data over re-fetching.
@@ -5477,10 +5612,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     const pubmedPromise = (cachedPubmed && Array.isArray(cachedPubmed.articles) && cachedPubmed.articles.length > 0)
                         ? Promise.resolve({ total: cachedPubmed.total ?? cachedPubmed.articles.length, articles: cachedPubmed.articles })
                         : fetchPubmedArticles(pubmedTerm, 5).catch(() => ({ total: 0, articles: [] }));
+                    const civicPromise = geneOnlyAiExtras.civic_api
+                        ? Promise.resolve(geneOnlyAiExtras.civic_api)
+                        : fetchCivicApiData(gene, '').catch(() => null);
+                    const openFdaPromise = (geneOnlyAiExtras.openfda && Array.isArray(geneOnlyAiExtras.openfda.results))
+                        ? Promise.resolve(geneOnlyAiExtras.openfda)
+                        : fetchOpenFdaDrugLabels(gene).catch(() => null);
                     const [pubmedData, civicData, openFdaData] = await Promise.all([
                         pubmedPromise,
-                        fetchCivicApiData(gene, '').catch(() => null),
-                        fetchOpenFdaDrugLabels(gene).catch(() => null)
+                        civicPromise,
+                        openFdaPromise
                     ]);
                     const supplementalContext = {
                         ...geneOnlyAiExtras,
@@ -5488,9 +5629,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         pubmed: pubmedData,
                         openfda_drug_labels: condenseOpenFdaForAi(openFdaData)
                     };
-                    // geneOnlyAiExtras may itself carry a full openFDA payload (from the
-                    // openFDA card); cap that copy's record count too so the AI context stays bounded.
-                    if (supplementalContext.openfda) supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
+                    // The card's copy under `openfda` would duplicate `openfda_drug_labels`
+                    // in the payload — for drug-rich genes that is the dominant context,
+                    // doubled. Keep the one canonical key.
+                    if (supplementalContext.openfda_drug_labels && supplementalContext.openfda) {
+                        delete supplementalContext.openfda;
+                    } else if (supplementalContext.openfda) {
+                        supplementalContext.openfda = condenseOpenFdaForAi(supplementalContext.openfda);
+                    }
                     return {
                         submitted_query: rawInput,
                         gene,
@@ -5540,17 +5686,33 @@ document.addEventListener('DOMContentLoaded', () => {
         // genomic variants that MyVariant.info does not index (e.g. delins).  If this
         // request fails, transcriptsFromRecoder will remain an empty array.
         LookupProgress.step('recoder', 'running');
-        try {
-            transcriptsFromRecoder = await getTranscriptsList(query);
-            LookupProgress.stepUnlessFailed('recoder', transcriptsFromRecoder.length ? 'ok' : 'empty',
-                transcriptsFromRecoder.length
-                    ? `${transcriptsFromRecoder.length} transcript${transcriptsFromRecoder.length === 1 ? '' : 's'}`
+        // Start the recoder WITHOUT awaiting it. The whole pipeline used to block
+        // on this call before even trying the direct MyVariant search — during an
+        // Ensembl outage that meant ~37s of retries/timeouts in front of a result
+        // that the direct search then produced in ~2s. The promise is awaited only
+        // where its answer is actually needed: in full before the recoder-candidate
+        // fallback, and with a short grace period before rendering a result that
+        // was resolved without it (so a healthy Ensembl still contributes RefSeq
+        // transcript nomenclature, but a sick one cannot hold the page hostage).
+        transcriptsFromRecoder = [];
+        const transcriptsPromise = getTranscriptsList(query).then((list) => {
+            // Guard the shared state: a stale search's late-resolving recoder must
+            // not overwrite the transcripts or progress panel of a newer search.
+            if (!isCurrentSearch()) return list;
+            transcriptsFromRecoder = list;
+            LookupProgress.stepUnlessFailed('recoder', list.length ? 'ok' : 'empty',
+                list.length
+                    ? `${list.length} transcript${list.length === 1 ? '' : 's'}`
                     : 'no transcript match');
-        } catch (recoderErr) {
+            return list;
+        }).catch((recoderErr) => {
+            // getTranscriptsList swallows its own errors, so this is a safety net.
+            if (!isCurrentSearch()) return [];
             transcriptsFromRecoder = [];
             LookupProgress.step('recoder', 'fail', describeUpstreamFailure(recoderErr));
             if (recoderErr && recoderErr.retryable) LookupProgress.markUpstreamOutage('recoder');
-        }
+            return [];
+        });
         if (!query) return;
         statusEl.textContent = 'Processing...';
         resultSection.classList.add('hidden');
@@ -5645,11 +5807,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     statusEl.textContent = 'Recoder fallback…';
                 }
-                try {
-                    recoderData = await fetchVariantRecoder(query);
-                } catch (errRecoder) {
-                    // Warn in console but don't immediately fail; we will attempt a free-text MyVariant search below.
-                    console.warn('Variant recoder failed; will attempt free-text search', errRecoder);
+                // Nothing resolved without the recoder, so now its answer is genuinely
+                // needed — wait for the in-flight call (this also guarantees
+                // lastRecoderResult below reflects this query's attempt).
+                await transcriptsPromise;
+                // getTranscriptsList already asked the recoder for this exact query at
+                // the start of the lookup (and fetchWithRetry exhausted its retries if
+                // Ensembl was unwell) — reuse that answer instead of a second 12s-class
+                // round trip. A cached failure stays a failure: recoderData remains
+                // null and the free-text MyVariant fallback below takes over.
+                if (lastRecoderResult.query === query) {
+                    recoderData = lastRecoderResult.data;
+                    if (!recoderData && lastRecoderResult.error) {
+                        console.warn('Variant recoder failed earlier in this lookup; skipping retry', lastRecoderResult.error);
+                    }
+                } else {
+                    try {
+                        recoderData = await fetchVariantRecoder(query);
+                    } catch (errRecoder) {
+                        // Warn in console but don't immediately fail; we will attempt a free-text MyVariant search below.
+                        console.warn('Variant recoder failed; will attempt free-text search', errRecoder);
+                    }
                 }
             } else {
                 // Annotation already exists; continue to fetch annotation details.
@@ -5664,39 +5842,63 @@ document.addEventListener('DOMContentLoaded', () => {
                 // against the expected protein change.
                 // candidateVariants is defined in a higher scope (line ~1253) to allow reuse
                 // in later fallbacks (e.g. free‑text search). Do not redeclare it here.
-                for (const item of recoderData) {
-                    for (const key in item) {
-                        const sub = item[key];
-                        if (!sub) continue;
-                        // hgvsg entries may be a string or an array
-                        if (sub.hgvsg) {
-                            const hgvsgList = Array.isArray(sub.hgvsg) ? sub.hgvsg : [sub.hgvsg];
-                            for (const hgvsg of hgvsgList) {
-                                try {
-                                    const mv = convertHgvsgToMyVariant(hgvsg);
-                                    const lifted = await liftoverHg38ToHg19(mv);
-                                    console.log('[DEBUG] Converted hgvsg to MV and liftover:', hgvsg, '->', mv, '->', lifted);
-                                    candidateVariants.push(lifted);
-                                } catch {
-                                    // skip conversion errors
+                // Convert each hgvsg/SPDI entry to MyVariant notation, lifting to hg19
+                // ONLY when its accession says GRCh38. The GRCh37 recoder mirror emits
+                // GRCh37 accessions (NC_000007.13), and the previous unconditional
+                // liftoverHg38ToHg19() "mapped" those already-hg19 positions to a locus
+                // hundreds of kb away — Ensembl's /map does not error on a coordinate
+                // from the wrong assembly, it just answers wrongly. Every substitution
+                // candidate was corrupted this way (indels escaped only because the
+                // liftover helper's regex matches substitutions alone). Unknown
+                // accessions conservatively keep the old lift-it behaviour.
+                const convertCandidate = async (raw, converter, label) => {
+                    try {
+                        const mv = converter(raw);
+                        const assembly = assemblyFromNcAccession(raw);
+                        if (assembly === 'GRCh37') {
+                            console.log(`[DEBUG] Converted ${label} to MV:`, raw, '->', mv, '(already GRCh37)');
+                            return mv;
+                        }
+                        const lifted = await liftoverHg38ToHg19(mv);
+                        // A known-GRCh38 coordinate that came back unchanged was NOT
+                        // converted (the helper only lifts substitutions, and returns
+                        // its input on failure) — drop it rather than carry an hg38
+                        // position mislabelled as hg19 into the cards.
+                        if (assembly === 'GRCh38' && lifted === mv) {
+                            console.log(`[DEBUG] Dropping unliftable GRCh38 ${label} candidate:`, raw);
+                            return null;
+                        }
+                        console.log(`[DEBUG] Converted ${label} to MV and liftover:`, raw, '->', mv, '->', lifted);
+                        return lifted;
+                    } catch {
+                        return null; // skip conversion errors
+                    }
+                };
+                {
+                    // Collect conversions first, then run them concurrently — the lifted
+                    // (GRCh38) entries each cost an Ensembl /map round-trip and used to
+                    // run strictly in series.
+                    const conversions = [];
+                    for (const item of recoderData) {
+                        for (const key in item) {
+                            const sub = item[key];
+                            if (!sub) continue;
+                            // hgvsg / spdi entries may be a string or an array
+                            if (sub.hgvsg) {
+                                const hgvsgList = Array.isArray(sub.hgvsg) ? sub.hgvsg : [sub.hgvsg];
+                                for (const hgvsg of hgvsgList) {
+                                    conversions.push(convertCandidate(hgvsg, convertHgvsgToMyVariant, 'hgvsg'));
                                 }
                             }
-                        }
-                        // spdi entries may be string or array
-                        if (sub.spdi) {
-                            const spdiList = Array.isArray(sub.spdi) ? sub.spdi : [sub.spdi];
-                            for (const spdi of spdiList) {
-                                try {
-                                    const mv = convertSpdiToMyVariant(spdi);
-                                    const lifted = await liftoverHg38ToHg19(mv);
-                                    console.log('[DEBUG] Converted SPDI to MV and liftover:', spdi, '->', mv, '->', lifted);
-                                    candidateVariants.push(lifted);
-                                } catch {
-                                    // skip conversion errors
+                            if (sub.spdi) {
+                                const spdiList = Array.isArray(sub.spdi) ? sub.spdi : [sub.spdi];
+                                for (const spdi of spdiList) {
+                                    conversions.push(convertCandidate(spdi, convertSpdiToMyVariant, 'SPDI'));
                                 }
                             }
                         }
                     }
+                    candidateVariants.push(...(await Promise.all(conversions)).filter(Boolean));
                 }
                 // Remove duplicates and ensure at least one candidate exists
                 const uniqueCandidates = Array.from(new Set(candidateVariants));
@@ -5709,15 +5911,23 @@ document.addEventListener('DOMContentLoaded', () => {
                     let selectedAnn = null;
                     let selectedVar = null;
                     let firstAnn = null;
-                    for (const cand of uniqueCandidates) {
-                        let ann = null;
+                    // Fetch every candidate's annotation concurrently (typically 1-5);
+                    // the selection walk below still runs in the recoder's priority
+                    // order, so the outcome matches the old sequential scan minus the
+                    // serial MyVariant round-trips.
+                    const candidateAnns = await Promise.all(uniqueCandidates.map(async (cand) => {
                         try {
-                            ann = await fetchMyVariant(cand);
+                            const fetched = await fetchMyVariant(cand);
                             console.log('[DEBUG] Fetched annotation for candidate', cand);
+                            return fetched;
                         } catch {
                             console.log('[DEBUG] Annotation fetch error for candidate', cand);
-                            continue;
+                            return null;
                         }
+                    }));
+                    for (let candIdx = 0; candIdx < uniqueCandidates.length; candIdx++) {
+                        const cand = uniqueCandidates[candIdx];
+                        const ann = candidateAnns[candIdx];
                         if (!ann) continue;
                         if (!firstAnn) {
                             firstAnn = ann;
@@ -6115,6 +6325,20 @@ document.addEventListener('DOMContentLoaded', () => {
                     }];
                 }
             }
+            // The recoder may still be in flight when the annotation was resolved
+            // without it (direct MyVariant hit). Give it a short grace so a healthy
+            // Ensembl still contributes RefSeq transcript nomenclature to the
+            // Variant card, but never let a sick one hold the finished result page
+            // hostage — the dbNSFP fallback renders the correct canonical without it.
+            await Promise.race([
+                transcriptsPromise,
+                new Promise((resolve) => setTimeout(resolve, 6000))
+            ]);
+            // A newer search may have started while this one's annotation was in
+            // flight; from here on every write hits shared UI (progress panel,
+            // status line, cards), so a stale run must stop before it overwrites
+            // the newer lookup's output.
+            if (!isCurrentSearch()) return;
             // Display annotation
             statusEl.textContent = 'Annotation retrieved';
             // Show what the input actually resolved to. Users paste a coordinate row
@@ -6161,6 +6385,10 @@ document.addEventListener('DOMContentLoaded', () => {
             let detailsData = buildDetailsData(annotation, rawInput, gVariant);
             const detailsContainer = document.getElementById('detailsContainer');
             const aiReviewExtras = {};
+            // Card results reused by the AI-review buildContext but NOT spread into
+            // supplemental_card_data (they already appear top-level in the payload,
+            // so keeping them out of aiReviewExtras avoids sending two copies).
+            const cardDataCache = {};
 
             // GRCh37 VCF-style alleles for this lookup, resolved once and shared by
             // every allele-dependent consumer (gnomAD v2 link, gnomAD v4 API, SpliceAI,
@@ -6548,18 +6776,32 @@ document.addEventListener('DOMContentLoaded', () => {
                     cDNAHTML = hgvscList
                         .map((h) => (h === canonicalCandidate ? `<strong>${h}</strong>` : h))
                         .join(', ');
-                    // Build a list of transcript mappings (transcript ID -> cDNA, protein). We'll align hgvsc and hgvsp by index.
+                    // Build a list of transcript mappings (transcript ID -> cDNA, protein).
+                    //
+                    // MyVariant's dbnsfp.hgvsc entries are BARE c. strings with no
+                    // accession ("c.1799T>A"), so splitting on ':' used to shove the
+                    // whole string into the transcript slot and leave cDNA empty — the
+                    // Variant card's canonical entry then had no cDNA, the display fell
+                    // back to the FIRST list entry, and BRAF V600E rendered as the
+                    // alternate-isoform c.620T>A whenever the recoder was down. Treat an
+                    // accession-less entry as the cDNA itself. hgvsp is index-paired
+                    // only when the arrays actually align — dbNSFP's hgvsc and hgvsp
+                    // arrays can have different lengths (V600E: 3 vs 4), and pairing
+                    // misaligned arrays attaches the wrong protein to a transcript.
                     const hgvspListLocal = (annotation.dbnsfp && annotation.dbnsfp.hgvsp) ? (Array.isArray(annotation.dbnsfp.hgvsp) ? annotation.dbnsfp.hgvsp : [annotation.dbnsfp.hgvsp]) : [];
+                    const hgvspAligned = hgvspListLocal.length === hgvscList.length;
                     for (let i = 0; i < hgvscList.length; i++) {
                         const sc = hgvscList[i];
                         if (!sc) continue;
-                        const parts = String(sc).split(':');
-                        const transcriptId = parts[0];
-                        const cpart = parts.slice(1).join(':');
+                        const scStr = String(sc);
+                        const scColon = scStr.indexOf(':');
+                        const transcriptId = scColon !== -1 ? scStr.slice(0, scColon) : '';
+                        const cpart = scColon !== -1 ? scStr.slice(scColon + 1) : scStr;
                         let ppart = '';
-                        if (hgvspListLocal[i]) {
-                            const pparts = String(hgvspListLocal[i]).split(':');
-                            ppart = pparts.slice(1).join(':');
+                        if (hgvspAligned && hgvspListLocal[i]) {
+                            const spStr = String(hgvspListLocal[i]);
+                            const spColon = spStr.indexOf(':');
+                            ppart = spColon !== -1 ? spStr.slice(spColon + 1) : spStr;
                         }
                         transcriptsList.push({ transcript: transcriptId, cDNA: cpart, protein: ppart, canonical: sc === canonicalCandidate });
                     }
@@ -6815,11 +7057,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 });
                 content.appendChild(makeLine('Gene', geneNames));
-                // Determine canonical cDNA and protein from transcriptsList. If not available, fall back to first values.
-                let canonicalEntryForDisplay = null;
-                if (transcriptsList && transcriptsList.length > 0) {
-                    canonicalEntryForDisplay = transcriptsList.find(t => t.canonical) || transcriptsList[0];
-                }
                 /*
                  * Determine the canonical cDNA (c.) and protein (p.) values to display in the
                  * summary card.  In earlier builds, certain genomic inputs resulted in
@@ -6866,7 +7103,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 // any formatted lists built earlier (e.g. root‑level hgvsc/hgvsp arrays) and
                 // provide a sensible default when annotation properties are unavailable.
                 if (!canonicalCVal && cDNAHTML) {
-                    const cdClean = cDNAHTML.replace(/<[^>]+>/g, '').split(',')[0].trim();
+                    // The canonical entry is the <strong>-wrapped one — prefer it over
+                    // whatever happens to be first in the list (dbNSFP's array order is
+                    // arbitrary; taking [0] once showed BRAF V600E as c.620T>A).
+                    const strongMatch = cDNAHTML.match(/<strong>([^<]*)<\/strong>/i);
+                    const cdClean = (strongMatch ? strongMatch[1] : cDNAHTML.replace(/<[^>]+>/g, '').split(',')[0]).trim();
                     if (cdClean) canonicalCVal = cdClean;
                 }
                 if (!canonicalProtVal && protein) {
@@ -6903,7 +7144,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     ul.style.paddingLeft = '1.2em';
                     transcriptsList.forEach((t) => {
                         const li = document.createElement('li');
-                        let inner = `${t.transcript}: ${t.cDNA}`;
+                        // dbNSFP entries have no transcript accession — render just the
+                        // cDNA rather than a dangling ": c.1799T>A".
+                        let inner = [t.transcript, t.cDNA].filter(Boolean).join(': ');
                         if (t.protein) inner += `, ${t.protein}`;
                         if (t.canonical) {
                             li.innerHTML = `<strong>${escapeHtml(inner)}</strong>`;
@@ -8495,20 +8738,6 @@ document.addEventListener('DOMContentLoaded', () => {
                                 addRow(table, 'TCGA/ICGC/GENIE count', tcga);
                             }
 
-                            // Keep functional/epidemiology visible but collapse computational + variant rows by default.
-                            const collapsibleRows = [];
-                            Array.from(table.querySelectorAll('tr')).forEach((tr) => {
-                                const header = tr.firstChild && tr.firstChild.textContent ? tr.firstChild.textContent : '';
-                                if (/Computational predictions \\(collapsed below\\)|Variant \\(collapsed below\\)/.test(header)) {
-                                    collapsibleRows.push(tr);
-                                    let n = tr.nextSibling;
-                                    while (n && !(n.firstChild && n.firstChild.colSpan === 2)) {
-                                        collapsibleRows.push(n);
-                                        n = n.nextSibling;
-                                    }
-                                }
-                            });
-                            collapsibleRows.forEach((r) => { r.style.display = 'none'; });
                             tp53Content.appendChild(table);
                             if (compDetails) tp53Content.appendChild(compDetails);
                             tp53Content.appendChild(variantDetails);
@@ -8690,29 +8919,47 @@ document.addEventListener('DOMContentLoaded', () => {
                 const pubmedVariantTumorTerm = (tumorType && aiReviewSearchVariantTerm)
                     ? [aiReviewGene, aiReviewSearchVariantTerm, tumorType].filter(Boolean).join(' ')
                     : '';
-                // Prefer card-cached PubMed results when available. The cards fetch the same
-                // queries on render; re-fetching here adds parallel load on NCBI's eutils, and
-                // when efetch trips the rate limit the proxy returns articles with empty
-                // abstracts — making the AI payload miss abstracts the cards already have.
-                const pubmedFromCacheOrFetch = (key, term) => {
+                // Prefer card-cached results when available. The cards fetch the same
+                // data on render; re-fetching everything on every "Run AI review" click
+                // re-hammers rate-limited upstreams (NCBI eutils above all — when efetch
+                // trips the limit the proxy returns articles with EMPTY abstracts, so the
+                // AI payload used to miss abstracts the cards already had) and adds
+                // seconds of latency per run. `cachedOr` reuses what a card stored in
+                // aiReviewExtras and only fetches when the card's data is absent/errored.
+                const cachedOr = (key, isValid, fetcher) => {
                     const cached = aiReviewExtras[key];
-                    if (cached && Array.isArray(cached.articles) && cached.articles.length > 0) {
-                        return Promise.resolve({ total: cached.total ?? cached.articles.length, articles: cached.articles });
-                    }
-                    return term ? fetchPubmedArticles(term, 5) : Promise.resolve({ total: 0, articles: [] });
+                    if (cached != null && isValid(cached)) return Promise.resolve(cached);
+                    return fetcher();
                 };
+                const pubmedFromCacheOrFetch = (key, term) => cachedOr(
+                    key,
+                    (c) => Array.isArray(c.articles) && c.articles.length > 0,
+                    () => (term ? fetchPubmedArticles(term, 5) : Promise.resolve({ total: 0, articles: [] }))
+                );
                 const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation, await getResolvedVcfAlleles());
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
-                    ['clinvar_variant_record', clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)],
+                    // The ClinVar card may have recovered a variation ID from the region
+                    // pull that the MyVariant annotation lacks — reusing its record (not
+                    // just saving a fetch) also stops that recovery from being clobbered
+                    // with null here.
+                    ['clinvar_variant_record', cachedOr('clinvar_variant_record',
+                        (c) => typeof c === 'object' && !c.error,
+                        () => (clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)))],
                     ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 5).then(r => ({
                         note: 'ClinVar variants within ±5bp of the queried position. The queried variant itself may appear here if it has its own ClinVar entry. Do not use these neighboring variants\' classifications as the classification for the queried variant.',
                         window_bp: 5,
                         variants: r.variants
                     })) : Promise.resolve({ note: 'ClinVar variants within ±5bp of the queried position.', window_bp: 5, variants: [] })],
-                    ['civic_api', aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)],
-                    ['gnomad_v4', coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt) : Promise.resolve(null)],
-                    ['spliceai_lookup', spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)],
+                    ['civic_api', cachedOr('civic_api',
+                        (c) => typeof c === 'object' && !c.error,
+                        () => (aiReviewGene ? fetchCivicApiData(aiReviewGene, aiReviewProtein) : Promise.resolve(null)))],
+                    ['gnomad_v4', cachedOr('gnomad_v4',
+                        (c) => typeof c === 'object' && Boolean(c.status),
+                        () => (coords.chrom && coords.pos37 && coords.ref && coords.alt ? fetchGnomadV4(coords.chrom, coords.pos37, coords.ref, coords.alt, extractHg38Start(annotation)) : Promise.resolve(null)))],
+                    ['spliceai_lookup', cachedOr('spliceai_lookup',
+                        (c) => typeof c === 'object' && !c.error && Boolean(c.data),
+                        () => (spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)))],
                     ['pubmed', pubmedTerm ? pubmedFromCacheOrFetch('pubmed', pubmedTerm) : Promise.resolve({ total: 0, articles: [] })],
                     ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? pubmedFromCacheOrFetch('pubmed_tumor_type', pubmedTumorTerm) : Promise.resolve(null)],
                     ['pubmed_variant_tumor_type', pubmedVariantTumorTerm
@@ -8720,15 +8967,23 @@ document.addEventListener('DOMContentLoaded', () => {
                         && pubmedVariantTumorTerm !== pubmedTumorTerm
                         ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm)
                         : Promise.resolve(null)],
-                    ['openfda_drug_labels', aiReviewGene ? fetchOpenFdaDrugLabels(aiReviewGene).catch(() => null) : Promise.resolve(null)],
-                    ['bbkb_biomarker_therapies', aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null)],
-                    ['tp53_mutation_database', isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
-                        gene: 'TP53',
-                        protein: normaliseAiReviewVariantText(aiReviewProtein),
-                        cdna: normaliseAiReviewVariantText(aiReviewCdna),
-                        genomic: String(gVariant || '').trim(),
-                        debug: true
-                    }) : Promise.resolve(null)]
+                    // The openFDA card stores the same payload shape under `openfda`;
+                    // reuse it rather than re-paging up to 10 requests of label text.
+                    ['openfda_drug_labels', cachedOr('openfda',
+                        (c) => Array.isArray(c.results),
+                        () => (aiReviewGene ? fetchOpenFdaDrugLabels(aiReviewGene).catch(() => null) : Promise.resolve(null)))],
+                    ['bbkb_biomarker_therapies', cachedOr('bbkb_biomarker_therapies',
+                        (c) => Array.isArray(c.results),
+                        () => (aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null)))],
+                    ['tp53_mutation_database', cachedOr('tp53_mutation_database',
+                        (c) => typeof c === 'object' && !c.error,
+                        () => (isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
+                            gene: 'TP53',
+                            protein: normaliseAiReviewVariantText(aiReviewProtein),
+                            cdna: normaliseAiReviewVariantText(aiReviewCdna),
+                            genomic: String(gVariant || '').trim(),
+                            debug: true
+                        }) : Promise.resolve(null)))]
                 ];
                 const settled = await Promise.allSettled(tasks.map(([, promise]) => promise));
                 settled.forEach((result, idx) => {
@@ -8737,6 +8992,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         ? result.value
                         : { error: result.reason?.message || String(result.reason || 'Unavailable') };
                 });
+                // The openFDA card's copy (spread in as `openfda`) would duplicate
+                // `openfda_drug_labels` byte-for-byte — for drug-rich genes that is the
+                // dominant part of the payload, doubled. Keep the one canonical key.
+                if (supplemental.openfda_drug_labels && supplemental.openfda) delete supplemental.openfda;
                 // Replace raw SpliceAI payload with compact summary (top 5 transcripts by delta score)
                 if (supplemental.spliceai_lookup && !supplemental.spliceai_lookup.error) {
                     const spliceSummary = getSpliceAiScoreSummary(supplemental.spliceai_lookup);
@@ -9022,871 +9281,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // Card: PubMed
                 {
-                    const PUBMED_LIMIT = 5;
-                    const pmCard = document.createElement('div');
-                    pmCard.className = 'card';
-                    const pmTitle = document.createElement('h3');
-                    pmTitle.textContent = 'PubMed';
-                    applyCardTheme(pmCard, 'PubMed');
-                    pmCard.appendChild(pmTitle);
-                    const pmContent = document.createElement('div');
-                    pmContent.className = 'card-content';
-
                     const pmSearchTerm = [firstGene, searchVariantTerm].filter(Boolean).join(' ');
                     const pmTumorSearchTerm = tumorType ? [firstGene, tumorType].filter(Boolean).join(' ') : '';
                     const pmVariantTumorSearchTerm = (tumorType && searchVariantTerm)
                         ? [firstGene, searchVariantTerm, tumorType].filter(Boolean).join(' ')
                         : '';
-                    const hasPmTumorTab = !!(pmTumorSearchTerm && pmSearchTerm !== pmTumorSearchTerm);
-                    const hasPmVariantTumorTab = !!(pmVariantTumorSearchTerm
-                        && pmVariantTumorSearchTerm !== pmSearchTerm
-                        && pmVariantTumorSearchTerm !== pmTumorSearchTerm);
-
-                    const buildPmResultsPanel = (container, searchTerm, extraKey) => {
-                        const queryUrl = searchTerm
-                            ? `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(searchTerm)}&sort=relevance`
-                            : 'https://pubmed.ncbi.nlm.nih.gov/';
-                        const linkEl = document.createElement('a');
-                        linkEl.href = queryUrl;
-                        linkEl.target = '_blank';
-                        linkEl.rel = 'noopener noreferrer';
-                        linkEl.textContent = 'Search PubMed ↗';
-                        container.appendChild(linkEl);
-                        if (searchTerm) {
-                            const queryLabel = document.createElement('div');
-                            queryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
-                            queryLabel.textContent = `Query: "${searchTerm}"`;
-                            container.appendChild(queryLabel);
+                    const pmTabs = [{ label: 'Gene + Variant', term: pmSearchTerm, extraKey: 'pubmed' }];
+                    if (pmTumorSearchTerm && pmSearchTerm !== pmTumorSearchTerm) {
+                        pmTabs.push({ label: 'Gene + Tumor Type', term: pmTumorSearchTerm, extraKey: 'pubmed_tumor_type' });
+                        if (pmVariantTumorSearchTerm
+                            && pmVariantTumorSearchTerm !== pmSearchTerm
+                            && pmVariantTumorSearchTerm !== pmTumorSearchTerm) {
+                            pmTabs.push({ label: 'Gene + Variant + Tumor Type', term: pmVariantTumorSearchTerm, extraKey: 'pubmed_variant_tumor_type' });
                         }
-                        const resultsDiv = document.createElement('div');
-                        if (searchTerm) {
-                            const spinner = document.createElement('div');
-                            spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
-                            spinner.textContent = 'Loading PubMed results…';
-                            resultsDiv.appendChild(spinner);
-                        }
-                        container.appendChild(resultsDiv);
-                        if (searchTerm) {
-                            fetchPubmedArticles(searchTerm, PUBMED_LIMIT).then(({ total, articles }) => {
-                                aiReviewExtras[extraKey] = { query: searchTerm, total, articles };
-                                resultsDiv.innerHTML = '';
-                                if (total === 0 || articles.length === 0) {
-                                    resultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No PubMed results found.</div>';
-                                    return;
-                                }
-                                const countEl = document.createElement('div');
-                                countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
-                                countEl.textContent = total > PUBMED_LIMIT
-                                    ? `Showing ${articles.length} of ${total.toLocaleString()} results (most relevant)`
-                                    : `${articles.length} result${articles.length !== 1 ? 's' : ''}`;
-                                resultsDiv.appendChild(countEl);
-                                articles.forEach((art) => {
-                                    const artEl = document.createElement('div');
-                                    artEl.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;font-size:0.82rem;';
-                                    const titleLink = document.createElement('a');
-                                    titleLink.href = `https://pubmed.ncbi.nlm.nih.gov/${art.pmid}/`;
-                                    titleLink.target = '_blank';
-                                    titleLink.rel = 'noopener noreferrer';
-                                    titleLink.style.fontWeight = '600';
-                                    titleLink.textContent = art.title;
-                                    artEl.appendChild(titleLink);
-                                    const meta = document.createElement('div');
-                                    meta.style.cssText = 'color:#6b7280;margin-top:2px;';
-                                    const parts = [art.authors, art.journal, art.year].filter(Boolean);
-                                    meta.textContent = parts.join(' · ') + (art.pmid ? ` · PMID ${art.pmid}` : '');
-                                    artEl.appendChild(meta);
-                                    if (art.abstract) {
-                                        const abstractDetails = document.createElement('details');
-                                        abstractDetails.style.cssText = 'margin-top:4px;';
-                                        const abstractSummaryEl = document.createElement('summary');
-                                        abstractSummaryEl.style.cssText = 'font-size:0.80rem;color:#4b5563;cursor:pointer;padding:2px 0;list-style:revert;';
-                                        abstractSummaryEl.textContent = 'Abstract';
-                                        abstractDetails.appendChild(abstractSummaryEl);
-                                        const abstractText = document.createElement('div');
-                                        abstractText.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f9fafb;border-radius:4px;';
-                                        abstractText.textContent = art.abstract;
-                                        abstractDetails.appendChild(abstractText);
-                                        artEl.appendChild(abstractDetails);
-                                    }
-                                    resultsDiv.appendChild(artEl);
-                                });
-                                if (total > PUBMED_LIMIT) {
-                                    const seeAll = document.createElement('a');
-                                    seeAll.href = queryUrl;
-                                    seeAll.target = '_blank';
-                                    seeAll.rel = 'noopener noreferrer';
-                                    seeAll.style.fontSize = '0.82rem';
-                                    seeAll.textContent = `See all ${total.toLocaleString()} results on PubMed ↗`;
-                                    resultsDiv.appendChild(seeAll);
-                                }
-                            }).catch(() => {
-                                resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">PubMed unavailable.</div>';
-                            });
-                        }
-                    };
-
-                    if (hasPmTumorTab) {
-                        const tabBar = document.createElement('div');
-                        tabBar.className = 'card-tabs';
-                        const variantBtn = document.createElement('button');
-                        variantBtn.type = 'button';
-                        variantBtn.className = 'card-tab-btn active';
-                        variantBtn.textContent = 'Gene + Variant';
-                        const tumorBtn = document.createElement('button');
-                        tumorBtn.type = 'button';
-                        tumorBtn.className = 'card-tab-btn';
-                        tumorBtn.textContent = 'Gene + Tumor Type';
-                        tabBar.appendChild(variantBtn);
-                        tabBar.appendChild(tumorBtn);
-
-                        let variantTumorBtn = null;
-                        let variantTumorPanel = null;
-                        if (hasPmVariantTumorTab) {
-                            variantTumorBtn = document.createElement('button');
-                            variantTumorBtn.type = 'button';
-                            variantTumorBtn.className = 'card-tab-btn';
-                            variantTumorBtn.textContent = 'Gene + Variant + Tumor Type';
-                            tabBar.appendChild(variantTumorBtn);
-                        }
-                        pmContent.appendChild(tabBar);
-
-                        const variantPanel = document.createElement('div');
-                        variantPanel.className = 'card-tab-panel active';
-                        const tumorPanel = document.createElement('div');
-                        tumorPanel.className = 'card-tab-panel';
-                        if (hasPmVariantTumorTab) {
-                            variantTumorPanel = document.createElement('div');
-                            variantTumorPanel.className = 'card-tab-panel';
-                        }
-
-                        const tabBtns = [variantBtn, tumorBtn, variantTumorBtn].filter(Boolean);
-                        const tabPanels = [variantPanel, tumorPanel, variantTumorPanel].filter(Boolean);
-                        const activateTab = (idx) => {
-                            tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
-                            tabPanels.forEach((p, i) => p.classList.toggle('active', i === idx));
-                        };
-                        variantBtn.addEventListener('click', () => activateTab(0));
-                        tumorBtn.addEventListener('click', () => activateTab(1));
-                        if (variantTumorBtn) variantTumorBtn.addEventListener('click', () => activateTab(2));
-
-                        buildPmResultsPanel(variantPanel, pmSearchTerm, 'pubmed');
-                        buildPmResultsPanel(tumorPanel, pmTumorSearchTerm, 'pubmed_tumor_type');
-                        pmContent.appendChild(variantPanel);
-                        pmContent.appendChild(tumorPanel);
-                        if (variantTumorPanel) {
-                            buildPmResultsPanel(variantTumorPanel, pmVariantTumorSearchTerm, 'pubmed_variant_tumor_type');
-                            pmContent.appendChild(variantTumorPanel);
-                        }
-                    } else {
-                        buildPmResultsPanel(pmContent, pmSearchTerm, 'pubmed');
                     }
-
-                    pmCard.appendChild(pmContent);
-                    cardsContainer.appendChild(pmCard);
+                    createPubmedCard({ container: cardsContainer, tabs: pmTabs, extras: aiReviewExtras });
                 }
 
                 // Card: FDA-Approved Drugs (by gene)
-                {
-                    const fdaCard = document.createElement('div');
-                    fdaCard.className = 'card';
-                    const fdaTitle = document.createElement('h3');
-                    fdaTitle.textContent = 'FDA-Approved Drugs (by gene)';
-                    applyCardTheme(fdaCard, 'FDA-Approved Drugs (by gene)');
-                    fdaCard.appendChild(fdaTitle);
-                    const fdaContent = document.createElement('div');
-                    fdaContent.className = 'card-content';
-
-                    if (!firstGene) {
-                        const noGeneEl = document.createElement('div');
-                        noGeneEl.style.cssText = 'font-size:0.85rem;color:#6b7280;';
-                        noGeneEl.textContent = 'No gene identified for FDA drug lookup.';
-                        fdaContent.appendChild(noGeneEl);
-                        fdaCard.appendChild(fdaContent);
-                        cardsContainer.appendChild(fdaCard);
-                    } else {
-                        // Tab bar
-                        const fdaTabBar = document.createElement('div');
-                        fdaTabBar.className = 'card-tabs';
-                        const compDxBtn = document.createElement('button');
-                        compDxBtn.type = 'button';
-                        compDxBtn.className = 'card-tab-btn active';
-                        compDxBtn.textContent = 'Companion Dx';
-                        const openFdaBtn = document.createElement('button');
-                        openFdaBtn.type = 'button';
-                        openFdaBtn.className = 'card-tab-btn';
-                        openFdaBtn.textContent = 'openFDA Labels';
-                        const bbkbBtn = document.createElement('button');
-                        bbkbBtn.type = 'button';
-                        bbkbBtn.className = 'card-tab-btn';
-                        bbkbBtn.textContent = 'BBKB';
-                        fdaTabBar.appendChild(compDxBtn);
-                        fdaTabBar.appendChild(openFdaBtn);
-                        fdaTabBar.appendChild(bbkbBtn);
-                        fdaContent.appendChild(fdaTabBar);
-
-                        const compDxPanel = document.createElement('div');
-                        compDxPanel.className = 'card-tab-panel active';
-                        const openFdaPanel = document.createElement('div');
-                        openFdaPanel.className = 'card-tab-panel';
-                        const bbkbPanel = document.createElement('div');
-                        bbkbPanel.className = 'card-tab-panel';
-
-                        compDxBtn.addEventListener('click', () => {
-                            compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
-                            compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
-                        });
-                        openFdaBtn.addEventListener('click', () => {
-                            openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
-                            openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
-                        });
-                        bbkbBtn.addEventListener('click', () => {
-                            bbkbBtn.classList.add('active'); compDxBtn.classList.remove('active'); openFdaBtn.classList.remove('active');
-                            bbkbPanel.classList.add('active'); compDxPanel.classList.remove('active'); openFdaPanel.classList.remove('active');
-                        });
-
-                        fdaContent.appendChild(compDxPanel);
-                        fdaContent.appendChild(openFdaPanel);
-                        fdaContent.appendChild(bbkbPanel);
-                        fdaCard.appendChild(fdaContent);
-                        cardsContainer.appendChild(fdaCard);
-
-                        // --- Companion Dx panel (existing logic) ---
-                        const fdaCompDxUrl = 'https://www.fda.gov/medical-devices/in-vitro-diagnostics/list-cleared-or-approved-companion-diagnostic-devices-in-vitro-and-imaging-tools';
-                        const fdaLinkEl = document.createElement('a');
-                        fdaLinkEl.href = fdaCompDxUrl;
-                        fdaLinkEl.target = '_blank';
-                        fdaLinkEl.rel = 'noopener noreferrer';
-                        fdaLinkEl.textContent = 'FDA companion diagnostics list ↗';
-                        compDxPanel.appendChild(fdaLinkEl);
-
-                        const fdaQueryLabel = document.createElement('div');
-                        fdaQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 2px;';
-                        fdaQueryLabel.textContent = `Gene: ${firstGene}`;
-                        compDxPanel.appendChild(fdaQueryLabel);
-
-                        const fdaDisclaimer = document.createElement('div');
-                        fdaDisclaimer.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin:0 0 6px;font-style:italic;';
-                        fdaDisclaimer.textContent = 'Note: FDA list does not always note resistance mutations.';
-                        compDxPanel.appendChild(fdaDisclaimer);
-
-                        const fdaResultsDiv = document.createElement('div');
-                        const fdaSpinner = document.createElement('div');
-                        fdaSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
-                        fdaSpinner.textContent = 'Loading FDA drug data…';
-                        fdaResultsDiv.appendChild(fdaSpinner);
-                        compDxPanel.appendChild(fdaResultsDiv);
-
-                        fetchFdaCompanionDiagnostics(firstGene).then((records) => {
-                            fdaResultsDiv.innerHTML = '';
-                            if (!records || records.length === 0) {
-                                const noResults = document.createElement('div');
-                                noResults.style.cssText = 'font-size:0.85rem;color:#6b7280;';
-                                noResults.textContent = `No FDA companion diagnostic records found for ${firstGene}.`;
-                                fdaResultsDiv.appendChild(noResults);
-                                return;
-                            }
-                            const countEl = document.createElement('div');
-                            countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
-                            countEl.textContent = `${records.length} record${records.length !== 1 ? 's' : ''}`;
-                            fdaResultsDiv.appendChild(countEl);
-
-                            const table = document.createElement('table');
-                            table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem;';
-                            const thead = document.createElement('thead');
-                            const headerRow = document.createElement('tr');
-                            ['Drug', 'Disease', 'Biomarker detail'].forEach((col) => {
-                                const th = document.createElement('th');
-                                th.style.cssText = 'text-align:left;padding:4px 6px;border-bottom:2px solid #fca5a5;background:#fff7f7;color:#7f1d1d;font-weight:600;';
-                                th.textContent = col;
-                                headerRow.appendChild(th);
-                            });
-                            thead.appendChild(headerRow);
-                            table.appendChild(thead);
-
-                            const FDA_PREVIEW_ROWS = 5;
-                            const buildRow = (rec, i) => {
-                                const tr = document.createElement('tr');
-                                tr.style.background = i % 2 === 0 ? '#fff' : '#fff7f7';
-                                const cellStyle = 'padding:4px 6px;vertical-align:top;border-bottom:1px solid #fee2e2;';
-
-                                const tdDrug = document.createElement('td');
-                                tdDrug.style.cssText = cellStyle + 'font-weight:600;';
-                                const drugsArr = Array.isArray(rec.therapy?.drugs) ? rec.therapy.drugs : [];
-                                tdDrug.textContent = drugsArr.length
-                                    ? drugsArr.map(d => d.trade_name ? `${d.trade_name} (${d.generic_name})` : d.generic_name || d.raw || '').filter(Boolean).join(', ')
-                                    : (rec.therapy?.raw || '—');
-
-                                const tdDisease = document.createElement('td');
-                                tdDisease.style.cssText = cellStyle + 'color:#374151;';
-                                const rawDisease = rec.indication?.raw || rec.indication?.disease || '—';
-                                tdDisease.textContent = rawDisease.replace(/\s*[-–]\s*(Tissue|Plasma|Blood|Serum|Urine|FFPE|Fresh Frozen|Whole Blood|ctDNA)\s*$/i, '').trim() || rawDisease;
-
-                                const tdDetail = document.createElement('td');
-                                tdDetail.style.cssText = cellStyle + 'color:#374151;';
-                                tdDetail.textContent = rec.biomarker?.details || rec.biomarker?.name || '—';
-
-                                tr.appendChild(tdDrug);
-                                tr.appendChild(tdDisease);
-                                tr.appendChild(tdDetail);
-                                return tr;
-                            };
-
-                            const tbody = document.createElement('tbody');
-                            records.slice(0, FDA_PREVIEW_ROWS).forEach((rec, i) => tbody.appendChild(buildRow(rec, i)));
-                            table.appendChild(tbody);
-                            fdaResultsDiv.appendChild(table);
-
-                            if (records.length > FDA_PREVIEW_ROWS) {
-                                const details = document.createElement('details');
-                                details.style.cssText = 'margin-top:2px;';
-                                const summary = document.createElement('summary');
-                                summary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
-                                summary.textContent = `Show ${records.length - FDA_PREVIEW_ROWS} more…`;
-                                details.appendChild(summary);
-
-                                const extraTable = document.createElement('table');
-                                extraTable.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem;';
-                                const extraTbody = document.createElement('tbody');
-                                records.slice(FDA_PREVIEW_ROWS).forEach((rec, i) => extraTbody.appendChild(buildRow(rec, FDA_PREVIEW_ROWS + i)));
-                                extraTable.appendChild(extraTbody);
-                                details.appendChild(extraTable);
-                                fdaResultsDiv.appendChild(details);
-                            }
-
-                            const note = document.createElement('div');
-                            note.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
-                            note.textContent = 'Source: FDA companion diagnostics list. Verify against current FDA labeling before clinical use.';
-                            fdaResultsDiv.appendChild(note);
-                        }).catch(() => {
-                            fdaResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">FDA drug data unavailable.</div>';
-                        });
-
-                        // --- BBKB panel ---
-                        renderBbkbBiomarkerTherapies(bbkbPanel, firstGene, aiReviewExtras);
-
-                        // --- openFDA Labels panel ---
-                        const ofLinkEl = document.createElement('a');
-                        ofLinkEl.href = `https://open.fda.gov/apis/drug/label/`;
-                        ofLinkEl.target = '_blank';
-                        ofLinkEl.rel = 'noopener noreferrer';
-                        ofLinkEl.textContent = 'openFDA drug label database ↗';
-                        openFdaPanel.appendChild(ofLinkEl);
-
-                        const ofQueryLabel = document.createElement('div');
-                        ofQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
-                        ofQueryLabel.textContent = `Searching indications_and_usage for: "${firstGene}"`;
-                        openFdaPanel.appendChild(ofQueryLabel);
-
-                        const ofResultsDiv = document.createElement('div');
-                        const ofSpinner = document.createElement('div');
-                        ofSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
-                        ofSpinner.textContent = 'Loading openFDA results…';
-                        ofResultsDiv.appendChild(ofSpinner);
-                        openFdaPanel.appendChild(ofResultsDiv);
-
-                        fetchOpenFdaDrugLabels(firstGene).then(({ total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults }) => {
-                            aiReviewExtras.openfda = { gene: firstGene, total, fetched, excluded, excludedCase, excludedBoundary, excludedFalsePositive, excludedNegation, results: ofResults };
-                            ofResultsDiv.innerHTML = '';
-                            if (!ofResults || ofResults.length === 0) {
-                                ofResultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No openFDA drug label results found for ${escapeHtml(firstGene)}.</div>`;
-                                return;
-                            }
-                            const OF_PREVIEW = 7;
-                            const ofCountEl = document.createElement('div');
-                            ofCountEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
-                            const shownOf = `${Math.min(ofResults.length, OF_PREVIEW)} of ${ofResults.length} result${ofResults.length !== 1 ? 's' : ''}`;
-                            const excludedReasons = [];
-                            if (excludedCase) excludedReasons.push(`${excludedCase} case mismatch`);
-                            if (excludedBoundary) excludedReasons.push(`${excludedBoundary} substring of larger word`);
-                            if (excludedFalsePositive) excludedReasons.push(`${excludedFalsePositive} false-positive phrase`);
-                            if (excludedNegation) excludedReasons.push(`${excludedNegation} negated mention`);
-                            const excludedNote = excludedReasons.length ? ` (excluded: ${excludedReasons.join(', ')})` : '';
-                            ofCountEl.textContent = shownOf + excludedNote;
-                            ofResultsDiv.appendChild(ofCountEl);
-
-                            const buildDrugEl = (item) => {
-                                const drugEl = document.createElement('div');
-                                drugEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#fff7f7;border:1px solid #fee2e2;border-radius:4px;font-size:0.82rem;';
-
-                                const nameEl = document.createElement('div');
-                                nameEl.style.cssText = 'font-weight:700;color:#7f1d1d;margin-bottom:2px;';
-                                const brandPart = item.brand_name ? item.brand_name : '';
-                                const genericPart = item.generic_name ? (brandPart ? `(${item.generic_name})` : item.generic_name) : '';
-                                nameEl.textContent = [brandPart, genericPart].filter(Boolean).join(' ') || 'Unknown drug';
-                                drugEl.appendChild(nameEl);
-
-                                const metaParts = [item.manufacturer, item.route].filter(Boolean);
-                                if (metaParts.length) {
-                                    const metaEl = document.createElement('div');
-                                    metaEl.style.cssText = 'color:#6b7280;margin-bottom:4px;';
-                                    metaEl.textContent = metaParts.join(' · ');
-                                    drugEl.appendChild(metaEl);
-                                }
-
-                                if (item.indications_and_usage) {
-                                    const indDetails = document.createElement('details');
-                                    indDetails.style.cssText = 'margin-top:2px;';
-                                    const indSummary = document.createElement('summary');
-                                    indSummary.style.cssText = 'cursor:pointer;color:#991b1b;font-weight:600;font-size:0.8rem;list-style:revert;padding:2px 0;';
-                                    indSummary.textContent = 'Indications & Usage';
-                                    indDetails.appendChild(indSummary);
-                                    const indText = document.createElement('div');
-                                    indText.style.cssText = 'margin-top:4px;color:#374151;line-height:1.5;white-space:pre-wrap;font-size:0.79rem;max-height:300px;overflow-y:auto;';
-                                    indText.textContent = item.indications_and_usage;
-                                    indDetails.appendChild(indText);
-                                    drugEl.appendChild(indDetails);
-                                }
-
-                                return drugEl;
-                            };
-
-                            ofResults.slice(0, OF_PREVIEW).forEach((item) => ofResultsDiv.appendChild(buildDrugEl(item)));
-
-                            if (ofResults.length > OF_PREVIEW) {
-                                const ofMoreDetails = document.createElement('details');
-                                ofMoreDetails.style.cssText = 'margin-top:2px;';
-                                const ofMoreSummary = document.createElement('summary');
-                                ofMoreSummary.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
-                                ofMoreSummary.textContent = `Show ${ofResults.length - OF_PREVIEW} more…`;
-                                ofMoreDetails.appendChild(ofMoreSummary);
-                                ofResults.slice(OF_PREVIEW).forEach((item) => ofMoreDetails.appendChild(buildDrugEl(item)));
-                                ofResultsDiv.appendChild(ofMoreDetails);
-                            }
-
-                            const ofNote = document.createElement('div');
-                            ofNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
-                            ofNote.textContent = 'Source: openFDA drug label API. Results show labels mentioning this gene in indications. Verify against current FDA labeling.';
-                            ofResultsDiv.appendChild(ofNote);
-                        }).catch(() => {
-                            ofResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">openFDA data unavailable.</div>';
-                        });
-                    }
-                }
+                createFdaDrugsCard({ container: cardsContainer, gene: firstGene, extras: aiReviewExtras, cardCache: cardDataCache });
 
                 // Card: Clinical Trials
-                {
-                    const CT_PREVIEW = 5;
-                    const ctCard = document.createElement('div');
-                    ctCard.className = 'card';
-                    const ctTitle = document.createElement('h3');
-                    ctTitle.textContent = 'Clinical Trials';
-                    applyCardTheme(ctCard, 'Clinical Trials');
-                    ctCard.appendChild(ctTitle);
-                    const ctContent = document.createElement('div');
-                    ctContent.className = 'card-content';
-
-                    const ctSearchGene = firstGene;
-                    const ctBaseUrl = ctSearchGene
-                        ? `https://clinicaltrials.gov/search?query=${encodeURIComponent([ctSearchGene, tumorType].filter(Boolean).join(' '))}&recrs=b&type=Intr`
-                        : 'https://clinicaltrials.gov/';
-
-                    const ctLinkEl = document.createElement('a');
-                    ctLinkEl.href = ctBaseUrl;
-                    ctLinkEl.target = '_blank';
-                    ctLinkEl.rel = 'noopener noreferrer';
-                    ctLinkEl.textContent = 'Search ClinicalTrials.gov ↗';
-                    ctContent.appendChild(ctLinkEl);
-
-                    if (ctSearchGene) {
-                        const ctQueryLabel = document.createElement('div');
-                        ctQueryLabel.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
-                        const queryParts = [ctSearchGene, tumorType].filter(Boolean);
-                        ctQueryLabel.textContent = `Query: "${queryParts.join(' + ')}" · Interventional · Recruiting · Phase 2+ · US`;
-                        ctContent.appendChild(ctQueryLabel);
-                    }
-
-                    const ctResultsDiv = document.createElement('div');
-                    if (ctSearchGene) {
-                        const ctSpinner = document.createElement('div');
-                        ctSpinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
-                        ctSpinner.textContent = 'Loading clinical trials…';
-                        ctResultsDiv.appendChild(ctSpinner);
-                    }
-                    ctContent.appendChild(ctResultsDiv);
-                    ctCard.appendChild(ctContent);
-                    cardsContainer.appendChild(ctCard);
-
-                    if (ctSearchGene) {
-                        fetchClinicalTrials(ctSearchGene, tumorType).then(({ total, studies }) => {
-                            ctResultsDiv.innerHTML = '';
-                            if (total === 0 || studies.length === 0) {
-                                ctResultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No recruiting Phase 2+ interventional trials found in the US.</div>';
-                                return;
-                            }
-                            const countEl = document.createElement('div');
-                            countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:8px;';
-                            countEl.textContent = `${total} recruiting trial${total !== 1 ? 's' : ''} found`;
-                            ctResultsDiv.appendChild(countEl);
-
-                            const buildTrialEl = (trial) => {
-                                const el = document.createElement('div');
-                                el.style.cssText = 'margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #ccfbf1;font-size:0.82rem;';
-
-                                const titleLine = document.createElement('div');
-                                if (trial.url) {
-                                    const link = document.createElement('a');
-                                    link.href = trial.url;
-                                    link.target = '_blank';
-                                    link.rel = 'noopener noreferrer';
-                                    link.style.fontWeight = '600';
-                                    link.textContent = trial.title || trial.nctId;
-                                    titleLine.appendChild(link);
-                                } else {
-                                    titleLine.style.fontWeight = '600';
-                                    titleLine.textContent = trial.title || trial.nctId;
-                                }
-                                el.appendChild(titleLine);
-
-                                const meta = document.createElement('div');
-                                meta.style.cssText = 'color:#6b7280;margin-top:3px;';
-                                const phaseParts = Array.isArray(trial.phases) && trial.phases.length
-                                    ? trial.phases.map(p => String(p).replace('PHASE', 'Phase ')).join('/')
-                                    : 'Phase N/A';
-                                const drugNames = (trial.interventions || [])
-                                    .filter(i => i.type === 'DRUG' || i.type === 'BIOLOGICAL' || i.type === 'COMBINATION_PRODUCT')
-                                    .map(i => i.name)
-                                    .filter(Boolean)
-                                    .slice(0, 4);
-
-                                const metaParts = [
-                                    trial.nctId,
-                                    phaseParts,
-                                    drugNames.length ? drugNames.join(', ') : null,
-                                    trial.usLocationCount ? `${trial.usLocationCount} US site${trial.usLocationCount !== 1 ? 's' : ''}` : null
-                                ].filter(Boolean);
-                                meta.textContent = metaParts.join(' · ');
-                                el.appendChild(meta);
-
-                                const hasExpandable = trial.briefSummary || (trial.conditions && trial.conditions.length > 0) || trial.inclusionCriteria;
-                                if (hasExpandable) {
-                                    const trialDetails = document.createElement('details');
-                                    trialDetails.style.cssText = 'margin-top:5px;';
-                                    const trialDetailsSummary = document.createElement('summary');
-                                    trialDetailsSummary.style.cssText = 'font-size:0.80rem;color:#0f766e;cursor:pointer;padding:2px 0;list-style:revert;';
-                                    trialDetailsSummary.textContent = 'Summary, conditions & eligibility';
-                                    trialDetails.appendChild(trialDetailsSummary);
-                                    const expandContent = document.createElement('div');
-                                    expandContent.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f0fdfa;border-radius:4px;';
-                                    if (trial.conditions && trial.conditions.length > 0) {
-                                        const condLabel = document.createElement('div');
-                                        condLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
-                                        condLabel.textContent = 'Conditions:';
-                                        expandContent.appendChild(condLabel);
-                                        const condVal = document.createElement('div');
-                                        condVal.style.cssText = 'margin-bottom:6px;';
-                                        condVal.textContent = trial.conditions.join(', ');
-                                        expandContent.appendChild(condVal);
-                                    }
-                                    if (trial.briefSummary) {
-                                        const summLabel = document.createElement('div');
-                                        summLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
-                                        summLabel.textContent = 'Summary:';
-                                        expandContent.appendChild(summLabel);
-                                        const summVal = document.createElement('div');
-                                        summVal.style.cssText = 'margin-bottom:6px;';
-                                        summVal.textContent = trial.briefSummary;
-                                        expandContent.appendChild(summVal);
-                                    }
-                                    if (trial.inclusionCriteria) {
-                                        const inclLabel = document.createElement('div');
-                                        inclLabel.style.cssText = 'font-weight:600;margin-bottom:2px;';
-                                        inclLabel.textContent = 'Inclusion Criteria:';
-                                        expandContent.appendChild(inclLabel);
-                                        const inclVal = document.createElement('pre');
-                                        inclVal.style.cssText = 'white-space:pre-wrap;font-family:inherit;margin:0;';
-                                        inclVal.textContent = trial.inclusionCriteria;
-                                        expandContent.appendChild(inclVal);
-                                    }
-                                    trialDetails.appendChild(expandContent);
-                                    el.appendChild(trialDetails);
-                                }
-                                return el;
-                            };
-
-                            const previewStudies = studies.slice(0, CT_PREVIEW);
-                            previewStudies.forEach(trial => ctResultsDiv.appendChild(buildTrialEl(trial)));
-
-                            if (studies.length > CT_PREVIEW) {
-                                const moreDetails = document.createElement('details');
-                                moreDetails.style.cssText = 'margin-top:4px;';
-                                const moreSummary = document.createElement('summary');
-                                moreSummary.style.cssText = 'font-size:0.82rem;color:#0f766e;cursor:pointer;padding:4px 2px;list-style:revert;';
-                                moreSummary.textContent = `Show ${studies.length - CT_PREVIEW} more…`;
-                                moreDetails.appendChild(moreSummary);
-                                studies.slice(CT_PREVIEW).forEach(trial => moreDetails.appendChild(buildTrialEl(trial)));
-                                ctResultsDiv.appendChild(moreDetails);
-                            }
-
-                            const ctNote = document.createElement('div');
-                            ctNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
-                            ctNote.textContent = 'Source: ClinicalTrials.gov. Eligibility criteria not evaluated — verify before clinical use.';
-                            ctResultsDiv.appendChild(ctNote);
-                        }).catch(() => {
-                            ctResultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">Clinical trials data unavailable.</div>';
-                        });
-                    }
-                }
+                createClinicalTrialsCard({ container: cardsContainer, gene: firstGene, tumorType, cardCache: cardDataCache });
             }
             // Card: Guidelines
-            {
-                const GUIDELINES_BASE = 'https://www.drdoubleb.com/guidelines';
-                const guidelinesCard = document.createElement('div');
-                guidelinesCard.className = 'card';
-                const guidelinesTitle = document.createElement('h3');
-                guidelinesTitle.textContent = 'Guidelines';
-                applyCardTheme(guidelinesCard, 'Guidelines');
-                guidelinesCard.appendChild(guidelinesTitle);
-
-                const guidelinesContent = document.createElement('div');
-                guidelinesContent.className = 'card-content';
-
-                const guidelinesIntro = document.createElement('p');
-                guidelinesIntro.style.cssText = 'font-size:0.85rem;color:#6b7280;margin-bottom:8px;';
-                guidelinesIntro.textContent = 'Select a cancer type to retrieve guideline recommendations for this gene.';
-                guidelinesContent.appendChild(guidelinesIntro);
-
-                const dropdownRow = document.createElement('div');
-                dropdownRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;';
-
-                const cancerSelect = document.createElement('select');
-                cancerSelect.style.cssText = 'font-size:0.85rem;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px;flex:1;max-width:320px;';
-
-                const defaultOpt = document.createElement('option');
-                defaultOpt.value = '';
-                defaultOpt.textContent = 'Loading cancer types…';
-                defaultOpt.disabled = true;
-                defaultOpt.selected = true;
-                cancerSelect.appendChild(defaultOpt);
-                dropdownRow.appendChild(cancerSelect);
-                guidelinesContent.appendChild(dropdownRow);
-
-                const guidelinesResults = document.createElement('div');
-                guidelinesContent.appendChild(guidelinesResults);
-
-                guidelinesCard.appendChild(guidelinesContent);
-                cardsContainer.appendChild(guidelinesCard);
-
-                (async () => {
-                    try {
-                        const resp = await fetch(`${GUIDELINES_BASE}/api/cancer-types.php`);
-                        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                        const data = await resp.json();
-                        cancerSelect.innerHTML = '';
-                        const placeholder = document.createElement('option');
-                        placeholder.value = '';
-                        placeholder.textContent = `— Select cancer type (${data.count} available) —`;
-                        placeholder.disabled = true;
-                        placeholder.selected = true;
-                        cancerSelect.appendChild(placeholder);
-                        (data.cancer_types || []).forEach(ct => {
-                            const opt = document.createElement('option');
-                            opt.value = ct.name;
-                            opt.textContent = ct.name + (ct.record_count ? ` (${ct.record_count} records)` : '');
-                            cancerSelect.appendChild(opt);
-                        });
-                        if (tumorType) {
-                            const tumorLower = tumorType.toLowerCase().trim();
-                            const matched = (data.cancer_types || []).find(ct =>
-                                (ct.aliases || []).some(a => a.toLowerCase() === tumorLower) ||
-                                ct.name.toLowerCase() === tumorLower ||
-                                ct.name.toLowerCase().includes(tumorLower) ||
-                                tumorLower.includes(ct.name.toLowerCase())
-                            );
-                            if (matched) {
-                                cancerSelect.value = matched.name;
-                                cancerSelect.dispatchEvent(new Event('change'));
-                            }
-                        }
-                    } catch (err) {
-                        cancerSelect.innerHTML = '';
-                        const errOpt = document.createElement('option');
-                        errOpt.textContent = 'Failed to load cancer types';
-                        errOpt.disabled = true;
-                        errOpt.selected = true;
-                        cancerSelect.appendChild(errOpt);
-                    }
-                })();
-
-                cancerSelect.addEventListener('change', async () => {
-                    const selectedCancer = cancerSelect.value;
-                    if (!selectedCancer) return;
-                    const gene = aiReviewGene || (geneNames && geneNames[0]) || '';
-                    if (!gene) {
-                        guidelinesResults.innerHTML = '<div style="font-size:0.85rem;color:#9ca3af;">No gene available for guideline lookup.</div>';
-                        return;
-                    }
-                    guidelinesResults.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;padding:4px 0;">Loading guidelines…</div>';
-                    try {
-                        const params = new URLSearchParams({ cancer: selectedCancer, gene });
-                        const resp = await fetch(`${GUIDELINES_BASE}/api/search.php?${params}`);
-                        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                        const data = await resp.json();
-
-                        aiReviewExtras.guidelines = {
-                            cancer_type: selectedCancer,
-                            gene,
-                            query: data.query,
-                            count: data.count,
-                            results: data.results
-                        };
-
-                        guidelinesResults.innerHTML = '';
-
-                        if (!data.results || data.results.length === 0) {
-                            const noResults = document.createElement('div');
-                            noResults.style.cssText = 'font-size:0.85rem;color:#9ca3af;';
-                            noResults.textContent = `No guideline records found for ${gene} in ${selectedCancer}.`;
-                            guidelinesResults.appendChild(noResults);
-                            return;
-                        }
-
-                        const countEl = document.createElement('div');
-                        countEl.style.cssText = 'font-size:0.85rem;font-weight:600;color:#3f6212;margin-bottom:8px;';
-                        countEl.textContent = `${data.count} guideline record${data.count !== 1 ? 's' : ''} for ${gene} in ${selectedCancer}`;
-                        guidelinesResults.appendChild(countEl);
-
-                        const renderKV = (obj, container, depth) => {
-                            Object.entries(obj).forEach(([key, val]) => {
-                                if (val === null || val === undefined || val === '' || (Array.isArray(val) && val.length === 0) || (typeof val === 'object' && !Array.isArray(val) && Object.keys(val).length === 0)) return;
-                                const fmtKey = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-                                if (typeof val === 'object' && !Array.isArray(val)) {
-                                    const subTitle = document.createElement('div');
-                                    subTitle.style.cssText = `padding-left:${depth * 12}px;font-weight:600;color:#374151;margin-top:3px;`;
-                                    subTitle.textContent = fmtKey + ':';
-                                    container.appendChild(subTitle);
-                                    renderKV(val, container, depth + 1);
-                                } else if (Array.isArray(val) && val.some(v => v !== null && typeof v === 'object')) {
-                                    // Array of objects — render each item as a nested block
-                                    const subTitle = document.createElement('div');
-                                    subTitle.style.cssText = `padding-left:${depth * 12}px;font-weight:600;color:#374151;margin-top:3px;`;
-                                    subTitle.textContent = fmtKey + ':';
-                                    container.appendChild(subTitle);
-                                    val.forEach(item => {
-                                        if (item !== null && typeof item === 'object') {
-                                            renderKV(item, container, depth + 1);
-                                        } else if (item !== null && item !== '') {
-                                            const row = document.createElement('div');
-                                            row.style.cssText = `padding-left:${(depth + 1) * 12}px;margin:2px 0;color:#1f2937;`;
-                                            row.textContent = String(item);
-                                            container.appendChild(row);
-                                        }
-                                    });
-                                } else {
-                                    const row = document.createElement('div');
-                                    row.style.cssText = `padding-left:${depth * 12}px;margin:2px 0;`;
-                                    const labelEl = document.createElement('span');
-                                    labelEl.style.cssText = 'font-weight:600;color:#374151;';
-                                    labelEl.textContent = fmtKey + ': ';
-                                    const valEl = document.createElement('span');
-                                    valEl.style.cssText = 'color:#1f2937;';
-                                    valEl.textContent = Array.isArray(val) ? val.filter(v => v !== null && v !== '').join(', ') : String(val);
-                                    row.appendChild(labelEl);
-                                    row.appendChild(valEl);
-                                    container.appendChild(row);
-                                }
-                            });
-                        };
-
-                        const renderSection = (title, obj, container) => {
-                            if (!obj || typeof obj !== 'object' || Object.keys(obj).length === 0) return;
-                            const sectionTitle = document.createElement('div');
-                            sectionTitle.style.cssText = 'font-weight:700;color:#166534;margin:6px 0 2px;font-size:0.79rem;text-transform:uppercase;letter-spacing:0.04em;border-top:1px solid #bbf7d0;padding-top:5px;';
-                            sectionTitle.textContent = title;
-                            container.appendChild(sectionTitle);
-                            renderKV(obj, container, 0);
-                        };
-
-                        data.results.forEach((record, idx) => {
-                            const recordEl = document.createElement('div');
-                            recordEl.style.cssText = 'margin-bottom:8px;padding:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;font-size:0.82rem;';
-
-                            const headerEl = document.createElement('div');
-                            headerEl.style.cssText = 'font-weight:700;color:#166534;margin-bottom:4px;';
-                            const markerDisplay = (record.biomarker && (record.biomarker.display_name || record.biomarker.symbol)) || `Record ${idx + 1}`;
-                            const tumorDisplay = (record.tumor && (record.tumor.name || record.tumor.subtype)) || selectedCancer;
-                            headerEl.textContent = `${markerDisplay} — ${tumorDisplay}`;
-                            recordEl.appendChild(headerEl);
-
-                            const buildKVRow = (label, value) => {
-                                if (!value) return;
-                                const row = document.createElement('div');
-                                row.style.cssText = 'margin-bottom:3px;';
-                                const lbl = document.createElement('span');
-                                lbl.style.cssText = 'font-weight:600;';
-                                lbl.textContent = label + ': ';
-                                row.appendChild(lbl);
-                                row.appendChild(document.createTextNode(value));
-                                recordEl.appendChild(row);
-                            };
-
-                            if (Array.isArray(record.therapy) && record.therapy.length > 0) {
-                                buildKVRow('Recommended therapy', record.therapy.map(t => t.name).filter(Boolean).join(', '));
-                                const cat = record.therapy.map(t => t.evidence_or_category).filter(Boolean).join(', ');
-                                if (cat) buildKVRow('Category', cat);
-                                const setting = record.therapy.map(t => t.setting).filter(Boolean).join(', ');
-                                if (setting) buildKVRow('Therapy setting', setting);
-                            }
-                            if (record.testing) {
-                                const te = record.testing;
-                                if (te.recommended) buildKVRow('Recommended test', te.recommended);
-                                if (Array.isArray(te.methods) && te.methods.length > 0) {
-                                    buildKVRow('Method', te.methods.map(m => m.method).filter(Boolean).join(', '));
-                                }
-                            }
-                            if (record.clinical_significance && record.clinical_significance.summary) {
-                                buildKVRow('Clinical significance', record.clinical_significance.summary);
-                            }
-
-                            const detailsEl = document.createElement('details');
-                            detailsEl.style.cssText = 'margin-top:6px;';
-                            const detailsSummary = document.createElement('summary');
-                            detailsSummary.style.cssText = 'font-size:0.80rem;color:#15803d;cursor:pointer;padding:2px 0;list-style:revert;';
-                            detailsSummary.textContent = 'Full record details';
-                            detailsEl.appendChild(detailsSummary);
-
-                            const detailsBody = document.createElement('div');
-                            detailsBody.style.cssText = 'font-size:0.79rem;padding:4px 2px;margin-top:4px;max-height:350px;overflow-y:auto;line-height:1.6;';
-                            if (record.id) {
-                                const idRow = document.createElement('div');
-                                idRow.style.cssText = 'font-size:0.74rem;color:#9ca3af;margin-bottom:2px;';
-                                idRow.textContent = `Record ID: ${record.id}`;
-                                detailsBody.appendChild(idRow);
-                            }
-                            const sectionDefs = [['Tumor', record.tumor], ['Biomarker', record.biomarker], ['Clinical Significance', record.clinical_significance], ['Testing', record.testing], ['Therapy', record.therapy], ['Eligibility Context', record.eligibility_context], ['Interpretive States', record.interpretive_states], ['Guideline Source', record.guideline_metadata]];
-                            sectionDefs.forEach(([title, obj]) => renderSection(title, obj, detailsBody));
-                            const skipKeys = new Set(['id', 'tumor', 'biomarker', 'clinical_significance', 'testing', 'therapy', 'eligibility_context', 'interpretive_states', 'guideline_metadata', 'dataset_file', 'dataset_record_index', 'dataset_name']);
-                            Object.keys(record).filter(k => !skipKeys.has(k)).forEach(k => {
-                                const val = record[k];
-                                if (val && typeof val === 'object') {
-                                    renderSection(k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()), val, detailsBody);
-                                } else if (val !== null && val !== undefined && val !== '') {
-                                    const row = document.createElement('div');
-                                    row.style.cssText = 'margin:2px 0;';
-                                    const labelEl = document.createElement('span');
-                                    labelEl.style.cssText = 'font-weight:600;color:#374151;';
-                                    labelEl.textContent = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) + ': ';
-                                    row.appendChild(labelEl);
-                                    row.appendChild(document.createTextNode(String(val)));
-                                    detailsBody.appendChild(row);
-                                }
-                            });
-                            detailsEl.appendChild(detailsBody);
-                            recordEl.appendChild(detailsEl);
-
-                            guidelinesResults.appendChild(recordEl);
-                        });
-
-                        const sourceNote = document.createElement('div');
-                        sourceNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
-                        sourceNote.textContent = 'Source: drdoubleb.com/guidelines. For reference only — verify against current published guidelines.';
-                        guidelinesResults.appendChild(sourceNote);
-
-                    } catch (err) {
-                        guidelinesResults.innerHTML = `<div style="font-size:0.85rem;color:#9ca3af;">Guidelines data unavailable: ${escapeHtml(err.message)}</div>`;
-                        aiReviewExtras.guidelines = { error: err.message, cancer_type: selectedCancer, gene };
-                    }
-                });
-            }
+            createGuidelinesCard({
+                container: cardsContainer,
+                tumorType,
+                getGene: () => aiReviewGene || (geneNames ? geneNames.split(',')[0].trim() : ''),
+                extras: aiReviewExtras
+            });
 
             // Optional AI review card (manual trigger; sends current annotation context to OpenRouter via backend proxy).
             createAiReviewCard({
@@ -9895,10 +9319,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 introText: 'Send the retrieved variant data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
                 loadingText: 'Gathering FDA, trial, and annotation context for AI review…',
                 buildContext: async (userNotes) => {
+                    // Reuse what the cards already fetched; fall back to a fresh fetch
+                    // only when a card's data never arrived (or errored).
+                    const fdaPromise = Array.isArray(cardDataCache.fda_companion_diagnostics_records)
+                        ? Promise.resolve(cardDataCache.fda_companion_diagnostics_records)
+                        : (aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]));
+                    const bbkbPromise = (aiReviewExtras.bbkb_biomarker_therapies && Array.isArray(aiReviewExtras.bbkb_biomarker_therapies.results))
+                        ? Promise.resolve(aiReviewExtras.bbkb_biomarker_therapies)
+                        : (aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null));
+                    const trialsPromise = (cardDataCache.clinical_trials && Array.isArray(cardDataCache.clinical_trials.studies))
+                        ? Promise.resolve(cardDataCache.clinical_trials)
+                        : (aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }));
                     const [fdaRecords, bbkbTherapies, clinicalTrialData, supplementalContext] = await Promise.all([
-                        aiReviewGene ? fetchFdaCompanionDiagnostics(aiReviewGene).catch(() => []) : Promise.resolve([]),
-                        aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null),
-                        aiReviewGene ? fetchClinicalTrials(aiReviewGene, tumorType).catch(() => ({ total: 0, studies: [] })) : Promise.resolve({ total: 0, studies: [] }),
+                        fdaPromise,
+                        bbkbPromise,
+                        trialsPromise,
                         fetchAiReviewSupplementalContext().catch((err) => ({ error: err.message || 'Supplemental context unavailable' }))
                     ]);
                     // Cap the openFDA record count (the dominant payload for drug-rich genes)
@@ -9977,9 +9412,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             resultSection.classList.remove('hidden');
         } catch (err) {
+            console.error(err);
+            // A stale run's failure must not overwrite the status/progress panel
+            // of a newer search that is already underway.
+            if (!isCurrentSearch()) return;
             statusEl.textContent = 'Error: ' + err.message;
             LookupProgress.finish('fail', err.upstreamOutage ? 'Upstream service unavailable' : 'Lookup failed');
-            console.error(err);
         }
     });
 

@@ -46,8 +46,23 @@ See `tests/coordinate-row.test.js`.
 
 Every nomenclature lookup depends on `grch37.rest.ensembl.org`. That host
 intermittently returns 500/503 and has been measured taking **20-40 seconds** to
-answer a cold `variant_recoder` or `vep` query. The app previously made a single
-attempt behind a 6-7 second deadline, so a slow or unwell upstream produced:
+answer a cold `variant_recoder` or `vep` query.
+
+The variant recoder now **fails over to `rest.ensembl.org`** when the GRCh37
+mirror is unwell (transport errors and retryable 5xx only — a 4xx is a real
+answer and is not shopped around). The main host's coordinates are GRCh38, so
+candidate conversion reads the assembly off the RefSeq chromosome accession
+version (`NC_000007.13` = GRCh37, `.14` = GRCh38) and lifts **only** GRCh38
+candidates back to hg19. This assembly check also fixed a latent bug: the
+GRCh37 mirror's substitution candidates were previously *always* passed through
+the hg38→hg19 liftover, and Ensembl's `/map` does not error when handed a
+coordinate from the wrong assembly — it silently returns a position hundreds of
+kb away. A GRCh38 candidate the client-side helper cannot lift (indels; the
+helper handles substitutions only) is dropped rather than carried forward
+mislabelled as hg19.
+
+The app previously made a single attempt behind a 6-7 second deadline, so a
+slow or unwell upstream produced:
 
 > Variant not found. Please verify the genomic coordinate and reference allele.
 
@@ -172,7 +187,7 @@ The endpoint prompts OpenRouter for strict JSON containing pathogenicity, specif
 The proxy protects the owner's `OPENROUTER_API_KEY` from being drained by anonymous callers. Every layer is **graceful** — it stays off until its environment variables are set, so the site keeps working before you provision anything:
 
 - **Per-request caps (always on):** the completion is capped at `max_tokens` 8000, the context is clamped to 1,500,000 chars, user notes to 4,000 chars, and request bodies over ~4 MB (just under Vercel's serverless request-body ceiling) are rejected with `413`. These bound the cost of any single call. The context clamp is generous because rich genes assemble very large payloads (e.g. HER2/ERBB2 amplification ≈ 957 KB, almost all openFDA label text). To keep such payloads under the ceiling, the frontend caps the openFDA **record count** (first 40) for the AI query while keeping each record's **full** `indications_and_usage` text; when records are dropped, an `openfda_records_truncated` note is added to the context so the model knows the list was capped. Large contexts may still exceed some models' windows — prefer a large-window model.
-- **Origin allowlist:** browser requests are restricted to the live site plus test hosts. Defaults: `https://drdoubleb.com`, `https://www.drdoubleb.com`, `https://variant-search-for-chat-gpt.vercel.app`, and `*.vercel.app` previews. Override with `AI_ALLOWED_ORIGINS` (comma-separated; `*` disables the check). Requests with no `Origin` header (curl, server-to-server) are allowed through to the other layers.
+- **Origin allowlist:** browser requests are restricted to the live site plus test hosts. Defaults: `https://drdoubleb.com`, `https://www.drdoubleb.com`, `https://variant-search-for-chat-gpt.vercel.app`, and this project's own previews (`variant-search-for-chat-gpt-*.vercel.app`) — a bare `*.vercel.app` was previously allowed, which admitted *anyone's* Vercel deployment. Override with `AI_ALLOWED_ORIGINS` (comma-separated; entries may embed `*` wildcards that match within one DNS label; a bare `*` disables the check). Requests with no `Origin` header (curl, server-to-server) are allowed through to the other layers.
 - **Cloudflare Turnstile:** set `TURNSTILE_SECRET_KEY` to require a bot-challenge token (`turnstile_token` in the body) on owner-key requests. Unset → skipped.
 - **Rate limiting (Upstash Redis):** set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` to enable per-IP and a global daily circuit breaker. Defaults: `AI_RL_IP_PER_MIN` 12, `AI_RL_IP_PER_DAY` 120, `AI_RL_GLOBAL_PER_DAY` 1500. On limit, returns `429` (per-IP) or `503` (global daily) with a `Retry-After` header. Unset → skipped.
 
@@ -221,6 +236,18 @@ Rate limiting uses [`@upstash/ratelimit`](https://github.com/upstash/ratelimit-j
 
 The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV/nearby-variant results, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
 
+
+## Proxy origin allowlist
+
+Every serverless proxy (not just `ai-review`) now checks the browser `Origin`
+header against a shared allowlist (`api/_origin.js`): the live site, the
+production Vercel host, and this project's own `variant-search-for-chat-gpt-*`
+previews. Before this, any third-party website's JavaScript could use the
+deployment — and its `NCBI_API_KEY` quota and Vercel invocation budget — as its
+backend. Requests with **no** `Origin` header (curl, server-to-server
+integrations, GPT actions) are deliberately allowed through; only third-party
+browser embedding is blocked. Override with `PROXY_ALLOWED_ORIGINS`
+(comma-separated; falls back to `AI_ALLOWED_ORIGINS`; `*` disables the check).
 
 ## SpliceAI Lookup proxy
 
