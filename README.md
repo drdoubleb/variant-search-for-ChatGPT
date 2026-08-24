@@ -99,6 +99,20 @@ kb away. A GRCh38 candidate the client-side helper cannot lift (indels; the
 helper handles substitutions only) is dropped rather than carried forward
 mislabelled as hg19.
 
+When **both** Ensembl hosts fail, the recoder falls back to **NCBI Variation
+Services** (`api.ncbi.nlm.nih.gov/variation/v0`, CORS-open, independent
+infrastructure): `/hgvs/{query}/contextuals` places the variant as a SPDI, and
+`/spdi/{spdi}/all_equivalent_contextual` remaps it to the GRCh37 `NC_`
+chromosome placement. The scope is deliberately narrow — accessioned nucleotide
+HGVS only (`NM_/NC_/NG_/NR_` with `c./g./n.`); gene-symbol and protein queries
+still need Ensembl. NCBI's contextual SPDIs are VCF-anchored ("TAAT→T" for a
+deletion), so they are trimmed to the minimal event in **both** trim orders
+(`minimalSpdiForms`) — in a repeat region the order decides which flank
+survives, and MyVariant indexes only its normalised form — and fed into the
+existing candidate-conversion path as a recoder-shaped response with no
+transcript nomenclature. The progress panel says "resolved via NCBI Variation
+Services" rather than pretending Ensembl answered.
+
 The app previously made a single attempt behind a 6-7 second deadline, so a
 slow or unwell upstream produced:
 

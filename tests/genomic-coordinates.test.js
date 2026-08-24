@@ -57,6 +57,28 @@ function ncGenomicToChr(gv) {
     return `chr${chrom}:${m[2]}`;
 }
 
+function minimalSpdiForms(s) {
+    const seqId = String(s.seq_id || '');
+    const del0 = String(s.deleted_sequence || '');
+    const ins0 = String(s.inserted_sequence || '');
+    const pos0 = s.position;
+    const forms = [];
+    for (const prefixFirst of [true, false]) {
+        let d = del0;
+        let i = ins0;
+        let p = pos0;
+        const trimPrefix = () => {
+            while (d.length && i.length && d[0] === i[0]) { d = d.slice(1); i = i.slice(1); p += 1; }
+        };
+        const trimSuffix = () => {
+            while (d.length && i.length && d[d.length - 1] === i[i.length - 1]) { d = d.slice(0, -1); i = i.slice(0, -1); }
+        };
+        if (prefixFirst) { trimPrefix(); trimSuffix(); } else { trimSuffix(); trimPrefix(); }
+        if (d || i) forms.push(`${seqId}:${p}:${d}:${i}`);
+    }
+    return Array.from(new Set(forms));
+}
+
 function parseGenomicHgvs(gVariant) {
     if (!gVariant) return null;
     const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.*)$/i);
@@ -438,6 +460,30 @@ check('NC_ chrY converts', ncGenomicToChr('NC_000024.9:g.100A>T') === 'chrY:g.10
 check('mitochondrial NC_ left for the recoder', ncGenomicToChr('NC_012920.1:g.100A>T') === null);
 check('non-genomic NC_ (SPDI) rejected', ncGenomicToChr('NC_000016.9:2122947:AAT:') === null);
 check('chr-form input passes through as null', ncGenomicToChr('chr7:g.140453136A>T') === null);
+
+// --- minimalSpdiForms -------------------------------------------------------
+// NCBI Variation Services contextual SPDIs are VCF-anchored; these are real
+// responses fetched live. MyVariant indexes only the minimal event, and in
+// repeat regions the trim order decides which flank survives — so both minimal
+// forms are offered as candidates.
+
+check('SPDI: clean substitution passes through as one form',
+    eq(minimalSpdiForms({ seq_id: 'NC_000007.13', position: 140453135, deleted_sequence: 'A', inserted_sequence: 'T' }),
+        ['NC_000007.13:140453135:A:T']));
+check('SPDI: anchored deletion TAAT→T yields both trim orders',
+    eq(minimalSpdiForms({ seq_id: 'NC_000016.9', position: 2122946, deleted_sequence: 'TAAT', inserted_sequence: 'T' }),
+        ['NC_000016.9:2122947:AAT:', 'NC_000016.9:2122946:TAA:']));
+check('SPDI: anchored duplication G→GG yields both insertion placements',
+    eq(minimalSpdiForms({ seq_id: 'NC_000023.10', position: 20148674, deleted_sequence: 'G', inserted_sequence: 'GG' }),
+        ['NC_000023.10:20148675::G', 'NC_000023.10:20148674::G']));
+check('SPDI: anchored insertion T→TTT',
+    eq(minimalSpdiForms({ seq_id: 'NC_000004.11', position: 55593602, deleted_sequence: 'T', inserted_sequence: 'TTT' }),
+        ['NC_000004.11:55593603::TT', 'NC_000004.11:55593602::TT']));
+check('SPDI: identical sequences describe no variant',
+    eq(minimalSpdiForms({ seq_id: 'NC_000007.13', position: 1, deleted_sequence: 'A', inserted_sequence: 'A' }), []));
+check('SPDI: MNV with shared flanks trims to the core',
+    eq(minimalSpdiForms({ seq_id: 'NC_000007.13', position: 140453134, deleted_sequence: 'CAG', inserted_sequence: 'CTG' }),
+        ['NC_000007.13:140453135:A:T']));
 
 // --- buildVariantCoordinateTuple ------------------------------------------
 

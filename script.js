@@ -110,6 +110,7 @@ const API_TIMEOUT_MS = {
     // bursts. These deadlines are per attempt; fetchWithRetry adds the retries.
     myvariant: 10000,
     recoder: 12000,
+    variationServices: 8000,
     vep: 20000,
     lookup: 4000,
     liftover: 4000,
@@ -1700,7 +1701,7 @@ function convertSpdiToMyVariant(spdi) {
 // detects from the NC_ accession version and lifts back to hg19.
 const RECODER_HOSTS = ['https://grch37.rest.ensembl.org', 'https://rest.ensembl.org'];
 
-async function fetchVariantRecoder(query) {
+async function fetchVariantRecoderEnsembl(query) {
     const encoded = encodeURIComponent(query);
     const attemptsPerHost = 2;
     let lastErr = null;
@@ -1738,6 +1739,112 @@ async function fetchVariantRecoder(query) {
         return response.json();
     }
     throw lastErr || new Error('Variant recoder request failed');
+}
+
+const NCBI_VARIATION_SERVICES_BASE = 'https://api.ncbi.nlm.nih.gov/variation/v0';
+
+// NCBI's contextual SPDIs are VCF-style anchored alleles (a deletion arrives
+// as "TAAT→T", a duplication as "G→GG") — convertSpdiToMyVariant() would turn
+// those into non-minimal HGVS that MyVariant does not index. Trim the shared
+// bases to the minimal event. Trim order changes which flank survives in a
+// repeat region (MyVariant indexes the 3'-shifted HGVS form, which prefix-first
+// trimming matches for deletions but suffix-first matches for insertions), so
+// return BOTH minimal forms — they collapse to one for substitutions, and the
+// existing candidate selection keeps whichever one actually resolves.
+// Input: a contextual SPDI object; output: minimal SPDI strings (0-2 entries,
+// empty when deleted and inserted sequences are identical, i.e. no variant).
+function minimalSpdiForms(s) {
+    const seqId = String(s.seq_id || '');
+    const del0 = String(s.deleted_sequence || '');
+    const ins0 = String(s.inserted_sequence || '');
+    const pos0 = s.position;
+    const forms = [];
+    for (const prefixFirst of [true, false]) {
+        let d = del0;
+        let i = ins0;
+        let p = pos0;
+        const trimPrefix = () => {
+            while (d.length && i.length && d[0] === i[0]) { d = d.slice(1); i = i.slice(1); p += 1; }
+        };
+        const trimSuffix = () => {
+            while (d.length && i.length && d[d.length - 1] === i[i.length - 1]) { d = d.slice(0, -1); i = i.slice(0, -1); }
+        };
+        if (prefixFirst) { trimPrefix(); trimSuffix(); } else { trimSuffix(); trimPrefix(); }
+        if (d || i) forms.push(`${seqId}:${p}:${d}:${i}`);
+    }
+    return Array.from(new Set(forms));
+}
+
+// Last-resort nomenclature resolver: NCBI Variation Services (SPDI services).
+// Independent infrastructure from Ensembl — it has stayed up through the
+// outages that take both recoder hosts down — and CORS-open (verified live).
+//
+// Scope is deliberately narrow: accessioned nucleotide HGVS (NM_/NC_/NG_/NR_
+// with c./g./n.). Gene-symbol and protein queries need Ensembl's resolver, and
+// chr-form genomic input never needs the recoder to resolve. The result is a
+// minimal recoder-SHAPED array carrying GRCh37 SPDI candidates only — no
+// transcript nomenclature — so the existing candidate-conversion path consumes
+// it unchanged. Returns null (never throws to the caller's benefit) when the
+// query is out of scope or NCBI has no answer.
+async function fetchVariationServicesRecoder(query) {
+    const q = String(query || '').trim();
+    if (!/^N[CMGR]_\d+/i.test(q) || !/:[gcn]\./i.test(q)) return null;
+    const headers = { 'Accept': 'application/json' };
+    const ctxRes = await fetchWithTimeout(
+        `${NCBI_VARIATION_SERVICES_BASE}/hgvs/${encodeURIComponent(q)}/contextuals`,
+        { headers }, API_TIMEOUT_MS.variationServices);
+    if (!ctxRes.ok) return null;
+    const ctx = await ctxRes.json();
+    const contextual = ((ctx && ctx.data && ctx.data.spdis) || [])
+        .find((s) => s && s.seq_id && Number.isInteger(s.position));
+    if (!contextual) return null;
+    const spdiStr = (s) => `${s.seq_id}:${s.position}:${s.deleted_sequence || ''}:${s.inserted_sequence || ''}`;
+    let genomic;
+    if (/^NC_/i.test(contextual.seq_id)) {
+        // Already chromosome-placed — no remap round-trip needed.
+        genomic = [contextual];
+    } else {
+        const eqRes = await fetchWithTimeout(
+            `${NCBI_VARIATION_SERVICES_BASE}/spdi/${encodeURIComponent(spdiStr(contextual))}/all_equivalent_contextual`,
+            { headers }, API_TIMEOUT_MS.variationServices);
+        if (!eqRes.ok) return null;
+        const eq = await eqRes.json();
+        genomic = ((eq && eq.data && eq.data.spdis) || [])
+            .filter((s) => s && /^NC_/i.test(String(s.seq_id)) && Number.isInteger(s.position));
+    }
+    // Prefer GRCh37 placements (consumed as-is); fall back to GRCh38 ones,
+    // which the candidate conversion lifts by accession version.
+    const grch37 = genomic.filter((s) => assemblyFromNcAccession(String(s.seq_id)) === 'GRCh37');
+    const chosen = grch37.length ? grch37 : genomic;
+    const spdiCandidates = chosen.flatMap(minimalSpdiForms);
+    if (!spdiCandidates.length) return null;
+    const data = [{ [q]: { spdi: spdiCandidates } }];
+    // Non-index array property: invisible to JSON.stringify and the per-allele
+    // consumers, but lets the progress panel say where the answer came from.
+    data.__vsFallback = true;
+    return data;
+}
+
+// Ensembl recoder with NCBI Variation Services as a final fallback. The
+// original Ensembl error is preserved when NCBI cannot help either, so outage
+// reporting keeps naming the service that actually failed.
+async function fetchVariantRecoder(query) {
+    let ensemblErr;
+    try {
+        return await fetchVariantRecoderEnsembl(query);
+    } catch (err) {
+        ensemblErr = err;
+    }
+    try {
+        const fallback = await fetchVariationServicesRecoder(query);
+        if (fallback) {
+            console.log('[DEBUG] Recoder resolved via NCBI Variation Services fallback:', fallback);
+            return fallback;
+        }
+    } catch (vsErr) {
+        console.warn('NCBI Variation Services fallback failed:', vsErr);
+    }
+    throw ensemblErr;
 }
 
 // Ensembl REST hosts that serve the /map assembly-conversion endpoint. The
@@ -6352,10 +6459,17 @@ document.addEventListener('DOMContentLoaded', () => {
             // not overwrite the transcripts or progress panel of a newer search.
             if (!isCurrentSearch()) return list;
             transcriptsFromRecoder = list;
-            LookupProgress.stepUnlessFailed('recoder', list.length ? 'ok' : 'empty',
+            // A Variation Services fallback answer carries genomic candidates but
+            // no transcript nomenclature — say that, not "no transcript match".
+            const viaVs = lastRecoderResult.query === query
+                && lastRecoderResult.data && lastRecoderResult.data.__vsFallback;
+            LookupProgress.stepUnlessFailed('recoder',
+                list.length ? 'ok' : (viaVs ? 'warn' : 'empty'),
                 list.length
                     ? `${list.length} transcript${list.length === 1 ? '' : 's'}`
-                    : 'no transcript match');
+                    : (viaVs
+                        ? 'Ensembl unavailable — variant resolved via NCBI Variation Services'
+                        : 'no transcript match'));
             return list;
         }).catch((recoderErr) => {
             // getTranscriptsList swallows its own errors, so this is a safety net.

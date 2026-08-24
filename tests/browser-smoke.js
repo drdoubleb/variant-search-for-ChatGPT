@@ -53,7 +53,22 @@ async function installRoutes(page) {
             mappings: [{ mapped: { assembly: 'GRCh37', seq_region_name: '7', start: 140453136, end: 140453136, strand: 1 } }]
         });
         if (/ensembl\.org/.test(url)) return route.abort(); // Ensembl outage
-        if (/myvariant\.info\/v1\/query/.test(url)) return json({ hits: [BRAF_ANNOTATION] });
+        // NCBI Variation Services (the recoder's last-resort fallback): real
+        // response shapes for NM_004333.4:c.1799T>A (V600E), fetched live.
+        if (/api\.ncbi\.nlm\.nih\.gov\/variation\/v0\/hgvs\//.test(url)) return json({
+            data: { spdis: [{ seq_id: 'NM_004333.4', position: 1859, deleted_sequence: 'T', inserted_sequence: 'A' }], input_hgvs_validity: 'valid' }
+        });
+        if (/api\.ncbi\.nlm\.nih\.gov\/variation\/v0\/spdi\/.*all_equivalent_contextual/.test(url)) return json({
+            data: { spdis: [
+                { seq_id: 'NM_004333.4', position: 1859, deleted_sequence: 'T', inserted_sequence: 'A' },
+                { seq_id: 'NC_000007.14', position: 140753335, deleted_sequence: 'A', inserted_sequence: 'T' },
+                { seq_id: 'NC_000007.13', position: 140453135, deleted_sequence: 'A', inserted_sequence: 'T' }
+            ] }
+        });
+        // Free-text search finds BRAF only for braf-flavoured queries — the
+        // Variation Services scenario's NM_ input must NOT resolve this way,
+        // or the recoder-fallback path under test would be bypassed.
+        if (/myvariant\.info\/v1\/query/.test(url)) return json(/braf/i.test(url) ? { hits: [BRAF_ANNOTATION] } : { hits: [] });
         if (/myvariant\.info\/v1\/variant/.test(url)) {
             // Only the true hg19 id resolves — an unlifted GRCh38 coordinate must
             // NOT find an annotation, or the toggle test would pass vacuously.
@@ -210,6 +225,21 @@ async function installRoutes(page) {
             /c\.1799T>A/.test(variantText), variantText.slice(0, 250));
         const gUrl = page.url();
         check('grch38: assembly param kept in the shareable URL', /assembly=grch38/.test(gUrl), gUrl);
+        await page.close();
+    }
+
+    // ── NCBI Variation Services fallback: accessioned c. HGVS, Ensembl down ─
+    {
+        const page = await newPage();
+        await page.goto(`${BASE}/?variant=NM_004333.4%3Ac.1799T%3EA`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('[data-card="variant"]', { timeout: 60000 });
+        await page.waitForTimeout(2000);
+        const lpText = (await page.$eval('#lookupProgress', el => el.textContent)).replace(/\s+/g, ' ');
+        check('vs-fallback: progress names NCBI Variation Services',
+            /NCBI Variation Services/.test(lpText), lpText.slice(0, 300));
+        const variantText = (await page.$eval('[data-card="variant"]', el => el.textContent)).replace(/\s+/g, ' ');
+        check('vs-fallback: resolved to the GRCh37 locus (canonical c.1799T>A)',
+            /c\.1799T>A/.test(variantText), variantText.slice(0, 250));
         await page.close();
     }
 
