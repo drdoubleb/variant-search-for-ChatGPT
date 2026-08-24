@@ -2753,15 +2753,27 @@ function condenseOpenFdaForAi(data, { maxRecords = 40 } = {}) {
     };
 }
 
-async function fetchPubmedArticles(searchTerm, limit = 5) {
-    if (!searchTerm) return { total: 0, articles: [] };
-    const params = new URLSearchParams({ term: searchTerm, limit: String(limit) });
+// `variantQuery` ({ gene, variant, extra? }) switches the proxy to its
+// LitVar2/PubTator3 path: variant-normalized literature (papers writing the
+// same change as p.Val600Glu, c.1799T>A or an rsID all match), relevance-ranked.
+// The proxy falls back to the plain `searchTerm` search when no variant entity
+// matches, so passing both is always safe.
+async function fetchPubmedArticles(searchTerm, limit = 5, variantQuery = null) {
+    const hasVariant = variantQuery && String(variantQuery.variant || '').trim();
+    if (!searchTerm && !hasVariant) return { total: 0, articles: [] };
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (searchTerm) params.set('term', searchTerm);
+    if (hasVariant) {
+        if (variantQuery.gene) params.set('gene', variantQuery.gene);
+        params.set('variant', variantQuery.variant);
+        if (variantQuery.extra) params.set('extra', variantQuery.extra);
+    }
     const endpoint = getConfiguredApiEndpoint('PUBMED_API_ENDPOINT', '/api/pubmed');
     const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.pubmed);
     if (!res.ok) throw new Error(`PubMed proxy error: ${res.status}`);
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
-    return { total: data.total || 0, articles: data.articles || [] };
+    return { total: data.total || 0, articles: data.articles || [], litvar: data.litvar || null, backend: data.backend || 'term' };
 }
 
 async function fetchClinicalTrials(gene, tumorType) {
@@ -2791,9 +2803,11 @@ async function fetchClinicalTrials(gene, tumorType) {
  * (tab labels, search terms, which extras/cache object to populate).
  */
 
-// PubMed card. `tabs` is 1-3 entries of { label, term, extraKey }; with a
-// single entry no tab bar is rendered. Results are stashed under
-// extras[extraKey] for the AI-review payload.
+// PubMed card. `tabs` is 1-3 entries of { label, term, extraKey, variantQuery? };
+// with a single entry no tab bar is rendered. `variantQuery` ({ gene, variant,
+// extra? }) routes that tab through the LitVar2 variant-normalized search, with
+// the term search as fallback. Results are stashed under extras[extraKey] for
+// the AI-review payload.
 function createPubmedCard({ container, tabs, extras }) {
     const PUBMED_LIMIT = 5;
     const pmCard = document.createElement('div');
@@ -2805,7 +2819,7 @@ function createPubmedCard({ container, tabs, extras }) {
     const pmContent = document.createElement('div');
     pmContent.className = 'card-content';
 
-    const buildPmResultsPanel = (panel, searchTerm, extraKey) => {
+    const buildPmResultsPanel = (panel, searchTerm, extraKey, variantQuery) => {
         const queryUrl = searchTerm
             ? `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(searchTerm)}&sort=relevance`
             : 'https://pubmed.ncbi.nlm.nih.gov/';
@@ -2822,19 +2836,31 @@ function createPubmedCard({ container, tabs, extras }) {
             panel.appendChild(queryLabel);
         }
         const resultsDiv = document.createElement('div');
-        if (searchTerm) {
+        if (searchTerm || variantQuery) {
             const spinner = document.createElement('div');
             spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
             spinner.textContent = 'Loading PubMed results…';
             resultsDiv.appendChild(spinner);
         }
         panel.appendChild(resultsDiv);
-        if (searchTerm) {
-            fetchPubmedArticles(searchTerm, PUBMED_LIMIT).then(({ total, articles }) => {
-                extras[extraKey] = { query: searchTerm, total, articles };
+        if (searchTerm || variantQuery) {
+            fetchPubmedArticles(searchTerm, PUBMED_LIMIT, variantQuery).then(({ total, articles, litvar, backend }) => {
+                extras[extraKey] = { query: searchTerm, total, articles, backend, litvar };
                 resultsDiv.innerHTML = '';
+                // Provenance line: which spelling-normalized entity matched. A
+                // LitVar2 hit means every nomenclature form of the variant was
+                // searched, not just the literal query text above.
+                if (litvar && backend === 'litvar') {
+                    const lvNote = document.createElement('div');
+                    lvNote.style.cssText = 'font-size:0.78rem;color:#0369a1;margin-bottom:6px;';
+                    lvNote.textContent = `Variant-matched via LitVar2: ${litvar.name}${litvar.rsid ? ` (${litvar.rsid})` : ''} — all nomenclature spellings, ranked by relevance`;
+                    resultsDiv.appendChild(lvNote);
+                }
                 if (total === 0 || articles.length === 0) {
-                    resultsDiv.innerHTML = '<div style="font-size:0.85rem;color:#6b7280;">No PubMed results found.</div>';
+                    const noRes = document.createElement('div');
+                    noRes.style.cssText = 'font-size:0.85rem;color:#6b7280;';
+                    noRes.textContent = 'No PubMed results found.';
+                    resultsDiv.appendChild(noRes);
                     return;
                 }
                 const countEl = document.createElement('div');
@@ -2875,11 +2901,13 @@ function createPubmedCard({ container, tabs, extras }) {
                 });
                 if (total > PUBMED_LIMIT) {
                     const seeAll = document.createElement('a');
-                    seeAll.href = queryUrl;
+                    seeAll.href = (litvar && litvar.url) ? litvar.url : queryUrl;
                     seeAll.target = '_blank';
                     seeAll.rel = 'noopener noreferrer';
                     seeAll.style.fontSize = '0.82rem';
-                    seeAll.textContent = `See all ${total.toLocaleString()} results on PubMed ↗`;
+                    seeAll.textContent = (litvar && litvar.url)
+                        ? `See all ${total.toLocaleString()} variant-matched articles on LitVar2 ↗`
+                        : `See all ${total.toLocaleString()} results on PubMed ↗`;
                     resultsDiv.appendChild(seeAll);
                 }
             }).catch(() => {
@@ -2911,11 +2939,11 @@ function createPubmedCard({ container, tabs, extras }) {
         });
         pmContent.appendChild(tabBar);
         tabs.forEach((tab, i) => {
-            buildPmResultsPanel(tabPanels[i], tab.term, tab.extraKey);
+            buildPmResultsPanel(tabPanels[i], tab.term, tab.extraKey, tab.variantQuery || null);
             pmContent.appendChild(tabPanels[i]);
         });
     } else {
-        buildPmResultsPanel(pmContent, tabs[0].term, tabs[0].extraKey);
+        buildPmResultsPanel(pmContent, tabs[0].term, tabs[0].extraKey, tabs[0].variantQuery || null);
     }
 
     pmCard.appendChild(pmContent);
@@ -8931,11 +8959,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (cached != null && isValid(cached)) return Promise.resolve(cached);
                     return fetcher();
                 };
-                const pubmedFromCacheOrFetch = (key, term) => cachedOr(
+                const pubmedFromCacheOrFetch = (key, term, variantQuery = null) => cachedOr(
                     key,
                     (c) => Array.isArray(c.articles) && c.articles.length > 0,
-                    () => (term ? fetchPubmedArticles(term, 5) : Promise.resolve({ total: 0, articles: [] }))
+                    () => (term || variantQuery ? fetchPubmedArticles(term, 5, variantQuery) : Promise.resolve({ total: 0, articles: [] }))
                 );
+                const aiPubmedVariantQuery = aiReviewSearchVariantTerm
+                    ? { gene: aiReviewGene, variant: aiReviewSearchVariantTerm }
+                    : null;
                 const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation, await getResolvedVcfAlleles());
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
@@ -8960,12 +8991,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     ['spliceai_lookup', cachedOr('spliceai_lookup',
                         (c) => typeof c === 'object' && !c.error && Boolean(c.data),
                         () => (spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)))],
-                    ['pubmed', pubmedTerm ? pubmedFromCacheOrFetch('pubmed', pubmedTerm) : Promise.resolve({ total: 0, articles: [] })],
+                    ['pubmed', pubmedTerm ? pubmedFromCacheOrFetch('pubmed', pubmedTerm, aiPubmedVariantQuery) : Promise.resolve({ total: 0, articles: [] })],
                     ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? pubmedFromCacheOrFetch('pubmed_tumor_type', pubmedTumorTerm) : Promise.resolve(null)],
                     ['pubmed_variant_tumor_type', pubmedVariantTumorTerm
                         && pubmedVariantTumorTerm !== pubmedTerm
                         && pubmedVariantTumorTerm !== pubmedTumorTerm
-                        ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm)
+                        ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm,
+                            aiPubmedVariantQuery ? { ...aiPubmedVariantQuery, extra: tumorType } : null)
                         : Promise.resolve(null)],
                     // The openFDA card stores the same payload shape under `openfda`;
                     // reuse it rather than re-paging up to 10 requests of label text.
@@ -9286,13 +9318,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     const pmVariantTumorSearchTerm = (tumorType && searchVariantTerm)
                         ? [firstGene, searchVariantTerm, tumorType].filter(Boolean).join(' ')
                         : '';
-                    const pmTabs = [{ label: 'Gene + Variant', term: pmSearchTerm, extraKey: 'pubmed' }];
+                    // Variant tabs go through LitVar2 (all nomenclature spellings)
+                    // with the term search as automatic fallback; the tumor-only
+                    // tab stays a plain term search.
+                    const pmVariantQuery = searchVariantTerm
+                        ? { gene: firstGene, variant: searchVariantTerm }
+                        : null;
+                    const pmTabs = [{ label: 'Gene + Variant', term: pmSearchTerm, extraKey: 'pubmed', variantQuery: pmVariantQuery }];
                     if (pmTumorSearchTerm && pmSearchTerm !== pmTumorSearchTerm) {
                         pmTabs.push({ label: 'Gene + Tumor Type', term: pmTumorSearchTerm, extraKey: 'pubmed_tumor_type' });
                         if (pmVariantTumorSearchTerm
                             && pmVariantTumorSearchTerm !== pmSearchTerm
                             && pmVariantTumorSearchTerm !== pmTumorSearchTerm) {
-                            pmTabs.push({ label: 'Gene + Variant + Tumor Type', term: pmVariantTumorSearchTerm, extraKey: 'pubmed_variant_tumor_type' });
+                            pmTabs.push({
+                                label: 'Gene + Variant + Tumor Type',
+                                term: pmVariantTumorSearchTerm,
+                                extraKey: 'pubmed_variant_tumor_type',
+                                variantQuery: pmVariantQuery ? { ...pmVariantQuery, extra: tumorType } : null
+                            });
                         }
                     }
                     createPubmedCard({ container: cardsContainer, tabs: pmTabs, extras: aiReviewExtras });
