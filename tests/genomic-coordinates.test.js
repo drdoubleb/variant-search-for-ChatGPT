@@ -19,6 +19,24 @@
 
 // --- helpers copied verbatim from script.js -------------------------------
 
+const GRCH37_NC_VERSIONS = {
+    1: 10, 2: 11, 3: 11, 4: 11, 5: 9, 6: 11, 7: 13, 8: 10, 9: 11, 10: 10,
+    11: 9, 12: 11, 13: 10, 14: 8, 15: 9, 16: 9, 17: 10, 18: 9, 19: 9, 20: 10,
+    21: 8, 22: 10, 23: 10, 24: 9
+};
+
+function assemblyFromNcAccession(value) {
+    const m = String(value || '').match(/^NC_(\d{6})\.(\d+)/);
+    if (!m) return null;
+    const num = parseInt(m[1], 10);
+    const version = parseInt(m[2], 10);
+    const v37 = GRCH37_NC_VERSIONS[num];
+    if (!v37) return null;
+    if (version === v37) return 'GRCh37';
+    if (version === v37 + 1) return 'GRCh38';
+    return null;
+}
+
 function parseGenomicHgvs(gVariant) {
     if (!gVariant) return null;
     const m = String(gVariant).trim().match(/^chr([0-9XYMT]+):g\.(\d+)(?:_(\d+))?(.*)$/i);
@@ -350,6 +368,23 @@ check('a region yields no VCF alleles',
     vcfAllelesFromGenomicHgvs(parseGenomicHgvs('chr16:g.2136834_2136836'), 2136830, 'ACGTACGTACGT') === null);
 check('non-genomic input rejected', parseGenomicHgvs('TSC2:c.2319_2321delAAT') === null);
 check('empty input rejected', parseGenomicHgvs('') === null);
+
+// --- assemblyFromNcAccession ----------------------------------------------
+// The GRCh37 recoder mirror emits GRCh37 accessions (NC_000007.13); the main
+// host emits GRCh38 (NC_000007.14). Candidate conversion must lift ONLY the
+// GRCh38 ones — blanket-lifting corrupted already-hg19 substitutions, because
+// Ensembl's /map answers wrongly (not with an error) for a coordinate from the
+// wrong assembly.
+
+check('GRCh37 hgvsg accession detected', assemblyFromNcAccession('NC_000007.13:g.140453136A>T') === 'GRCh37');
+check('GRCh38 hgvsg accession detected', assemblyFromNcAccession('NC_000007.14:g.140753336A>T') === 'GRCh38');
+check('GRCh37 SPDI accession detected', assemblyFromNcAccession('NC_000016.9:2122947:AAT:') === 'GRCh37');
+check('GRCh38 chrX accession detected', assemblyFromNcAccession('NC_000023.11:g.20148674T>G') === 'GRCh38');
+check('GRCh37 chrX accession detected', assemblyFromNcAccession('NC_000023.10:g.20148674T>G') === 'GRCh37');
+check('unknown version yields null', assemblyFromNcAccession('NC_000007.99:g.1A>T') === null);
+check('mitochondrial accession yields null', assemblyFromNcAccession('NC_012920.1:g.100A>T') === null);
+check('non-NC input yields null', assemblyFromNcAccession('chr7:g.140453136A>T') === null);
+check('empty input yields null', assemblyFromNcAccession('') === null);
 
 // --- buildVariantCoordinateTuple ------------------------------------------
 

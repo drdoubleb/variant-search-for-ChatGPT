@@ -46,8 +46,23 @@ See `tests/coordinate-row.test.js`.
 
 Every nomenclature lookup depends on `grch37.rest.ensembl.org`. That host
 intermittently returns 500/503 and has been measured taking **20-40 seconds** to
-answer a cold `variant_recoder` or `vep` query. The app previously made a single
-attempt behind a 6-7 second deadline, so a slow or unwell upstream produced:
+answer a cold `variant_recoder` or `vep` query.
+
+The variant recoder now **fails over to `rest.ensembl.org`** when the GRCh37
+mirror is unwell (transport errors and retryable 5xx only — a 4xx is a real
+answer and is not shopped around). The main host's coordinates are GRCh38, so
+candidate conversion reads the assembly off the RefSeq chromosome accession
+version (`NC_000007.13` = GRCh37, `.14` = GRCh38) and lifts **only** GRCh38
+candidates back to hg19. This assembly check also fixed a latent bug: the
+GRCh37 mirror's substitution candidates were previously *always* passed through
+the hg38→hg19 liftover, and Ensembl's `/map` does not error when handed a
+coordinate from the wrong assembly — it silently returns a position hundreds of
+kb away. A GRCh38 candidate the client-side helper cannot lift (indels; the
+helper handles substitutions only) is dropped rather than carried forward
+mislabelled as hg19.
+
+The app previously made a single attempt behind a 6-7 second deadline, so a
+slow or unwell upstream produced:
 
 > Variant not found. Please verify the genomic coordinate and reference allele.
 

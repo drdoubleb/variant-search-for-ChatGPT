@@ -17,6 +17,34 @@ const accessionToChr = (accession) => {
 };
 
 
+// RefSeq chromosome accession VERSIONS distinguish the assembly: GRCh38 bumped
+// every chromosome's version by one (chr7 is NC_000007.13 in GRCh37 and .14 in
+// GRCh38). This lets recoder/SPDI output declare its own assembly, so the
+// pipeline lifts GRCh38 coordinates and — critically — leaves GRCh37 ones
+// alone. Blanket-lifting everything silently "mapped" already-hg19 positions
+// hundreds of kb away (Ensembl's /map does not error when handed a coordinate
+// from the wrong assembly; it just returns a wrong answer).
+const GRCH37_NC_VERSIONS = {
+    1: 10, 2: 11, 3: 11, 4: 11, 5: 9, 6: 11, 7: 13, 8: 10, 9: 11, 10: 10,
+    11: 9, 12: 11, 13: 10, 14: 8, 15: 9, 16: 9, 17: 10, 18: 9, 19: 9, 20: 10,
+    21: 8, 22: 10, 23: 10, 24: 9
+};
+
+// Returns 'GRCh37' | 'GRCh38' | null for an NC_-prefixed string (a full hgvsg
+// or SPDI is fine — only the leading accession is read). Null when the
+// accession is unversioned, mitochondrial, or not recognisably either build.
+function assemblyFromNcAccession(value) {
+    const m = String(value || '').match(/^NC_(\d{6})\.(\d+)/);
+    if (!m) return null;
+    const num = parseInt(m[1], 10);
+    const version = parseInt(m[2], 10);
+    const v37 = GRCH37_NC_VERSIONS[num];
+    if (!v37) return null;
+    if (version === v37) return 'GRCh37';
+    if (version === v37 + 1) return 'GRCh38';
+    return null;
+}
+
 const DEFAULT_BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
 // The canonical production Vercel host. Any *other* *.vercel.app host is a
 // preview/branch deployment.
@@ -1509,20 +1537,27 @@ function buildCanonicalFromAnnotation(annotation, targetProtGlobal) {
             }
         }
     }
-    // Gather candidates from dbNSFP hgvsc/hgvsp arrays.
+    // Gather candidates from dbNSFP hgvsc/hgvsp arrays. These entries are BARE
+    // c./p. strings with no accession ("c.1799T>A"), so an accession-less entry
+    // is the cDNA itself — splitting on ':' used to shove it into the transcript
+    // slot and leave cDNA empty. hgvsp is index-paired only when the arrays
+    // actually align; dbNSFP's hgvsc and hgvsp can have different lengths.
     if (annotation.dbnsfp && annotation.dbnsfp.hgvsc) {
         const hgvsc = Array.isArray(annotation.dbnsfp.hgvsc) ? annotation.dbnsfp.hgvsc : [annotation.dbnsfp.hgvsc];
         const hgvsp = annotation.dbnsfp.hgvsp ? (Array.isArray(annotation.dbnsfp.hgvsp) ? annotation.dbnsfp.hgvsp : [annotation.dbnsfp.hgvsp]) : [];
+        const aligned = hgvsp.length === hgvsc.length;
         for (let i = 0; i < hgvsc.length; i++) {
             const sc = hgvsc[i];
             if (!sc) continue;
-            const parts = String(sc).split(':');
-            const txId = parts[0];
-            const cpart = parts.slice(1).join(':');
+            const scStr = String(sc);
+            const scColon = scStr.indexOf(':');
+            const txId = scColon !== -1 ? scStr.slice(0, scColon) : '';
+            const cpart = scColon !== -1 ? scStr.slice(scColon + 1) : scStr;
             let ppart = '';
-            if (hgvsp[i]) {
-                const pparts = String(hgvsp[i]).split(':');
-                ppart = pparts.slice(1).join(':');
+            if (aligned && hgvsp[i]) {
+                const spStr = String(hgvsp[i]);
+                const spColon = spStr.indexOf(':');
+                ppart = spColon !== -1 ? spStr.slice(spColon + 1) : spStr;
             }
             candidates.push({ transcript: txId, cDNA: cpart, protein: ppart, source: 'dbnsfp' });
         }
@@ -1653,33 +1688,51 @@ function convertSpdiToMyVariant(spdi) {
     return `chr${chr}:g.${start}>${alt}`;
 }
 
+// The GRCh37 mirror is preferred: complex clinical variants are catalogued
+// relative to hg19/GRCh37, and its hgvsg/spdi come back in GRCh37 directly.
+// The main host is a degraded-mode fallback for when the mirror is down (it
+// 500s in bursts) — its coordinates are GRCh38, which the candidate conversion
+// detects from the NC_ accession version and lifts back to hg19.
+const RECODER_HOSTS = ['https://grch37.rest.ensembl.org', 'https://rest.ensembl.org'];
+
 async function fetchVariantRecoder(query) {
     const encoded = encodeURIComponent(query);
-    // Use the Ensembl GRCh37 server for variant_recoder requests.  Complex
-    // clinical variants are often catalogued relative to the hg19/GRCh37
-    // assembly, and the default GRCh38 server may return 3' UTR or other
-    // non‑canonical annotations.  Switching to grch37.rest.ensembl.org
-    // improves consistency and allows detection of variants such as
-    // BRAF c.1799_1811delinsA.
-    const url = `https://grch37.rest.ensembl.org/variant_recoder/human/${encoded}?content-type=application/json`;
-    const response = await fetchWithRetry(url, {
-        headers: {
-            'Accept': 'application/json'
+    const attemptsPerHost = 2;
+    let lastErr = null;
+    for (let hostIdx = 0; hostIdx < RECODER_HOSTS.length; hostIdx++) {
+        const url = `${RECODER_HOSTS[hostIdx]}/variant_recoder/human/${encoded}?content-type=application/json`;
+        let response;
+        try {
+            response = await fetchWithRetry(url, {
+                headers: {
+                    'Accept': 'application/json'
+                }
+            }, API_TIMEOUT_MS.recoder, {
+                attempts: attemptsPerHost,
+                onAttempt: ({ attempt }) => LookupProgress.attempt(
+                    'recoder', hostIdx * attemptsPerHost + attempt, RECODER_HOSTS.length * attemptsPerHost)
+            });
+        } catch (err) {
+            // Transport-level failure after this host's retries — try the next host.
+            lastErr = err;
+            if (err && err.retryable && hostIdx < RECODER_HOSTS.length - 1) continue;
+            throw err;
         }
-    }, API_TIMEOUT_MS.recoder, {
-        attempts: 3,
-        onAttempt: ({ attempt, attempts }) => LookupProgress.attempt('recoder', attempt, attempts)
-    });
-    if (!response.ok) {
-        const text = await response.text();
-        const err = new Error(`Variant recoder request failed (${response.status}): ${text}`);
-        err.status = response.status;
-        // A 4xx here means Ensembl parsed the request and rejected the variant;
-        // a 5xx means the service is unwell and the variant may be perfectly fine.
-        err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
-        throw err;
+        if (!response.ok) {
+            const text = await response.text();
+            const err = new Error(`Variant recoder request failed (${response.status}): ${text}`);
+            err.status = response.status;
+            // A 4xx here means Ensembl parsed the request and rejected the variant —
+            // a real answer, no point asking another host. A 5xx means the service
+            // is unwell and the variant may be perfectly fine, so fail over.
+            err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+            lastErr = err;
+            if (err.retryable && hostIdx < RECODER_HOSTS.length - 1) continue;
+            throw err;
+        }
+        return response.json();
     }
-    return response.json();
+    throw lastErr || new Error('Variant recoder request failed');
 }
 
 // Ensembl REST hosts that serve the /map assembly-conversion endpoint. The
@@ -5729,39 +5782,63 @@ document.addEventListener('DOMContentLoaded', () => {
                 // against the expected protein change.
                 // candidateVariants is defined in a higher scope (line ~1253) to allow reuse
                 // in later fallbacks (e.g. free‑text search). Do not redeclare it here.
-                for (const item of recoderData) {
-                    for (const key in item) {
-                        const sub = item[key];
-                        if (!sub) continue;
-                        // hgvsg entries may be a string or an array
-                        if (sub.hgvsg) {
-                            const hgvsgList = Array.isArray(sub.hgvsg) ? sub.hgvsg : [sub.hgvsg];
-                            for (const hgvsg of hgvsgList) {
-                                try {
-                                    const mv = convertHgvsgToMyVariant(hgvsg);
-                                    const lifted = await liftoverHg38ToHg19(mv);
-                                    console.log('[DEBUG] Converted hgvsg to MV and liftover:', hgvsg, '->', mv, '->', lifted);
-                                    candidateVariants.push(lifted);
-                                } catch {
-                                    // skip conversion errors
+                // Convert each hgvsg/SPDI entry to MyVariant notation, lifting to hg19
+                // ONLY when its accession says GRCh38. The GRCh37 recoder mirror emits
+                // GRCh37 accessions (NC_000007.13), and the previous unconditional
+                // liftoverHg38ToHg19() "mapped" those already-hg19 positions to a locus
+                // hundreds of kb away — Ensembl's /map does not error on a coordinate
+                // from the wrong assembly, it just answers wrongly. Every substitution
+                // candidate was corrupted this way (indels escaped only because the
+                // liftover helper's regex matches substitutions alone). Unknown
+                // accessions conservatively keep the old lift-it behaviour.
+                const convertCandidate = async (raw, converter, label) => {
+                    try {
+                        const mv = converter(raw);
+                        const assembly = assemblyFromNcAccession(raw);
+                        if (assembly === 'GRCh37') {
+                            console.log(`[DEBUG] Converted ${label} to MV:`, raw, '->', mv, '(already GRCh37)');
+                            return mv;
+                        }
+                        const lifted = await liftoverHg38ToHg19(mv);
+                        // A known-GRCh38 coordinate that came back unchanged was NOT
+                        // converted (the helper only lifts substitutions, and returns
+                        // its input on failure) — drop it rather than carry an hg38
+                        // position mislabelled as hg19 into the cards.
+                        if (assembly === 'GRCh38' && lifted === mv) {
+                            console.log(`[DEBUG] Dropping unliftable GRCh38 ${label} candidate:`, raw);
+                            return null;
+                        }
+                        console.log(`[DEBUG] Converted ${label} to MV and liftover:`, raw, '->', mv, '->', lifted);
+                        return lifted;
+                    } catch {
+                        return null; // skip conversion errors
+                    }
+                };
+                {
+                    // Collect conversions first, then run them concurrently — the lifted
+                    // (GRCh38) entries each cost an Ensembl /map round-trip and used to
+                    // run strictly in series.
+                    const conversions = [];
+                    for (const item of recoderData) {
+                        for (const key in item) {
+                            const sub = item[key];
+                            if (!sub) continue;
+                            // hgvsg / spdi entries may be a string or an array
+                            if (sub.hgvsg) {
+                                const hgvsgList = Array.isArray(sub.hgvsg) ? sub.hgvsg : [sub.hgvsg];
+                                for (const hgvsg of hgvsgList) {
+                                    conversions.push(convertCandidate(hgvsg, convertHgvsgToMyVariant, 'hgvsg'));
                                 }
                             }
-                        }
-                        // spdi entries may be string or array
-                        if (sub.spdi) {
-                            const spdiList = Array.isArray(sub.spdi) ? sub.spdi : [sub.spdi];
-                            for (const spdi of spdiList) {
-                                try {
-                                    const mv = convertSpdiToMyVariant(spdi);
-                                    const lifted = await liftoverHg38ToHg19(mv);
-                                    console.log('[DEBUG] Converted SPDI to MV and liftover:', spdi, '->', mv, '->', lifted);
-                                    candidateVariants.push(lifted);
-                                } catch {
-                                    // skip conversion errors
+                            if (sub.spdi) {
+                                const spdiList = Array.isArray(sub.spdi) ? sub.spdi : [sub.spdi];
+                                for (const spdi of spdiList) {
+                                    conversions.push(convertCandidate(spdi, convertSpdiToMyVariant, 'SPDI'));
                                 }
                             }
                         }
                     }
+                    candidateVariants.push(...(await Promise.all(conversions)).filter(Boolean));
                 }
                 // Remove duplicates and ensure at least one candidate exists
                 const uniqueCandidates = Array.from(new Set(candidateVariants));
@@ -5774,15 +5851,23 @@ document.addEventListener('DOMContentLoaded', () => {
                     let selectedAnn = null;
                     let selectedVar = null;
                     let firstAnn = null;
-                    for (const cand of uniqueCandidates) {
-                        let ann = null;
+                    // Fetch every candidate's annotation concurrently (typically 1-5);
+                    // the selection walk below still runs in the recoder's priority
+                    // order, so the outcome matches the old sequential scan minus the
+                    // serial MyVariant round-trips.
+                    const candidateAnns = await Promise.all(uniqueCandidates.map(async (cand) => {
                         try {
-                            ann = await fetchMyVariant(cand);
+                            const fetched = await fetchMyVariant(cand);
                             console.log('[DEBUG] Fetched annotation for candidate', cand);
+                            return fetched;
                         } catch {
                             console.log('[DEBUG] Annotation fetch error for candidate', cand);
-                            continue;
+                            return null;
                         }
+                    }));
+                    for (let candIdx = 0; candIdx < uniqueCandidates.length; candIdx++) {
+                        const cand = uniqueCandidates[candIdx];
+                        const ann = candidateAnns[candIdx];
                         if (!ann) continue;
                         if (!firstAnn) {
                             firstAnn = ann;
@@ -6622,18 +6707,32 @@ document.addEventListener('DOMContentLoaded', () => {
                     cDNAHTML = hgvscList
                         .map((h) => (h === canonicalCandidate ? `<strong>${h}</strong>` : h))
                         .join(', ');
-                    // Build a list of transcript mappings (transcript ID -> cDNA, protein). We'll align hgvsc and hgvsp by index.
+                    // Build a list of transcript mappings (transcript ID -> cDNA, protein).
+                    //
+                    // MyVariant's dbnsfp.hgvsc entries are BARE c. strings with no
+                    // accession ("c.1799T>A"), so splitting on ':' used to shove the
+                    // whole string into the transcript slot and leave cDNA empty — the
+                    // Variant card's canonical entry then had no cDNA, the display fell
+                    // back to the FIRST list entry, and BRAF V600E rendered as the
+                    // alternate-isoform c.620T>A whenever the recoder was down. Treat an
+                    // accession-less entry as the cDNA itself. hgvsp is index-paired
+                    // only when the arrays actually align — dbNSFP's hgvsc and hgvsp
+                    // arrays can have different lengths (V600E: 3 vs 4), and pairing
+                    // misaligned arrays attaches the wrong protein to a transcript.
                     const hgvspListLocal = (annotation.dbnsfp && annotation.dbnsfp.hgvsp) ? (Array.isArray(annotation.dbnsfp.hgvsp) ? annotation.dbnsfp.hgvsp : [annotation.dbnsfp.hgvsp]) : [];
+                    const hgvspAligned = hgvspListLocal.length === hgvscList.length;
                     for (let i = 0; i < hgvscList.length; i++) {
                         const sc = hgvscList[i];
                         if (!sc) continue;
-                        const parts = String(sc).split(':');
-                        const transcriptId = parts[0];
-                        const cpart = parts.slice(1).join(':');
+                        const scStr = String(sc);
+                        const scColon = scStr.indexOf(':');
+                        const transcriptId = scColon !== -1 ? scStr.slice(0, scColon) : '';
+                        const cpart = scColon !== -1 ? scStr.slice(scColon + 1) : scStr;
                         let ppart = '';
-                        if (hgvspListLocal[i]) {
-                            const pparts = String(hgvspListLocal[i]).split(':');
-                            ppart = pparts.slice(1).join(':');
+                        if (hgvspAligned && hgvspListLocal[i]) {
+                            const spStr = String(hgvspListLocal[i]);
+                            const spColon = spStr.indexOf(':');
+                            ppart = spColon !== -1 ? spStr.slice(spColon + 1) : spStr;
                         }
                         transcriptsList.push({ transcript: transcriptId, cDNA: cpart, protein: ppart, canonical: sc === canonicalCandidate });
                     }
@@ -6935,7 +7034,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 // any formatted lists built earlier (e.g. root‑level hgvsc/hgvsp arrays) and
                 // provide a sensible default when annotation properties are unavailable.
                 if (!canonicalCVal && cDNAHTML) {
-                    const cdClean = cDNAHTML.replace(/<[^>]+>/g, '').split(',')[0].trim();
+                    // The canonical entry is the <strong>-wrapped one — prefer it over
+                    // whatever happens to be first in the list (dbNSFP's array order is
+                    // arbitrary; taking [0] once showed BRAF V600E as c.620T>A).
+                    const strongMatch = cDNAHTML.match(/<strong>([^<]*)<\/strong>/i);
+                    const cdClean = (strongMatch ? strongMatch[1] : cDNAHTML.replace(/<[^>]+>/g, '').split(',')[0]).trim();
                     if (cdClean) canonicalCVal = cdClean;
                 }
                 if (!canonicalProtVal && protein) {
@@ -6972,7 +7075,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     ul.style.paddingLeft = '1.2em';
                     transcriptsList.forEach((t) => {
                         const li = document.createElement('li');
-                        let inner = `${t.transcript}: ${t.cDNA}`;
+                        // dbNSFP entries have no transcript accession — render just the
+                        // cDNA rather than a dangling ": c.1799T>A".
+                        let inner = [t.transcript, t.cDNA].filter(Boolean).join(': ');
                         if (t.protein) inner += `, ${t.protein}`;
                         if (t.canonical) {
                             li.innerHTML = `<strong>${escapeHtml(inner)}</strong>`;
