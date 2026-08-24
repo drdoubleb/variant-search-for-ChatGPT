@@ -128,6 +128,8 @@ const API_TIMEOUT_MS = {
     spliceai: 25000,
     aiReview: 60000,
     cbioportal: 15000,
+    clingen: 10000,
+    dgidb: 12000,
     openFda: 12000,
     ensemblSequence: 8000,
     ensemblLookup: 10000
@@ -2979,48 +2981,34 @@ function createFdaDrugsCard({ container, gene, extras, cardCache }) {
     // Tab bar
     const fdaTabBar = document.createElement('div');
     fdaTabBar.className = 'card-tabs';
-    const compDxBtn = document.createElement('button');
-    compDxBtn.type = 'button';
-    compDxBtn.className = 'card-tab-btn active';
-    compDxBtn.textContent = 'Companion Dx';
-    const openFdaBtn = document.createElement('button');
-    openFdaBtn.type = 'button';
-    openFdaBtn.className = 'card-tab-btn';
-    openFdaBtn.textContent = 'openFDA Labels';
-    const bbkbBtn = document.createElement('button');
-    bbkbBtn.type = 'button';
-    bbkbBtn.className = 'card-tab-btn';
-    bbkbBtn.textContent = 'BBKB';
-    fdaTabBar.appendChild(compDxBtn);
-    fdaTabBar.appendChild(openFdaBtn);
-    fdaTabBar.appendChild(bbkbBtn);
+    const fdaTabLabels = ['Companion Dx', 'openFDA Labels', 'BBKB', 'DGIdb'];
+    const fdaTabBtns = [];
+    const fdaTabPanels = [];
+    const activateFdaTab = (idx) => {
+        fdaTabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+        fdaTabPanels.forEach((p, i) => p.classList.toggle('active', i === idx));
+    };
+    fdaTabLabels.forEach((label, i) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = i === 0 ? 'card-tab-btn active' : 'card-tab-btn';
+        btn.textContent = label;
+        btn.addEventListener('click', () => activateFdaTab(i));
+        fdaTabBar.appendChild(btn);
+        fdaTabBtns.push(btn);
+        const panel = document.createElement('div');
+        panel.className = i === 0 ? 'card-tab-panel active' : 'card-tab-panel';
+        fdaTabPanels.push(panel);
+    });
     fdaContent.appendChild(fdaTabBar);
+    const [compDxPanel, openFdaPanel, bbkbPanel, dgidbPanel] = fdaTabPanels;
 
-    const compDxPanel = document.createElement('div');
-    compDxPanel.className = 'card-tab-panel active';
-    const openFdaPanel = document.createElement('div');
-    openFdaPanel.className = 'card-tab-panel';
-    const bbkbPanel = document.createElement('div');
-    bbkbPanel.className = 'card-tab-panel';
-
-    compDxBtn.addEventListener('click', () => {
-        compDxBtn.classList.add('active'); openFdaBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
-        compDxPanel.classList.add('active'); openFdaPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
-    });
-    openFdaBtn.addEventListener('click', () => {
-        openFdaBtn.classList.add('active'); compDxBtn.classList.remove('active'); bbkbBtn.classList.remove('active');
-        openFdaPanel.classList.add('active'); compDxPanel.classList.remove('active'); bbkbPanel.classList.remove('active');
-    });
-    bbkbBtn.addEventListener('click', () => {
-        bbkbBtn.classList.add('active'); compDxBtn.classList.remove('active'); openFdaBtn.classList.remove('active');
-        bbkbPanel.classList.add('active'); compDxPanel.classList.remove('active'); openFdaPanel.classList.remove('active');
-    });
-
-    fdaContent.appendChild(compDxPanel);
-    fdaContent.appendChild(openFdaPanel);
-    fdaContent.appendChild(bbkbPanel);
+    fdaTabPanels.forEach((p) => fdaContent.appendChild(p));
     fdaCard.appendChild(fdaContent);
     if (container) container.appendChild(fdaCard);
+
+    // --- DGIdb panel ---
+    renderDgidbPanel(dgidbPanel, gene, extras);
 
     // --- Companion Dx panel ---
     const fdaCompDxUrl = 'https://www.fda.gov/medical-devices/in-vitro-diagnostics/list-cleared-or-approved-companion-diagnostic-devices-in-vitro-and-imaging-tools';
@@ -3600,6 +3588,225 @@ function createCbioportalCard({ container, gene, proteinChange, extras }) {
     });
 
     return card;
+}
+
+/*
+ * ── ClinGen Evidence Repository (eRepo) ─────────────────────────────────────
+ *
+ * Expert-panel (VCEP) variant classifications with ACMG criteria applied —
+ * higher-confidence than aggregate ClinVar for the variants they cover. The
+ * API is CORS-open and indexes GRCh37 NC_ genomic HGVS, which we can build
+ * from the resolved coordinate, so one exact-match GET answers the question
+ * regardless of which transcript version the panel used.
+ */
+
+// GRCh37 RefSeq chromosome accession for a chromosome name — the inverse of
+// assemblyFromNcAccession's table. Returns null for MT/unknown.
+function grch37NcAccession(chrom) {
+    const bare = String(chrom || '').replace(/^chr/i, '').toUpperCase();
+    const num = bare === 'X' ? 23 : bare === 'Y' ? 24 : parseInt(bare, 10);
+    const version = GRCH37_NC_VERSIONS[num];
+    if (!version) return null;
+    return `NC_${String(num).padStart(6, '0')}.${version}`;
+}
+
+// Look up ClinGen eRepo classifications for a GRCh37 genomic HGVS string
+// ("chr7:g.140453136A>T"). Returns { total, entries: [{ gene, classification,
+// panel, published, caid, url }] } or null when the variant has no
+// expert-panel record (the common case — most variants are not VCEP-curated).
+async function fetchClingenErepo(gVariant) {
+    const m = String(gVariant || '').match(/^chr([0-9XY]+):g\.(.+)$/i);
+    if (!m) return null;
+    const acc = grch37NcAccession(m[1]);
+    if (!acc) return null;
+    const hgvs = `${acc}:g.${m[2]}`;
+    const url = `https://erepo.clinicalgenome.org/evrepo/api/classifications?hgvs=${encodeURIComponent(hgvs)}`;
+    const res = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.clingen);
+    if (!res.ok) throw new Error(`ClinGen eRepo request failed (${res.status})`);
+    const data = await res.json();
+    const records = Array.isArray(data?.variantInterpretations) ? data.variantInterpretations : [];
+    if (records.length === 0) return null;
+    const entries = records.slice(0, 3).map((rec) => {
+        const guideline = (Array.isArray(rec.guidelines) ? rec.guidelines : [])[0] || {};
+        const agent = (Array.isArray(guideline.agents) ? guideline.agents : [])[0] || {};
+        return {
+            gene: rec.gene?.label || '',
+            classification: guideline.outcome?.label || agent.outcome?.label || '',
+            panel: agent.affiliation || '',
+            published: rec.publishedDate || '',
+            caid: rec.caid || '',
+            // The API @id maps 1:1 onto the human-readable UI page.
+            url: String(rec['@id'] || '').replace('/api/interpretation/', '/ui/classification/')
+        };
+    }).filter((e) => e.classification);
+    if (entries.length === 0) return null;
+    return { total: records.length, entries };
+}
+
+/*
+ * ── gnomAD gene constraint ──────────────────────────────────────────────────
+ *
+ * pLI / LOEUF / missense-Z say how tolerant a gene is to loss-of-function and
+ * missense variation — crucial context when interpreting truncating variants.
+ * One CORS-open GraphQL query against the gnomAD API (v2, GRCh37 — the
+ * exome-heavy dataset constraint was computed on).
+ */
+async function fetchGnomadConstraint(gene) {
+    const query = `query($symbol: String!) {
+        gene(gene_symbol: $symbol, reference_genome: GRCh37) {
+            gnomad_constraint { pli oe_lof oe_lof_upper mis_z oe_mis syn_z }
+        }
+    }`;
+    const res = await fetchWithTimeout('https://gnomad.broadinstitute.org/api', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ query, variables: { symbol: gene } })
+    }, API_TIMEOUT_MS.gnomadV4);
+    if (!res.ok) throw new Error(`gnomAD constraint request failed (${res.status})`);
+    const data = await res.json();
+    return data?.data?.gene?.gnomad_constraint || null;
+}
+
+// Append a compact "Gene constraint" section to a card's content element.
+// Stored in extras.gnomad_constraint for the AI-review payload.
+function appendGnomadConstraintSection(contentEl, gene, extras) {
+    if (!gene || !contentEl) return;
+    const wrap = document.createElement('div');
+    contentEl.appendChild(wrap);
+    fetchGnomadConstraint(gene).then((c) => {
+        if (!c) return; // gene unknown to gnomAD — say nothing
+        extras.gnomad_constraint = { gene, ...c };
+        const divider = document.createElement('hr');
+        divider.style.cssText = 'margin:0.5rem 0;border:none;border-top:1px solid #e5e7eb;';
+        wrap.appendChild(divider);
+        const header = document.createElement('div');
+        header.style.cssText = 'font-size:0.78rem;font-weight:600;color:#6b7280;margin-bottom:0.2rem;';
+        header.textContent = `Gene constraint · ${gene} (gnomAD v2)`;
+        wrap.appendChild(header);
+        const fmt = (v, digits = 2) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '—' : Number(v).toFixed(digits));
+        const line = document.createElement('div');
+        line.style.cssText = 'font-size:0.84rem;';
+        line.title = 'pLI ≥0.9 and LOEUF <0.35 suggest intolerance to loss-of-function; missense Z >3 suggests missense constraint. o/e = observed/expected.';
+        line.textContent = `pLI ${fmt(c.pli)} · LOEUF ${fmt(c.oe_lof_upper)} · missense Z ${fmt(c.mis_z)} · o/e mis ${fmt(c.oe_mis)}`;
+        wrap.appendChild(line);
+    }).catch((err) => {
+        console.warn('gnomAD constraint fetch failed', err);
+    });
+}
+
+/*
+ * ── DGIdb drug–gene interactions ────────────────────────────────────────────
+ *
+ * Aggregated interaction claims (approved and investigational compounds) from
+ * DGIdb's CORS-open GraphQL API. Rendered as a tab of the FDA drugs card,
+ * clearly labelled — it complements, not replaces, the FDA-approval views.
+ */
+async function fetchDgidbInteractions(gene) {
+    const query = `query($names: [String!]) {
+        genes(names: $names) {
+            nodes {
+                name
+                interactions {
+                    drug { name approved }
+                    interactionScore
+                    interactionTypes { type directionality }
+                    sources { sourceDbName }
+                }
+            }
+        }
+    }`;
+    const res = await fetchWithTimeout('https://dgidb.org/api/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ query, variables: { names: [gene] } })
+    }, API_TIMEOUT_MS.dgidb);
+    if (!res.ok) throw new Error(`DGIdb request failed (${res.status})`);
+    const data = await res.json();
+    const node = data?.data?.genes?.nodes?.[0];
+    if (!node) return null;
+    return (Array.isArray(node.interactions) ? node.interactions : [])
+        .map((i) => ({
+            drug: i?.drug?.name || '',
+            approved: Boolean(i?.drug?.approved),
+            score: Number(i?.interactionScore) || 0,
+            types: (Array.isArray(i?.interactionTypes) ? i.interactionTypes : []).map((t) => t?.type).filter(Boolean),
+            sources: (Array.isArray(i?.sources) ? i.sources : []).map((s) => s?.sourceDbName).filter(Boolean)
+        }))
+        .filter((i) => i.drug)
+        .sort((a, b) => b.score - a.score);
+}
+
+// DGIdb tab panel for the FDA drugs card. Results land in extras.dgidb for the
+// AI-review payload.
+function renderDgidbPanel(panel, gene, extras) {
+    const linkEl = document.createElement('a');
+    linkEl.href = `https://dgidb.org/results?searchType=gene&searchTerms=${encodeURIComponent(gene)}`;
+    linkEl.target = '_blank';
+    linkEl.rel = 'noopener noreferrer';
+    linkEl.textContent = 'DGIdb drug–gene interaction database ↗';
+    panel.appendChild(linkEl);
+
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size:0.8rem;color:#6b7280;margin:2px 0 6px;';
+    note.textContent = `Aggregated interaction claims for ${gene} — includes investigational compounds, not only FDA-approved drugs.`;
+    panel.appendChild(note);
+
+    const resultsDiv = document.createElement('div');
+    const spinner = document.createElement('div');
+    spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
+    spinner.textContent = 'Loading DGIdb interactions…';
+    resultsDiv.appendChild(spinner);
+    panel.appendChild(resultsDiv);
+
+    fetchDgidbInteractions(gene).then((interactions) => {
+        resultsDiv.innerHTML = '';
+        if (!interactions || interactions.length === 0) {
+            resultsDiv.innerHTML = `<div style="font-size:0.85rem;color:#6b7280;">No DGIdb interactions found for ${escapeHtml(gene)}.</div>`;
+            return;
+        }
+        extras.dgidb = {
+            gene,
+            interaction_count: interactions.length,
+            note: 'Sorted by DGIdb interaction score; includes investigational compounds.',
+            top_interactions: interactions.slice(0, 25)
+        };
+        const countEl = document.createElement('div');
+        countEl.style.cssText = 'font-size:0.85rem;font-weight:600;margin-bottom:6px;';
+        const approvedCount = interactions.filter((i) => i.approved).length;
+        countEl.textContent = `${interactions.length} interaction claims (${approvedCount} with approved drugs), by interaction score`;
+        resultsDiv.appendChild(countEl);
+
+        const DGIDB_PREVIEW = 8;
+        const buildRow = (i) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'font-size:0.82rem;margin-bottom:4px;';
+            const bits = [
+                i.approved ? 'approved' : 'investigational',
+                i.types.length ? i.types.join('/') : null,
+                i.score ? `score ${i.score.toFixed(2)}` : null,
+                i.sources.length ? `${i.sources.length} source${i.sources.length === 1 ? '' : 's'}` : null
+            ].filter(Boolean);
+            row.innerHTML = `<strong>${escapeHtml(i.drug)}</strong> <span style="color:#6b7280;display:inline">— ${escapeHtml(bits.join(' · '))}</span>`;
+            return row;
+        };
+        interactions.slice(0, DGIDB_PREVIEW).forEach((i) => resultsDiv.appendChild(buildRow(i)));
+        if (interactions.length > DGIDB_PREVIEW) {
+            const more = document.createElement('details');
+            const moreSum = document.createElement('summary');
+            moreSum.style.cssText = 'font-size:0.82rem;color:#7f1d1d;cursor:pointer;padding:4px 2px;list-style:revert;';
+            moreSum.textContent = `Show ${Math.min(interactions.length - DGIDB_PREVIEW, 25)} more…`;
+            more.appendChild(moreSum);
+            interactions.slice(DGIDB_PREVIEW, DGIDB_PREVIEW + 25).forEach((i) => more.appendChild(buildRow(i)));
+            resultsDiv.appendChild(more);
+        }
+        const srcNote = document.createElement('div');
+        srcNote.style.cssText = 'font-size:0.75rem;color:#9ca3af;margin-top:6px;';
+        srcNote.textContent = 'Source: DGIdb (aggregated from CIViC, CKB, DTC, and others). Interaction claims are not efficacy or approval evidence — verify before clinical use.';
+        resultsDiv.appendChild(srcNote);
+    }).catch((err) => {
+        console.warn('DGIdb fetch failed', err);
+        resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">DGIdb unavailable.</div>';
+    });
 }
 
 // Guidelines card. `getGene` is resolved at selection time (the variant mode's
@@ -7560,6 +7767,25 @@ document.addEventListener('DOMContentLoaded', () => {
                     recNote.textContent = "Matched via live ClinVar query — MyVariant.info's ClinVar mirror has no record for this allele (expected for somatic-only entries).";
                     content.appendChild(recNote);
                 }
+                // ClinGen expert-panel (VCEP) classification, when one exists —
+                // higher-confidence than aggregate ClinVar for covered variants.
+                // Most variants have no VCEP record; the line only renders on a hit.
+                if (!codonOnlyResolutionGlobal && isGenomicVariant(gVariant)) {
+                    const clingenDiv = document.createElement('div');
+                    content.appendChild(clingenDiv);
+                    fetchClingenErepo(gVariant).then((cg) => {
+                        if (!cg) return;
+                        aiReviewExtras.clingen_erepo = cg;
+                        const first = cg.entries[0];
+                        const extraCount = cg.total - 1;
+                        const href = safeUrl(first.url);
+                        clingenDiv.innerHTML = '<strong>ClinGen expert panel:</strong> '
+                            + `<span style="font-weight:600;display:inline;color:${getPathogenicityColor(first.classification)}">${escapeHtml(first.classification)}</span>`
+                            + `${first.panel ? ` — ${escapeHtml(first.panel)}` : ''}${first.published ? ` (${escapeHtml(first.published)})` : ''}`
+                            + (href ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">View ↗</a>` : '')
+                            + (extraCount > 0 ? ` <span style="color:#6b7280;display:inline">+${extraCount} more condition${extraCount === 1 ? '' : 's'}</span>` : '');
+                    }).catch((err) => { console.warn('ClinGen eRepo fetch failed', err); });
+                }
                 // Conditions summary (show up to 3, rest collapsed)
                 if (conditionsList.length > 0) {
                     const spanCond = document.createElement('div');
@@ -8386,6 +8612,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 v4Loading.textContent = 'Loading gnomAD v4.1…';
                 v4Section.appendChild(v4Loading);
                 content.appendChild(v4Section);
+
+                // ── Gene constraint (pLI / LOEUF / missense Z) ───────────────────
+                {
+                    const genesForConstraint = geneNames ? geneNames.split(',').map((g) => g.trim()).filter(Boolean) : [];
+                    let constraintGene = genesForConstraint.find((g) => !isChromosomeLikeGeneSymbol(g)) || '';
+                    if (!constraintGene && geneHintGlobal && !isChromosomeLikeGeneSymbol(geneHintGlobal)) constraintGene = geneHintGlobal;
+                    appendGnomadConstraintSection(content, constraintGene, aiReviewExtras);
+                }
 
                 card.appendChild(content);
                 cardsContainer.appendChild(card);

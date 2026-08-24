@@ -263,6 +263,37 @@ single-institution advanced-cancer cohort frequencies, not population
 prevalence. Results are included in the AI-review payload under
 `supplemental_card_data.cbioportal_prevalence`.
 
+## ClinGen expert-panel classifications (eRepo)
+
+When a variant has a ClinGen VCEP (expert panel) classification, the ClinVar
+card shows it — classification, panel, publication date, and a link to the
+Evidence Repository record. VCEP assertions apply the ACMG criteria via a
+gene-specific expert process, so they are higher-confidence than aggregate
+ClinVar where they exist (most variants have none; the line only renders on a
+hit). The lookup is a single CORS-open GET against
+`erepo.clinicalgenome.org` using the GRCh37 `NC_` genomic HGVS built from the
+resolved coordinate, so it matches regardless of which transcript version the
+panel used. Included in the AI payload as
+`supplemental_card_data.clingen_erepo`.
+
+## gnomAD gene constraint
+
+The gnomAD card now ends with a gene-constraint line — pLI, LOEUF
+(`oe_lof_upper`), missense Z, and o/e missense from gnomAD v2 — fetched with
+one CORS-open GraphQL query. Constraint says how tolerant the gene is to
+loss-of-function and missense variation, which is crucial context for
+truncating variants. Included in the AI payload as
+`supplemental_card_data.gnomad_constraint`.
+
+## DGIdb drug–gene interactions
+
+The FDA drugs card gains a fourth tab, **DGIdb**: aggregated drug–gene
+interaction claims (approved *and* investigational compounds) from DGIdb's
+CORS-open GraphQL API, sorted by interaction score with approval status,
+interaction type, and source counts. Clearly labelled as interaction claims —
+not efficacy or approval evidence. Included in the AI payload as
+`supplemental_card_data.dgidb`.
+
 ## Proxy origin allowlist
 
 Every serverless proxy (not just `ai-review`) now checks the browser `Origin`
