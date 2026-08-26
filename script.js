@@ -2649,7 +2649,7 @@ function renderBbkbBiomarkerTherapies(panel, gene, aiExtras) {
  */
 async function fetchFdaCompanionDiagnostics(gene) {
     if (!gene) return [];
-    const params = new URLSearchParams({ gene });
+    const params = new URLSearchParams({ gene, compact: '1' });
     const url = `https://www.drdoubleb.com/companion/gene_api.php?${params}`;
     let resp;
     try {
@@ -3295,7 +3295,9 @@ function createFdaDrugsCard({ container, gene, extras, cardCache }) {
             const tdDisease = document.createElement('td');
             tdDisease.style.cssText = cellStyle + 'color:#374151;';
             const rawDisease = rec.indication?.raw || rec.indication?.disease || '—';
-            tdDisease.textContent = rawDisease.replace(/\s*[-–]\s*(Tissue|Plasma|Blood|Serum|Urine|FFPE|Fresh Frozen|Whole Blood|ctDNA)\s*$/i, '').trim() || rawDisease;
+            tdDisease.textContent = rec.indication?.disease
+                || rawDisease.replace(/\s*[-–]\s*(Tissue|Plasma|Blood|Serum|Urine|FFPE|Fresh Frozen|Whole Blood|ctDNA)\s*$/i, '').trim()
+                || rawDisease;
             const tdDetail = document.createElement('td');
             tdDetail.style.cssText = cellStyle + 'color:#374151;';
             tdDetail.textContent = rec.biomarker?.details || rec.biomarker?.name || '—';
