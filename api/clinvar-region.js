@@ -73,6 +73,9 @@ export default async function handler(req, res) {
                 || rec.location?.[0]
                 || null;
             const varPos = varLoc ? (varLoc.display_start || varLoc.start || varLoc.chr_start || null) : null;
+            // Span end (equals start for SNVs; last affected base for del/dup/delins,
+            // right flank for insertions) — lets the client draw indels to scale.
+            const varStop = varLoc ? (varLoc.display_stop || varLoc.stop || varLoc.chr_stop || null) : null;
             return {
                 id,
                 title: rec.title || '',
@@ -81,7 +84,8 @@ export default async function handler(req, res) {
                 variationId: rec.variation_set?.[0]?.variation_xrefs?.find?.((x) => String(x.db || '').toLowerCase() === 'dbsnp')?.id || rec.variation_set?.[0]?.variation_name || '',
                 variationName: rec.variation_set?.[0]?.variation_name || '',
                 molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
-                pos: varPos !== null ? Number(varPos) : null
+                pos: varPos !== null ? Number(varPos) : null,
+                stop: varStop !== null ? Number(varStop) : null
             };
         });
 
