@@ -2458,6 +2458,43 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
     svg.style.display = 'block';
     svg.style.overflow = 'visible';
 
+    // Tap/click detail line under the plot. SVG <title> tooltips are hover-only,
+    // so on touch screens tapping a glyph is the only way to read a variant's
+    // details. Tapping the same glyph again — or empty plot area — dismisses it.
+    const wrap = document.createElement('div');
+    wrap.appendChild(svg);
+    const detail = document.createElement('div');
+    detail.style.cssText = 'font-size:0.72rem;line-height:1.35;margin-top:2px;color:#374151;';
+    detail.hidden = true;
+    wrap.appendChild(detail);
+    let selectedGlyphId = null;
+    const clearDetail = () => { detail.hidden = true; detail.textContent = ''; selectedGlyphId = null; };
+    svg.addEventListener('click', clearDetail);
+    const attachTapDetail = (glyphEl, v, text) => {
+        glyphEl.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            if (selectedGlyphId === v.id) { clearDetail(); return; }
+            selectedGlyphId = v.id;
+            detail.style.color = '#374151';
+            detail.textContent = `${text} `;
+            if (v.id) {
+                const a = document.createElement('a');
+                a.href = `https://www.ncbi.nlm.nih.gov/clinvar/variation/${encodeURIComponent(v.id)}/`;
+                a.target = '_blank'; a.rel = 'noopener noreferrer';
+                a.textContent = 'ClinVar ↗';
+                detail.appendChild(a);
+            }
+            detail.hidden = false;
+        });
+    };
+    // On hover-less devices nothing suggests the glyphs are interactive — say so.
+    if (plottableVariants.length > 0 && typeof window !== 'undefined'
+        && typeof window.matchMedia === 'function' && window.matchMedia('(hover: none)').matches) {
+        detail.style.color = '#9ca3af';
+        detail.textContent = 'Tap a variant for details';
+        detail.hidden = false;
+    }
+
     // Shaded band over the bases the queried variant affects (multi-base events).
     // Drawn first so everything else sits on top of it.
     if (querySpan && SPAN_KINDS.includes(querySpan.kind) && Number.isFinite(Number(querySpan.start)) && Number.isFinite(Number(querySpan.stop))) {
@@ -2629,8 +2666,10 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
             : (isSynonymousClinvarVariant(v) ? 'Synonymous; ' : (KIND_LABEL[v.kind] || ''));
         const stopN = Number(v.stop);
         const posLabel = Number.isFinite(stopN) && stopN !== Number(v.pos) ? `pos ${v.pos}–${v.stop}` : `pos ${v.pos}`;
-        tip.textContent = `${isQueried ? 'Queried variant — ' : ''}${consequenceLabel}${v.germline || 'Unknown'} (${posLabel}): ${v.title || v.id}`;
+        const tipText = `${isQueried ? 'Queried variant — ' : ''}${consequenceLabel}${v.germline || 'Unknown'} (${posLabel}): ${v.title || v.id}`;
+        tip.textContent = tipText;
         glyphEl.appendChild(tip);
+        attachTapDetail(glyphEl, v, tipText);
         svg.appendChild(glyphEl);
 
         // Blue ring around the record that IS the queried variant, so it stands
@@ -2671,7 +2710,7 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         svg.appendChild(note);
     }
 
-    return svg;
+    return wrap;
 }
 
 // Build a protein-position lollipop plot from the same nearby ClinVar variants.
