@@ -2444,25 +2444,34 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         });
         return rowEnds.length;
     };
-    // Group the above-axis stack into bands by consequence type so a dense
-    // neighborhood (e.g. TP53 R273H) reads in layers instead of interleaving:
-    // truncating/frameshift closest to the axis, substitutions in the middle,
-    // and the wide indel bars on top where they balance the plot instead of
-    // splitting it. Below-axis (benign/synonymous) stays one pool.
-    const truncAbove = aboveVars.filter(v => v.glyph === 'x');
-    const indelAbove = aboveVars.filter(v => v.glyph === 'bar' || v.glyph === 'caret');
-    const restAbove = aboveVars.filter(v => v.glyph !== 'x' && v.glyph !== 'bar' && v.glyph !== 'caret');
-    const truncRows = assignRows(truncAbove);
-    const indelRows = assignRows(indelAbove);
-    const restRows = assignRows(restAbove);
-    restAbove.forEach(v => { v.row += truncRows; });
-    indelAbove.forEach(v => { v.row += truncRows + restRows; });
-    const aboveBands = [
-        { label: 'trunc', start: 0, rows: truncRows },
-        { label: 'other', start: truncRows, rows: restRows },
-        { label: 'indel', start: truncRows + restRows, rows: indelRows }
-    ].filter(b => b.rows > 0);
-    const maxStackAbove = Math.max(1, truncRows + indelRows + restRows);
+    // Pack the above-axis stack with a per-position type order rather than
+    // global bands: truncating/frameshift sits closest to the axis, a
+    // substitution goes right above any truncating it overlaps, and indel spans
+    // sit above both — but where a column has none of the lower types, the next
+    // type drops straight toward the axis, so sparse columns stay short and a
+    // dense neighborhood (e.g. TP53 R273H) still reads in ordered layers.
+    // Below-axis (benign/synonymous) stays one pool.
+    const orderedAboveGroups = [
+        aboveVars.filter(v => v.glyph === 'x'),
+        aboveVars.filter(v => v.glyph !== 'x' && v.glyph !== 'bar' && v.glyph !== 'caret'),
+        aboveVars.filter(v => v.glyph === 'bar' || v.glyph === 'caret')
+    ];
+    const overlapsX = (a, b) => a.x1 <= b.x2 + 2 && a.x2 >= b.x1 - 2;
+    const placedAbove = [];
+    const rowsAbove = []; // per-row occupancy, checked as full interval lists
+    orderedAboveGroups.forEach((group, g) => {
+        [...group].sort((a, b) => a.x1 - b.x1 || a.x2 - b.x2).forEach((v) => {
+            // Never below an overlapping earlier-type glyph; otherwise as low as fits.
+            let r = 0;
+            for (const p of placedAbove) if (p.group < g && overlapsX(v, p)) r = Math.max(r, p.row + 1);
+            while (rowsAbove[r] && rowsAbove[r].some((p) => overlapsX(v, p))) r++;
+            v.row = r;
+            const rec = { x1: v.x1, x2: v.x2, row: r, group: g };
+            placedAbove.push(rec);
+            (rowsAbove[r] = rowsAbove[r] || []).push(rec);
+        });
+    });
+    const maxStackAbove = Math.max(1, rowsAbove.length);
     const maxStackBelow = assignRows(belowVars);
 
     const AY = Math.max(MIN_AXIS_Y, TOP_PADDING + LOLLIPOP_OFFSET + (maxStackAbove - 1) * STACK_SPACING);
@@ -2574,28 +2583,6 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         lbl.textContent = o === 0 ? '0' : (o > 0 ? `+${o}` : String(o));
         svg.appendChild(lbl);
     });
-
-    // Faint separators and edge labels between the above-axis type bands —
-    // only when there is more than one band to tell apart.
-    if (aboveBands.length > 1) {
-        aboveBands.forEach((b, i) => {
-            const lbl = document.createElementNS(NS, 'text');
-            lbl.setAttribute('x', String(W - MR + 2));
-            lbl.setAttribute('y', String(AY - LOLLIPOP_OFFSET - (b.start + (b.rows - 1) / 2) * STACK_SPACING + 2));
-            lbl.setAttribute('font-size', '5.5'); lbl.setAttribute('fill', '#b6c3d1');
-            lbl.textContent = b.label;
-            svg.appendChild(lbl);
-            if (i > 0) {
-                const sep = document.createElementNS(NS, 'line');
-                const sy = AY - LOLLIPOP_OFFSET - (b.start - 0.5) * STACK_SPACING;
-                sep.setAttribute('x1', String(ML)); sep.setAttribute('y1', String(sy));
-                sep.setAttribute('x2', String(W - MR)); sep.setAttribute('y2', String(sy));
-                sep.setAttribute('stroke', '#e2e8f0'); sep.setAttribute('stroke-width', '0.75');
-                sep.setAttribute('stroke-dasharray', '3 3');
-                svg.appendChild(sep);
-            }
-        });
-    }
 
     // Query position marker: blue diamond on axis. An insertion query sits
     // between its two flanking bases, not on either of them.
