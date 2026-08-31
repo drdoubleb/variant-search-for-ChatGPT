@@ -73,15 +73,25 @@ export default async function handler(req, res) {
                 || rec.location?.[0]
                 || null;
             const varPos = varLoc ? (varLoc.display_start || varLoc.start || varLoc.chr_start || null) : null;
+            // Span end (equals start for SNVs; last affected base for del/dup/delins,
+            // right flank for insertions) — lets the client draw indels to scale.
+            const varStop = varLoc ? (varLoc.display_stop || varLoc.stop || varLoc.chr_stop || null) : null;
             return {
                 id,
                 title: rec.title || '',
                 germline: rec.germline_classification?.description || '',
                 review: rec.germline_classification?.review_status || '',
+                // Somatic clinical impact + oncogenicity (same field names as
+                // /api/clinvar-protein) — lets the client fall back to a
+                // definitive somatic call when the germline aggregate is
+                // "Conflicting classifications" (e.g. BRAF V600E).
+                somatic: rec.clinical_impact_classification?.description || '',
+                oncogenicity: rec.oncogenicity_classification?.description || '',
                 variationId: rec.variation_set?.[0]?.variation_xrefs?.find?.((x) => String(x.db || '').toLowerCase() === 'dbsnp')?.id || rec.variation_set?.[0]?.variation_name || '',
                 variationName: rec.variation_set?.[0]?.variation_name || '',
                 molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
-                pos: varPos !== null ? Number(varPos) : null
+                pos: varPos !== null ? Number(varPos) : null,
+                stop: varStop !== null ? Number(varStop) : null
             };
         });
 
