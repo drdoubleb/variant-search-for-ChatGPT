@@ -2446,20 +2446,21 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
     };
     // Group the above-axis stack into bands by consequence type so a dense
     // neighborhood (e.g. TP53 R273H) reads in layers instead of interleaving:
-    // truncating/frameshift closest to the axis, indel spans above them, then
-    // everything else (substitutions). Below-axis (benign/synonymous) stays one pool.
+    // truncating/frameshift closest to the axis, substitutions in the middle,
+    // and the wide indel bars on top where they balance the plot instead of
+    // splitting it. Below-axis (benign/synonymous) stays one pool.
     const truncAbove = aboveVars.filter(v => v.glyph === 'x');
     const indelAbove = aboveVars.filter(v => v.glyph === 'bar' || v.glyph === 'caret');
     const restAbove = aboveVars.filter(v => v.glyph !== 'x' && v.glyph !== 'bar' && v.glyph !== 'caret');
     const truncRows = assignRows(truncAbove);
     const indelRows = assignRows(indelAbove);
     const restRows = assignRows(restAbove);
-    indelAbove.forEach(v => { v.row += truncRows; });
-    restAbove.forEach(v => { v.row += truncRows + indelRows; });
+    restAbove.forEach(v => { v.row += truncRows; });
+    indelAbove.forEach(v => { v.row += truncRows + restRows; });
     const aboveBands = [
         { label: 'trunc', start: 0, rows: truncRows },
-        { label: 'indel', start: truncRows, rows: indelRows },
-        { label: 'other', start: truncRows + indelRows, rows: restRows }
+        { label: 'other', start: truncRows, rows: restRows },
+        { label: 'indel', start: truncRows + restRows, rows: indelRows }
     ].filter(b => b.rows > 0);
     const maxStackAbove = Math.max(1, truncRows + indelRows + restRows);
     const maxStackBelow = assignRows(belowVars);
