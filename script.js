@@ -2444,7 +2444,24 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         });
         return rowEnds.length;
     };
-    const maxStackAbove = Math.max(1, assignRows(aboveVars));
+    // Group the above-axis stack into bands by consequence type so a dense
+    // neighborhood (e.g. TP53 R273H) reads in layers instead of interleaving:
+    // truncating/frameshift closest to the axis, indel spans above them, then
+    // everything else (substitutions). Below-axis (benign/synonymous) stays one pool.
+    const truncAbove = aboveVars.filter(v => v.glyph === 'x');
+    const indelAbove = aboveVars.filter(v => v.glyph === 'bar' || v.glyph === 'caret');
+    const restAbove = aboveVars.filter(v => v.glyph !== 'x' && v.glyph !== 'bar' && v.glyph !== 'caret');
+    const truncRows = assignRows(truncAbove);
+    const indelRows = assignRows(indelAbove);
+    const restRows = assignRows(restAbove);
+    indelAbove.forEach(v => { v.row += truncRows; });
+    restAbove.forEach(v => { v.row += truncRows + indelRows; });
+    const aboveBands = [
+        { label: 'trunc', start: 0, rows: truncRows },
+        { label: 'indel', start: truncRows, rows: indelRows },
+        { label: 'other', start: truncRows + indelRows, rows: restRows }
+    ].filter(b => b.rows > 0);
+    const maxStackAbove = Math.max(1, truncRows + indelRows + restRows);
     const maxStackBelow = assignRows(belowVars);
 
     const AY = Math.max(MIN_AXIS_Y, TOP_PADDING + LOLLIPOP_OFFSET + (maxStackAbove - 1) * STACK_SPACING);
@@ -2557,6 +2574,28 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         svg.appendChild(lbl);
     });
 
+    // Faint separators and edge labels between the above-axis type bands —
+    // only when there is more than one band to tell apart.
+    if (aboveBands.length > 1) {
+        aboveBands.forEach((b, i) => {
+            const lbl = document.createElementNS(NS, 'text');
+            lbl.setAttribute('x', String(W - MR + 2));
+            lbl.setAttribute('y', String(AY - LOLLIPOP_OFFSET - (b.start + (b.rows - 1) / 2) * STACK_SPACING + 2));
+            lbl.setAttribute('font-size', '5.5'); lbl.setAttribute('fill', '#b6c3d1');
+            lbl.textContent = b.label;
+            svg.appendChild(lbl);
+            if (i > 0) {
+                const sep = document.createElementNS(NS, 'line');
+                const sy = AY - LOLLIPOP_OFFSET - (b.start - 0.5) * STACK_SPACING;
+                sep.setAttribute('x1', String(ML)); sep.setAttribute('y1', String(sy));
+                sep.setAttribute('x2', String(W - MR)); sep.setAttribute('y2', String(sy));
+                sep.setAttribute('stroke', '#e2e8f0'); sep.setAttribute('stroke-width', '0.75');
+                sep.setAttribute('stroke-dasharray', '3 3');
+                svg.appendChild(sep);
+            }
+        });
+    }
+
     // Query position marker: blue diamond on axis. An insertion query sits
     // between its two flanking bases, not on either of them.
     const qx = querySpan && querySpan.kind === 'ins' && Number.isFinite(Number(querySpan.stop))
@@ -2591,6 +2630,9 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
 
     // Plot each variant, stacking above or below the axis by pathogenicity
     const KIND_LABEL = { del: 'Deletion; ', dup: 'Duplication; ', ins: 'Insertion; ', delins: 'Indel (delins); ', inv: 'Inversion; ' };
+    // In a crowded window (e.g. TP53 R273H) dozens of stems crossing the bands
+    // turn into a solid curtain — fade them so the glyphs carry the plot.
+    const stemOpacity = plottableVariants.length > 25 ? '0.3' : '0.65';
     plottableVariants.forEach((v) => {
         const color = getPathogenicityColor(v.germline, v);
         // Half-height of the glyph, so stems stop at its edge instead of poking through.
@@ -2613,7 +2655,7 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         stem.setAttribute('x1', String(stemX)); stem.setAttribute('y1', String(stemY1));
         stem.setAttribute('x2', String(stemX)); stem.setAttribute('y2', String(stemY2));
         stem.setAttribute('stroke', color); stem.setAttribute('stroke-width', '1.5');
-        stem.setAttribute('opacity', '0.65');
+        stem.setAttribute('opacity', stemOpacity);
         svg.appendChild(stem);
 
         let glyphEl;
