@@ -2377,12 +2377,16 @@ function getPathogenicityColor(classification, variant = null) {
 //   draws a shaded band over the affected bases and places the query marker at
 //   the true event site (between the flanks, for an insertion).
 //
-// Glyphs: substitutions and truncating variants (frameshift/nonsense — where the
-// span is not the story) are circles; non-truncating del/dup/delins/inv draw as
-// bars spanning the affected bases, and insertions as a caret between the two
-// flanking bases. Stacking packs real horizontal extents (not rounded buckets),
-// so a wide bar takes the whole row it needs and circles fill in above it.
-function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30, axisLabel = 'g.', querySpan = null } = {}) {
+// opts.highlightId: id of the region record that IS the queried variant — its
+//   glyph gets a blue ring so the user can spot their own ClinVar record even
+//   when HGVS 3'-shifting places it a base or two from the query marker.
+//
+// Glyphs: substitutions are circles; truncating variants (frameshift/nonsense —
+// where the span is not the story) draw as an ✕; non-truncating del/dup/delins/inv
+// draw as bars spanning the affected bases, and insertions as a caret between the
+// two flanking bases. Stacking packs real horizontal extents (not rounded
+// buckets), so a wide bar takes the whole row it needs and circles fill in above it.
+function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30, axisLabel = 'g.', querySpan = null, highlightId = null } = {}) {
     const NS = 'http://www.w3.org/2000/svg';
     const W = 280, ML = 18, MR = 18, PW = W - ML - MR;
     const RANGE = range;
@@ -2404,9 +2408,10 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
             const posN = Number(v.pos);
             if (!Number.isFinite(posN)) return null;
             const stopN = Number.isFinite(Number(v.stop)) ? Number(v.stop) : posN;
-            const kind = isTruncatingClinvarVariant(v) ? null : parseClinvarEventKind(getClinvarVariantText(v));
+            const truncating = isTruncatingClinvarVariant(v);
+            const kind = truncating ? null : parseClinvarEventKind(getClinvarVariantText(v));
             const xA = posToX(posN), xB = posToX(stopN);
-            let glyph = 'circle', x = xA, x1, x2;
+            let glyph = truncating ? 'x' : 'circle', x = xA, x1, x2;
             if (kind === 'ins') {
                 glyph = 'caret';
                 x = (xA + xB) / 2; // insertion sits between its flanking bases
@@ -2525,13 +2530,21 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
     dia.setAttribute('fill', '#3b82f6');
     svg.appendChild(dia);
 
-    // Legend
+    // Legend — the Truncating swatch is an ✕, matching its plot glyph
     [['#111827', 'Truncating'], ['#dc2626', 'Pathogenic/LP'], ['#16a34a', 'Benign/LB'], ['#f59e0b', 'VUS/Other'], ['#9ca3af', 'Synonymous']].forEach(([col, lbl], i) => {
         const lx = 5 + i * 54;
-        const lc = document.createElementNS(NS, 'circle');
-        lc.setAttribute('cx', String(lx)); lc.setAttribute('cy', '7');
-        lc.setAttribute('r', '4'); lc.setAttribute('fill', col);
-        svg.appendChild(lc);
+        if (lbl === 'Truncating') {
+            const lc = document.createElementNS(NS, 'path');
+            lc.setAttribute('d', `M ${lx - 3} 4 L ${lx + 3} 10 M ${lx - 3} 10 L ${lx + 3} 4`);
+            lc.setAttribute('stroke', col); lc.setAttribute('stroke-width', '2');
+            lc.setAttribute('stroke-linecap', 'round'); lc.setAttribute('fill', 'none');
+            svg.appendChild(lc);
+        } else {
+            const lc = document.createElementNS(NS, 'circle');
+            lc.setAttribute('cx', String(lx)); lc.setAttribute('cy', '7');
+            lc.setAttribute('r', '4'); lc.setAttribute('fill', col);
+            svg.appendChild(lc);
+        }
         const lt = document.createElementNS(NS, 'text');
         lt.setAttribute('x', String(lx + 7)); lt.setAttribute('y', '11');
         lt.setAttribute('font-size', '7.5'); lt.setAttribute('fill', '#374151');
@@ -2581,6 +2594,20 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
             } else {
                 glyphEl.setAttribute('fill', color); glyphEl.setAttribute('opacity', '0.88');
             }
+        } else if (v.glyph === 'x') {
+            // ✕ for truncating variants. Grouped with an invisible disc so the
+            // hover target (and tooltip) covers the whole mark, not just the strokes.
+            glyphEl = document.createElementNS(NS, 'g');
+            const cross = document.createElementNS(NS, 'path');
+            cross.setAttribute('d', `M ${v.x - 3.5} ${cy - 3.5} L ${v.x + 3.5} ${cy + 3.5} M ${v.x - 3.5} ${cy + 3.5} L ${v.x + 3.5} ${cy - 3.5}`);
+            cross.setAttribute('stroke', color); cross.setAttribute('stroke-width', '2.2');
+            cross.setAttribute('stroke-linecap', 'round'); cross.setAttribute('fill', 'none');
+            cross.setAttribute('opacity', '0.88');
+            glyphEl.appendChild(cross);
+            const hover = document.createElementNS(NS, 'circle');
+            hover.setAttribute('cx', String(v.x)); hover.setAttribute('cy', String(cy));
+            hover.setAttribute('r', '5.5'); hover.setAttribute('fill', 'transparent');
+            glyphEl.appendChild(hover);
         } else if (v.glyph === 'caret') {
             // Triangle with its apex at the axis-facing side, marking the point
             // between the two flanking bases where the insertion lands.
@@ -2596,14 +2623,29 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
             glyphEl.setAttribute('opacity', '0.88');
         }
         glyphEl.setAttribute('style', 'cursor:pointer');
+        const isQueried = highlightId != null && String(v.id) === String(highlightId);
         const tip = document.createElementNS(NS, 'title');
         const consequenceLabel = isTruncatingClinvarVariant(v) ? 'Truncating; '
             : (isSynonymousClinvarVariant(v) ? 'Synonymous; ' : (KIND_LABEL[v.kind] || ''));
         const stopN = Number(v.stop);
         const posLabel = Number.isFinite(stopN) && stopN !== Number(v.pos) ? `pos ${v.pos}–${v.stop}` : `pos ${v.pos}`;
-        tip.textContent = `${consequenceLabel}${v.germline || 'Unknown'} (${posLabel}): ${v.title || v.id}`;
+        tip.textContent = `${isQueried ? 'Queried variant — ' : ''}${consequenceLabel}${v.germline || 'Unknown'} (${posLabel}): ${v.title || v.id}`;
         glyphEl.appendChild(tip);
         svg.appendChild(glyphEl);
+
+        // Blue ring around the record that IS the queried variant, so it stands
+        // out even when HGVS 3'-shifting places it off the query marker itself.
+        if (isQueried) {
+            const ring = document.createElementNS(NS, 'rect');
+            const rx1 = Math.max(v.x1, ML - 6) - 2.5, rx2 = Math.min(v.x2, W - MR + 6) + 2.5;
+            ring.setAttribute('x', String(rx1)); ring.setAttribute('y', String(cy - 6.5));
+            ring.setAttribute('width', String(rx2 - rx1)); ring.setAttribute('height', '13');
+            ring.setAttribute('rx', '6.5');
+            ring.setAttribute('fill', 'none'); ring.setAttribute('stroke', '#3b82f6');
+            ring.setAttribute('stroke-width', '1.4');
+            ring.setAttribute('pointer-events', 'none');
+            svg.appendChild(ring);
+        }
     });
 
     // Mini-key for the span glyphs, only when one is actually on screen
@@ -2638,7 +2680,7 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
 // queryGenomicPos / queryC / minusStrand enable the genomic-offset path.
 // The axis range auto-scales to the actual spread of the data.
 // Returns null if no variants have parseable protein positions.
-function buildProteinLollipopPlot(variants, queryProteinPos, { queryGenomicPos = null, queryC = null, minusStrand = false, queryGenomicSpan = null } = {}) {
+function buildProteinLollipopPlot(variants, queryProteinPos, { queryGenomicPos = null, queryC = null, minusStrand = false, queryGenomicSpan = null, highlightId = null } = {}) {
     const strandFactor = minusStrand ? -1 : 1;
     // Map one genomic base to a residue via the canonical c. offset from the query.
     // Only trust the genomic offset when it gives a plausible same-exon result.
@@ -2698,7 +2740,7 @@ function buildProteinLollipopPlot(variants, queryProteinPos, { queryGenomicPos =
         };
     }
 
-    return buildLollipopPlot(proteinVariants, queryProteinPos, false, { range, axisLabel: 'p.', querySpan });
+    return buildLollipopPlot(proteinVariants, queryProteinPos, false, { range, axisLabel: 'p.', querySpan, highlightId });
 }
 
 // Query CivicDB via the /api/civic serverless proxy (avoids browser CORS).
@@ -8537,10 +8579,17 @@ const initVariantSearchUi = () => {
                             const querySpan = getQueryAffectedSpan(tuple);
                             const plotCenter = querySpan ? querySpan.start : posNum;
 
+                            // Ring the region record that IS the queried variant (matched
+                            // on position + alleles for SNVs, on c. notation for indels —
+                            // the same conservative matcher the ClinVar-recovery path uses).
+                            const queryCdnaForms = snpEffAnns.map(a => a.hgvs_c).filter(Boolean);
+                            const queriedRecord = findExactClinvarRegionMatch(nearby, tuple, queryCdnaForms);
+                            const highlightId = queriedRecord ? queriedRecord.id : null;
+
                             // Genomic (g.) lollipop plot — display ±10 bp even though data covers ±30
                             const plotWrap = document.createElement('div');
                             plotWrap.style.cssText = 'margin:6px 0 4px;';
-                            plotWrap.appendChild(buildLollipopPlot(nearby, plotCenter, plotMinusStrand, { range: 10, querySpan }));
+                            plotWrap.appendChild(buildLollipopPlot(nearby, plotCenter, plotMinusStrand, { range: 10, querySpan, highlightId }));
                             content.appendChild(plotWrap);
 
                             // Protein (p.) lollipop plot — uses genomic-offset positions for
@@ -8553,7 +8602,7 @@ const initVariantSearchUi = () => {
                                     : posNum;
                                 const protPlot = buildProteinLollipopPlot(
                                     nearby, queryProteinPos,
-                                    { queryGenomicPos: queryCAnchorPos, queryC, minusStrand: plotMinusStrand, queryGenomicSpan: querySpan }
+                                    { queryGenomicPos: queryCAnchorPos, queryC, minusStrand: plotMinusStrand, queryGenomicSpan: querySpan, highlightId }
                                 );
                                 if (protPlot) {
                                     const protPlotWrap = document.createElement('div');
