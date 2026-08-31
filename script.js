@@ -2407,8 +2407,9 @@ function getClinvarEffectiveClassification(variant) {
 //
 // Glyphs: substitutions are circles; truncating variants (frameshift/nonsense —
 // where the span is not the story) draw as an ✕; non-truncating del/dup/delins/inv
-// draw as bars spanning the affected bases, and insertions as a caret between the
-// two flanking bases. Stacking packs real horizontal extents (not rounded
+// draw as bars spanning the affected bases, and insertions as an outlined diamond
+// whose tip marks the point between the two flanking bases. Stacking packs real
+// horizontal extents (not rounded
 // buckets), so a wide bar takes the whole row it needs and circles fill in above it.
 function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30, axisLabel = 'g.', querySpan = null, highlightId = null } = {}) {
     const NS = 'http://www.w3.org/2000/svg';
@@ -2440,9 +2441,9 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
             const xA = posToX(posN), xB = posToX(stopN);
             let glyph = truncating ? 'x' : 'circle', x = xA, x1, x2;
             if (kind === 'ins') {
-                glyph = 'caret';
+                glyph = 'ins';
                 x = (xA + xB) / 2; // insertion sits between its flanking bases
-                x1 = x - 4; x2 = x + 4;
+                x1 = x - 5.5; x2 = x + 5.5;
             } else if (kind && SPAN_KINDS.includes(kind)) {
                 glyph = 'bar';
                 x1 = Math.min(xA, xB) - UNIT / 2;
@@ -2480,8 +2481,8 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
     // Below-axis (benign/synonymous) stays one pool.
     const orderedAboveGroups = [
         aboveVars.filter(v => v.glyph === 'x'),
-        aboveVars.filter(v => v.glyph !== 'x' && v.glyph !== 'bar' && v.glyph !== 'caret'),
-        aboveVars.filter(v => v.glyph === 'bar' || v.glyph === 'caret')
+        aboveVars.filter(v => v.glyph !== 'x' && v.glyph !== 'bar' && v.glyph !== 'ins'),
+        aboveVars.filter(v => v.glyph === 'bar' || v.glyph === 'ins')
     ];
     const overlapsX = (a, b) => a.x1 <= b.x2 + 2 && a.x2 >= b.x1 - 2;
     const placedAbove = [];
@@ -2652,7 +2653,7 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         const effective = getClinvarEffectiveClassification(v);
         const color = getPathogenicityColor(effective.label, v);
         // Half-height of the glyph, so stems stop at its edge instead of poking through.
-        const glyphHalf = v.glyph === 'bar' ? 3 : (v.glyph === 'caret' ? 4 : 5);
+        const glyphHalf = v.glyph === 'bar' ? 3 : (v.glyph === 'ins' ? 6 : 5);
         let cy, stemY1, stemY2;
         if (v.belowAxis) {
             cy = AY + LOLLIPOP_OFFSET + v.row * STACK_SPACING;
@@ -2703,14 +2704,14 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
             hover.setAttribute('cx', String(v.x)); hover.setAttribute('cy', String(cy));
             hover.setAttribute('r', '5.5'); hover.setAttribute('fill', 'transparent');
             glyphEl.appendChild(hover);
-        } else if (v.glyph === 'caret') {
-            // Triangle with its apex at the axis-facing side, marking the point
-            // between the two flanking bases where the insertion lands.
+        } else if (v.glyph === 'ins') {
+            // Outlined diamond (same treatment as duplications) whose axis-facing
+            // tip marks the point between the two flanking bases where the
+            // insertion lands — the old small caret was easy to miss.
             glyphEl = document.createElementNS(NS, 'polygon');
-            const base = v.belowAxis ? cy + 3.5 : cy - 3.5;
-            const apex = v.belowAxis ? cy - 4 : cy + 4;
-            glyphEl.setAttribute('points', `${v.x - 4},${base} ${v.x + 4},${base} ${v.x},${apex}`);
-            glyphEl.setAttribute('fill', color); glyphEl.setAttribute('opacity', '0.88');
+            glyphEl.setAttribute('points', `${v.x},${cy - 5.5} ${v.x + 5.5},${cy} ${v.x},${cy + 5.5} ${v.x - 5.5},${cy}`);
+            glyphEl.setAttribute('fill', color); glyphEl.setAttribute('fill-opacity', '0.3');
+            glyphEl.setAttribute('stroke', color); glyphEl.setAttribute('stroke-width', '1.5');
         } else {
             glyphEl = document.createElementNS(NS, 'circle');
             glyphEl.setAttribute('cx', String(v.x)); glyphEl.setAttribute('cy', String(cy));
@@ -2754,7 +2755,7 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         key.setAttribute('font-size', '6'); key.setAttribute('fill', '#94a3b8');
         const parts = [];
         if (plottableVariants.some((v) => v.glyph === 'bar')) parts.push('▬ del/dup span');
-        if (plottableVariants.some((v) => v.glyph === 'caret')) parts.push('▲ ins site');
+        if (plottableVariants.some((v) => v.glyph === 'ins')) parts.push('◇ ins site');
         key.textContent = parts.join('  ');
         svg.appendChild(key);
     }
