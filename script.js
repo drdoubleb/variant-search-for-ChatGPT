@@ -2362,10 +2362,34 @@ function getPathogenicityColor(classification, variant = null) {
     if (c === 'benign') return '#16a34a';
     if (c.includes('likely benign')) return '#22c55e';
     if (c.includes('drug response')) return '#dc2626';
+    if (c.includes('likely oncogenic')) return '#ef4444';
+    if (c.includes('oncogenic')) return '#dc2626';
+    if (c.includes('tier i ') || c.includes('tier i -') || c.endsWith('tier i')) return '#dc2626';
     if (c.includes('conflicting')) return '#f59e0b';
     if (c.includes('pathogenic')) return '#ef4444';
     if (c.includes('benign')) return '#22c55e';
     return '#f59e0b';
+}
+
+// The classification a ClinVar record should be presented under. Usually the
+// germline aggregate — but when that is conflicting/absent and the record
+// carries a definitive somatic call (oncogenicity, or a Tier I clinical
+// impact), prefer that: BRAF V600E is germline "Conflicting classifications
+// of pathogenicity" yet Oncogenic / Tier I - Strong, and amber would misread.
+// Returns { label, fromSomatic } — fromSomatic marks an overridden call so
+// tooltips can attribute it.
+function getClinvarEffectiveClassification(variant) {
+    const g = String(variant?.germline || '').trim();
+    const gl = g.toLowerCase();
+    const inconclusive = !g || gl.includes('conflicting') || gl.includes('not provided')
+        || gl.includes('no classification') || gl.includes('other');
+    if (inconclusive) {
+        const onco = String(variant?.oncogenicity || '').trim();
+        const somatic = String(variant?.somatic || '').trim();
+        if (/oncogenic/i.test(onco) && !/benign/i.test(onco)) return { label: onco, fromSomatic: true };
+        if (/tier i\b(?!i)/i.test(somatic)) return { label: somatic, fromSomatic: true };
+    }
+    return { label: g, fromSomatic: false };
 }
 
 // Build an SVG lollipop plot for nearby ClinVar variants.
@@ -2405,9 +2429,12 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
     // Resolve each variant's glyph and horizontal extent [x1, x2] up front.
     const plottableVariants = variants
         .map((v) => {
-            const posN = Number(v.pos);
+            // Note Number(null) === 0, which is finite — check for null/undefined
+            // explicitly or a missing stop reads as coordinate 0 and a missing
+            // pos as a real variant at 0.
+            const posN = v.pos != null ? Number(v.pos) : NaN;
             if (!Number.isFinite(posN)) return null;
-            const stopN = Number.isFinite(Number(v.stop)) ? Number(v.stop) : posN;
+            const stopN = v.stop != null && Number.isFinite(Number(v.stop)) ? Number(v.stop) : posN;
             const truncating = isTruncatingClinvarVariant(v);
             const kind = truncating ? null : parseClinvarEventKind(getClinvarVariantText(v));
             const xA = posToX(posN), xB = posToX(stopN);
@@ -2425,7 +2452,7 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
             } else {
                 x1 = xA - 4.5; x2 = xA + 4.5;
             }
-            return { ...v, kind, glyph, x, x1, x2, belowAxis: isBelowAxisVariant(v) };
+            return { ...v, kind, glyph, x, x1, x2, stopN, belowAxis: isBelowAxisVariant(v) };
         })
         .filter((v) => v && v.x2 >= ML - 8 && v.x1 <= W - MR + 8);
 
@@ -2622,7 +2649,8 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
     // turn into a solid curtain — fade them so the glyphs carry the plot.
     const stemOpacity = plottableVariants.length > 25 ? '0.3' : '0.65';
     plottableVariants.forEach((v) => {
-        const color = getPathogenicityColor(v.germline, v);
+        const effective = getClinvarEffectiveClassification(v);
+        const color = getPathogenicityColor(effective.label, v);
         // Half-height of the glyph, so stems stop at its edge instead of poking through.
         const glyphHalf = v.glyph === 'bar' ? 3 : (v.glyph === 'caret' ? 4 : 5);
         let cy, stemY1, stemY2;
@@ -2694,9 +2722,11 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         const tip = document.createElementNS(NS, 'title');
         const consequenceLabel = isTruncatingClinvarVariant(v) ? 'Truncating; '
             : (isSynonymousClinvarVariant(v) ? 'Synonymous; ' : (KIND_LABEL[v.kind] || ''));
-        const stopN = Number(v.stop);
-        const posLabel = Number.isFinite(stopN) && stopN !== Number(v.pos) ? `pos ${v.pos}–${v.stop}` : `pos ${v.pos}`;
-        const tipText = `${isQueried ? 'Queried variant — ' : ''}${consequenceLabel}${v.germline || 'Unknown'} (${posLabel}): ${v.title || v.id}`;
+        const posLabel = v.stopN !== Number(v.pos) ? `pos ${v.pos}–${v.stopN}` : `pos ${v.pos}`;
+        const classLabel = effective.label
+            ? `${effective.label}${effective.fromSomatic ? ' (somatic)' : ''}`
+            : 'Unknown';
+        const tipText = `${isQueried ? 'Queried variant — ' : ''}${consequenceLabel}${classLabel} (${posLabel}): ${v.title || v.id}`;
         tip.textContent = tipText;
         glyphEl.appendChild(tip);
         attachTapDetail(glyphEl, v, tipText);
@@ -8696,8 +8726,12 @@ const initVariantSearchUi = () => {
                             ul.style.cssText = 'margin-top:0.4rem;font-size:0.8rem;padding-left:1.2rem;line-height:1.5;';
                             nearby.forEach((v) => {
                                 const li = document.createElement('li');
-                                const color = getPathogenicityColor(v.germline, v);
-                                const sigSpan = `<span style="color:${color};font-weight:600">${escapeHtml(v.germline || 'Unknown')}</span>`;
+                                const effective = getClinvarEffectiveClassification(v);
+                                const color = getPathogenicityColor(effective.label, v);
+                                const sigLabel = effective.label
+                                    ? `${effective.label}${effective.fromSomatic ? ' (somatic)' : ''}`
+                                    : 'Unknown';
+                                const sigSpan = `<span style="color:${color};font-weight:600">${escapeHtml(sigLabel)}</span>`;
                                 const posInfo = v.pos
                                     ? ` · pos ${escapeHtml(String(v.pos))}${v.stop && Number(v.stop) !== Number(v.pos) ? `–${escapeHtml(String(v.stop))}` : ''}`
                                     : '';
@@ -10621,6 +10655,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         parseProteinChange, sameProteinChange, clinvarReviewStars,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
+        getClinvarEffectiveClassification, getPathogenicityColor,
         // HTML/URL escaping
         escapeHtml, safeUrl,
         // openFDA label filtering

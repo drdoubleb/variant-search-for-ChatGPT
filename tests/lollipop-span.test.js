@@ -20,7 +20,7 @@
 await import('../script.js');
 const {
     getQueryAffectedSpan, parseClinvarEventKind, buildVariantCoordinateTuple,
-    isTruncatingClinvarVariant
+    isTruncatingClinvarVariant, getClinvarEffectiveClassification, getPathogenicityColor
 } = globalThis.__variantSearchHelpers;
 
 let passed = 0;
@@ -109,6 +109,31 @@ check('frameshift del title is still flagged truncating',
     isTruncatingClinvarVariant({ title: 'NM_000492.4(CFTR):c.1547_1550del (p.Arg516fs)' }) === true);
 check('in-frame del title is not flagged truncating',
     isTruncatingClinvarVariant({ title: 'NM_000492.3(CFTR):c.1521_1523del (p.Phe508del)' }) === false);
+
+// --- getClinvarEffectiveClassification --------------------------------------
+
+// BRAF V600E: conflicting germline aggregate, but Oncogenic / Tier I somatic —
+// the somatic call should win and color red, with fromSomatic marking it.
+const v600e = {
+    germline: 'Conflicting classifications of pathogenicity',
+    somatic: 'Tier I - Strong', oncogenicity: 'Oncogenic'
+};
+{
+    const eff = getClinvarEffectiveClassification(v600e);
+    check('conflicting germline defers to oncogenicity', eff.label === 'Oncogenic' && eff.fromSomatic === true);
+    check('oncogenic colors red', getPathogenicityColor(eff.label) === '#dc2626');
+}
+check('Tier I wins when only clinical impact is present',
+    getClinvarEffectiveClassification({ germline: '', somatic: 'Tier I - Strong', oncogenicity: '' }).label === 'Tier I - Strong');
+check('Tier II does not count as definitive',
+    getClinvarEffectiveClassification({ germline: '', somatic: 'Tier II - Potential', oncogenicity: '' }).fromSomatic === false);
+check('a real germline call is never overridden',
+    getClinvarEffectiveClassification({ germline: 'Benign', oncogenicity: 'Oncogenic' }).label === 'Benign');
+check('likely oncogenic colors like likely pathogenic', getPathogenicityColor('Likely oncogenic') === '#ef4444');
+check('benign oncogenicity never masquerades as oncogenic',
+    getClinvarEffectiveClassification({ germline: '', oncogenicity: 'Benign', somatic: '' }).fromSomatic === false);
+check('records without somatic data keep their germline label',
+    getClinvarEffectiveClassification({ germline: 'Uncertain significance' }).label === 'Uncertain significance');
 
 // --- summary ---------------------------------------------------------------
 
