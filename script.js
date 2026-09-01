@@ -2449,7 +2449,13 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
                 x1 = Math.min(xA, xB) - UNIT / 2;
                 x2 = Math.max(xA, xB) + UNIT / 2;
                 if (x2 - x1 < 6) { const mid = (x1 + x2) / 2; x1 = mid - 3; x2 = mid + 3; }
-                x = (x1 + x2) / 2;
+                // Open-ended spans (endpoint unknown / far outside the mapped
+                // window — protein-plot rescue sets these flags) are pushed past
+                // the plot edge so the bar renders with an arrow tip there.
+                // openStart extends toward lower coordinates, openEnd higher.
+                if (v.openStart) { if (minusStrand) x2 = W - MR + 20; else x1 = ML - 20; }
+                if (v.openEnd) { if (minusStrand) x1 = ML - 20; else x2 = W - MR + 20; }
+                x = (Math.max(x1, ML) + Math.min(x2, W - MR)) / 2;
             } else {
                 x1 = xA - 4.5; x2 = xA + 4.5;
             }
@@ -2677,16 +2683,22 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
 
         let glyphEl;
         if (v.glyph === 'bar') {
-            // Bar over the affected bases (clamped to the plot area). Duplications
-            // draw lighter with an outline so a dup and a del of the same span differ.
-            const bx1 = Math.max(v.x1, ML - 6), bx2 = Math.min(v.x2, W - MR + 6);
-            glyphEl = document.createElementNS(NS, 'rect');
-            glyphEl.setAttribute('x', String(bx1)); glyphEl.setAttribute('y', String(cy - 3));
-            glyphEl.setAttribute('width', String(Math.max(2, bx2 - bx1))); glyphEl.setAttribute('height', '6');
-            glyphEl.setAttribute('rx', '3');
+            // Bar over the affected bases, clamped to the plot area. An end that
+            // continues past the window — a span wider than the view, or an
+            // open-ended endpoint — draws as an arrow tip instead of a rounded
+            // cap, so truncation shows in the shape itself. Duplications draw
+            // lighter with an outline so a dup and a del of the same span differ.
+            const leftOpen = v.x1 < ML - 6, rightOpen = v.x2 > W - MR + 6;
+            const bx1 = Math.max(v.x1, ML - 6), bx2 = Math.max(Math.min(v.x2, W - MR + 6), Math.max(v.x1, ML - 6) + 2);
+            const y0 = cy - 3, y1 = cy + 3;
+            const rightCap = rightOpen ? `L ${bx2 + 5} ${cy} L ${bx2} ${y1}` : `A 3 3 0 0 1 ${bx2} ${y1}`;
+            const leftCap = leftOpen ? `L ${bx1 - 5} ${cy} L ${bx1} ${y0}` : `A 3 3 0 0 1 ${bx1} ${y0}`;
+            glyphEl = document.createElementNS(NS, 'path');
+            glyphEl.setAttribute('d', `M ${bx1} ${y0} L ${bx2} ${y0} ${rightCap} L ${bx1} ${y1} ${leftCap} Z`);
             if (v.kind === 'dup') {
                 glyphEl.setAttribute('fill', color); glyphEl.setAttribute('fill-opacity', '0.3');
                 glyphEl.setAttribute('stroke', color); glyphEl.setAttribute('stroke-width', '1.3');
+                glyphEl.setAttribute('stroke-linejoin', 'round');
             } else {
                 glyphEl.setAttribute('fill', color); glyphEl.setAttribute('opacity', '0.88');
             }
@@ -2723,7 +2735,9 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
         const tip = document.createElementNS(NS, 'title');
         const consequenceLabel = isTruncatingClinvarVariant(v) ? 'Truncating; '
             : (isSynonymousClinvarVariant(v) ? 'Synonymous; ' : (KIND_LABEL[v.kind] || ''));
-        const posLabel = v.stopN !== Number(v.pos) ? `pos ${v.pos}–${v.stopN}` : `pos ${v.pos}`;
+        let posLabel = v.stopN !== Number(v.pos) ? `pos ${v.pos}–${v.stopN}` : `pos ${v.pos}`;
+        if (v.openStart && v.openEnd) posLabel = 'span covers plotted region';
+        else if (v.openStart || v.openEnd) posLabel += ', span continues beyond plot';
         const classLabel = effective.label
             ? `${effective.label}${effective.fromSomatic ? ' (somatic)' : ''}`
             : 'Unknown';
@@ -2780,38 +2794,60 @@ function buildLollipopPlot(variants, queryPos, minusStrand = false, { range = 30
 // queryGenomicPos / queryC / minusStrand enable the genomic-offset path.
 // The axis range auto-scales to the actual spread of the data.
 // Returns null if no variants have parseable protein positions.
-function buildProteinLollipopPlot(variants, queryProteinPos, { queryGenomicPos = null, queryC = null, minusStrand = false, queryGenomicSpan = null, highlightId = null } = {}) {
+// Resolve a nearby ClinVar record's residue-space position for the protein plot.
+// Exported for tests via the Node helper block.
+//
+// The genomic-offset mapping (residue from the canonical c. offset against the
+// query) is only trusted when it lands within ±20 residues of the query — a
+// larger deviation signals an intron or exon boundary in between, where the
+// naive arithmetic is wrong. For span records (del/dup/delins/inv) the raw
+// arithmetic is still directionally correct (genomic order maps monotonically
+// to transcript order), so a span whose endpoints don't both map plausibly is
+// rescued instead of dropped: a plausible endpoint anchors the bar and the far
+// end is marked open (openStart/openEnd → drawn as an arrow past the plot
+// edge); a span that covers the query base with neither endpoint mappable
+// necessarily covers the query residue, so it renders open at both ends.
+// Everything else falls back to the title's p. token (only that token — the
+// full title carries transcript accessions and c. numbers that would parse as
+// residues), and returns pos: null when nothing resolves.
+function mapVariantToResidueSpan(v, { queryProteinPos, queryGenomicPos = null, queryC = null, minusStrand = false }) {
     const strandFactor = minusStrand ? -1 : 1;
-    // Map one genomic base to a residue via the canonical c. offset from the query.
-    // Only trust the genomic offset when it gives a plausible same-exon result.
-    // A large deviation signals an intron or exon boundary in between; the caller
-    // falls through to title-parsed p. instead (which, though transcript-specific,
-    // is better than placing the variant hundreds of residues off).
-    const mapGenomicToResidue = (gpos) => {
-        if (gpos == null || !Number.isFinite(Number(gpos)) || queryGenomicPos == null || queryC == null) return null;
-        const cCanonical = queryC + strandFactor * (Number(gpos) - queryGenomicPos);
-        if (cCanonical <= 0) return null;
-        const p = Math.ceil(cCanonical / 3);
-        return Math.abs(p - queryProteinPos) <= 20 ? p : null;
-    };
-    const proteinVariants = variants.map(v => {
-        let pos = mapGenomicToResidue(v.pos);
-        // Map the span end too (min/max because a genomic span reads backwards in
-        // residue space on the minus strand); if it doesn't map, keep just the start.
-        let stop = null;
-        if (pos !== null && v.stop != null && Number(v.stop) !== Number(v.pos)) {
-            const p2 = mapGenomicToResidue(v.stop);
-            if (p2 !== null) { stop = Math.max(pos, p2); pos = Math.min(pos, p2); }
+    const haveCtx = queryGenomicPos != null && queryC != null;
+    const rawResidue = (gpos) => Math.ceil((queryC + strandFactor * (Number(gpos) - queryGenomicPos)) / 3);
+    const plausible = (p) => p > 0 && Math.abs(p - queryProteinPos) <= 20;
+
+    let pos = null, stop = null, openStart = false, openEnd = false;
+    const posOk = v.pos != null && Number.isFinite(Number(v.pos));
+    const stopOk = v.stop != null && Number.isFinite(Number(v.stop)) && Number(v.stop) !== Number(v.pos);
+    const kind = isTruncatingClinvarVariant(v) ? null : parseClinvarEventKind(getClinvarVariantText(v));
+    const isSpanKind = kind !== null && ['del', 'dup', 'delins', 'inv', 'ins'].includes(kind);
+
+    if (haveCtx && posOk && stopOk && isSpanKind) {
+        const r1 = rawResidue(v.pos), r2 = rawResidue(v.stop);
+        const lo = Math.min(r1, r2), hi = Math.max(r1, r2);
+        if (plausible(lo) && plausible(hi)) { pos = lo; stop = hi > lo ? hi : null; }
+        else if (kind !== 'ins') {
+            if (plausible(lo)) { pos = lo; openEnd = true; }
+            else if (plausible(hi)) { pos = hi; openStart = true; }
+            else if (lo <= queryProteinPos && queryProteinPos <= hi) {
+                pos = queryProteinPos; openStart = true; openEnd = true;
+            }
         }
-        if (pos === null) {
-            // Parse from the title's p. token only — the full title also carries
-            // transcript accession and c. numbers that would parse as residues.
-            const pToken = (getClinvarVariantText(v).match(/\bp\.\(?\S+/i) || [])[0] || '';
-            const r = parseProteinResidueRange(pToken);
-            if (r) { pos = r.start; if (r.end > r.start) stop = r.end; }
-        }
-        return { ...v, pos, stop };
-    });
+    } else if (haveCtx && posOk) {
+        const p = rawResidue(v.pos);
+        if (plausible(p)) pos = p;
+    }
+    if (pos === null && !openStart && !openEnd) {
+        const pToken = (getClinvarVariantText(v).match(/\bp\.\(?\S+/i) || [])[0] || '';
+        const r = parseProteinResidueRange(pToken);
+        if (r) { pos = r.start; if (r.end > r.start) stop = r.end; }
+    }
+    return { pos, stop, openStart, openEnd };
+}
+
+function buildProteinLollipopPlot(variants, queryProteinPos, { queryGenomicPos = null, queryC = null, minusStrand = false, queryGenomicSpan = null, highlightId = null } = {}) {
+    const ctx = { queryProteinPos, queryGenomicPos, queryC, minusStrand };
+    const proteinVariants = variants.map(v => ({ ...v, ...mapVariantToResidueSpan(v, ctx) }));
     const withPos = proteinVariants.filter(v => v.pos !== null);
     if (withPos.length === 0) return null;
 
@@ -10657,6 +10693,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,
+        mapVariantToResidueSpan,
         // HTML/URL escaping
         escapeHtml, safeUrl,
         // openFDA label filtering

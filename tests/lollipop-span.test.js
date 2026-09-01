@@ -20,7 +20,8 @@
 await import('../script.js');
 const {
     getQueryAffectedSpan, parseClinvarEventKind, buildVariantCoordinateTuple,
-    isTruncatingClinvarVariant, getClinvarEffectiveClassification, getPathogenicityColor
+    isTruncatingClinvarVariant, getClinvarEffectiveClassification, getPathogenicityColor,
+    mapVariantToResidueSpan
 } = globalThis.__variantSearchHelpers;
 
 let passed = 0;
@@ -134,6 +135,57 @@ check('benign oncogenicity never masquerades as oncogenic',
     getClinvarEffectiveClassification({ germline: '', oncogenicity: 'Benign', somatic: '' }).fromSomatic === false);
 check('records without somatic data keep their germline label',
     getClinvarEffectiveClassification({ germline: 'Uncertain significance' }).label === 'Uncertain significance');
+
+// --- mapVariantToResidueSpan -----------------------------------------------
+
+// Context: BRCA1 C61G — 17:41258504 A>C (GRCh37), minus strand, c.181, p.61.
+const brca1Ctx = { queryProteinPos: 61, queryGenomicPos: 41258504, queryC: 181, minusStrand: true };
+
+// The real regression: a gross deletion (g.(?_41258383)_(41258523_?)del) whose
+// genomic span covers the query base. Its 3' endpoint maps to residue ~54
+// (plausible); its 5' endpoint lands ~40 residues away (implausible), and the
+// title has no p. token — this used to drop the record from the protein plot
+// entirely. It should now anchor at 54 and extend open toward higher residues.
+{
+    const grossDel = { title: 'NC_000017.10:g.(?_41258383)_(41258523_?)del', pos: 41258383, stop: 41258523 };
+    const r = mapVariantToResidueSpan(grossDel, brca1Ctx);
+    check('gross del anchors at its mappable endpoint', r.pos === 54);
+    check('gross del extends open toward higher residues', r.openEnd === true && r.openStart === false);
+}
+// A deletion spanning far past both edges, still covering the query base:
+// neither endpoint maps, but coverage of the query residue is certain.
+{
+    const hugeDel = { title: 'NC_000017.10:g.41250000_41260000del', pos: 41250000, stop: 41260000 };
+    const r = mapVariantToResidueSpan(hugeDel, brca1Ctx);
+    check('window-spanning del renders open at both ends',
+        r.pos === 61 && r.openStart === true && r.openEnd === true);
+}
+// A deletion entirely elsewhere (not covering the query, both ends implausible)
+// with no p. token stays dropped — no smearing across the window.
+{
+    const farDel = { title: 'NC_000017.10:g.41260000_41262000del', pos: 41260000, stop: 41262000 };
+    const r = mapVariantToResidueSpan(farDel, brca1Ctx);
+    check('far-away del without p. notation is still dropped', r.pos === null);
+}
+// Plain SNV mapping unchanged: 41258504 → residue 61; both-plausible span closed.
+check('SNV maps to its residue with no open flags', (() => {
+    const r = mapVariantToResidueSpan({ title: 'NM_007294.4(BRCA1):c.181T>G (p.Cys61Gly)', pos: 41258504, stop: 41258504 }, brca1Ctx);
+    return r.pos === 61 && r.stop === null && !r.openStart && !r.openEnd;
+})());
+check('fully-mappable del keeps a closed residue span', (() => {
+    const r = mapVariantToResidueSpan({ title: 'NM_007294.4(BRCA1):c.180_182del', pos: 41258503, stop: 41258505 }, brca1Ctx);
+    return r.pos !== null && !r.openStart && !r.openEnd;
+})());
+// Title p. fallback still works without genomic context.
+check('p. range fallback without mapping context', (() => {
+    const r = mapVariantToResidueSpan({ title: 'NM_000492.4(CFTR):c.1493_1507del (p.Met498_Ile502del)', pos: null, stop: null }, { queryProteinPos: 500 });
+    return r.pos === 498 && r.stop === 502;
+})());
+// Frameshift spans are not rescued as bars (they render as ✕ from the title).
+check('frameshift del is not span-rescued', (() => {
+    const r = mapVariantToResidueSpan({ title: 'NM_007294.4(BRCA1):c.68_5000del (p.Glu23fs)', pos: 41200000, stop: 41277500 }, brca1Ctx);
+    return r.openStart === false && r.openEnd === false;
+})());
 
 // --- summary ---------------------------------------------------------------
 
