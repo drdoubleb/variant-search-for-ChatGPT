@@ -4652,21 +4652,18 @@ function createGuidelinesCard({ container, tumorType, getGene, extras }) {
 }
 
 const OPENROUTER_MODEL_OPTIONS = [
+    'openai/gpt-6-luna',
     'openai/gpt-5-mini',
-    'openai/gpt-5.4-nano',
-    'openai/gpt-oss-120b',
-    'openai/gpt-4o-mini',
     'openai/gpt-5-nano',
+    'openai/gpt-oss-120b',
+    'anthropic/claude-haiku-5.5',
     'google/gemini-2.5-flash-lite',
-    'google/gemini-3-flash-preview',
     'google/gemini-3.1-flash-lite',
-    'anthropic/claude-3-haiku',
     'deepseek/deepseek-v4-flash',
     'deepseek/deepseek-v4-pro',
-    'x-ai/grok-4.3',
+    'qwen/qwen3.7-flash',
     'minimax/minimax-m2.7',
-    'nvidia/nemotron-3-super-120b-a12b:free',
-    'qwen/qwen3-32b'
+    'nvidia/nemotron-3-super-120b-a12b:free'
 ];
 
 async function fetchAiReview(context, model, extra = {}) {

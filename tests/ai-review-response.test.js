@@ -33,7 +33,7 @@ const mkReq = () => ({
     method: 'POST',
     headers: { origin: 'https://drdoubleb.com' },
     body: {
-        model: 'openai/gpt-5-mini',
+        model: 'openai/gpt-6-luna',
         openrouter_api_key: 'sk-or-v1-0123456789abcdef0123',
         context: { gene: 'PTEN', submitted_variant: 'p.His123Asp' }
     }

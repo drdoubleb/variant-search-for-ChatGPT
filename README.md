@@ -218,12 +218,12 @@ This repo includes an optional AI interpretation endpoint at `api/ai-review.js`.
 
 - `POST /api/ai-review`
 - Requires the Vercel environment variable `OPENROUTER_API_KEY` (unless the caller supplies their own key — see BYO-key below).
-- Available model choices are kept in sync between the frontend selector and backend allowlist: `openai/gpt-5-mini`, `openai/gpt-5.4-nano`, `openai/gpt-oss-120b`, `openai/gpt-4o-mini`, `openai/gpt-5-nano`, `google/gemini-2.5-flash-lite`, `google/gemini-3-flash-preview`, `google/gemini-3.1-flash-lite`, `anthropic/claude-3-haiku`, `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`, `x-ai/grok-4.3`, `minimax/minimax-m2.7`, `nvidia/nemotron-3-super-120b-a12b:free`, and `qwen/qwen3-32b`.
+- Available model choices are kept in sync between the frontend selector and backend allowlist: `openai/gpt-6-luna` (default), `openai/gpt-5-mini`, `openai/gpt-5-nano`, `openai/gpt-oss-120b`, `anthropic/claude-haiku-5.5`, `google/gemini-2.5-flash-lite`, `google/gemini-3.1-flash-lite`, `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`, `qwen/qwen3.7-flash`, `minimax/minimax-m2.7`, and `nvidia/nemotron-3-super-120b-a12b:free`. The list favors cheap models with a 1M-token window because review contexts are input-heavy (hundreds of thousands of tokens for rich genes); `gpt-oss-120b` has a 131k window and cannot take the largest payloads. The `:free` Nemotron route costs nothing but is served by third-party free-tier providers whose data-use terms differ from paid routes — check OpenRouter's provider policy before relying on it for sensitive context.
 - JSON payload:
 
 ```json
 {
-  "model": "openai/gpt-5-mini",
+  "model": "openai/gpt-6-luna",
   "context": {
     "submitted_variant": "BRAF V600E",
     "tumor_type": "melanoma",
@@ -245,7 +245,7 @@ The proxy protects the owner's `OPENROUTER_API_KEY` from being drained by anonym
 
 ### Why AI reviews fail, and the token budget
 
-`max_tokens` is shared with the model's **reasoning** tokens on reasoning models (`gpt-5-*`, `deepseek-v4-*`, `grok-*`). A model that thinks for 1,500 tokens has only the remainder left for the answer, so a low cap makes the JSON stop mid-array — or come back empty when reasoning consumes the whole budget. That is why the cap is 8000 rather than 3000, and why the same variant can succeed on one model and fail on another.
+`max_tokens` is shared with the model's **reasoning** tokens on reasoning models (`gpt-*`, `deepseek-v4-*`, `qwen3.7-flash`). A model that thinks for 1,500 tokens has only the remainder left for the answer, so a low cap makes the JSON stop mid-array — or come back empty when reasoning consumes the whole budget. That is why the cap is 8000 rather than 3000, and why the same variant can succeed on one model and fail on another.
 
 The proxy now separates the causes instead of surfacing a raw parser message like `Expected ',' or ']' after array element in JSON at position 4348`:
 
