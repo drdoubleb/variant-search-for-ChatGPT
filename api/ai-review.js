@@ -24,7 +24,7 @@ import { verifyTurnstile } from './_turnstile.js';
 import { isOriginAllowed } from './_origin.js';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const DEFAULT_MODEL = 'openai/gpt-5-mini';
+const DEFAULT_MODEL = 'openai/gpt-6-luna';
 
 // Browser origins permitted to spend the owner's key: the shared allowlist in
 // ./_origin.js (live Hostinger site, production Vercel host, and this
@@ -61,7 +61,7 @@ function parseUserKey(value) {
 const CONTEXT_MAX_CHARS = 1500000;    // safety ceiling only; realistic contexts pass untouched
 const USER_NOTES_MAX_CHARS = 4000;    // free-text notes from the user
 // Bounds the generation length of a single call. This budget is shared with the
-// model's REASONING tokens on reasoning models (gpt-5-*, deepseek-v4-*, grok), so a
+// model's REASONING tokens on reasoning models (gpt-*, deepseek-v4-*, qwen3.7-flash), so a
 // model that thinks for 1500 tokens had only 1500 left for the answer at the old
 // value of 3000 — the JSON then stopped mid-array and failed to parse, or the
 // content came back empty because reasoning consumed the whole budget. 8000 leaves
@@ -70,21 +70,18 @@ const USER_NOTES_MAX_CHARS = 4000;    // free-text notes from the user
 const COMPLETION_MAX_TOKENS = 8000;
 const MAX_BODY_BYTES = 4 * 1024 * 1024; // ~4 MB, just under Vercel's request-body ceiling
 const ALLOWED_MODELS = new Set([
+    'openai/gpt-6-luna',
     'openai/gpt-5-mini',
-    'openai/gpt-5.4-nano',
-    'openai/gpt-oss-120b',
-    'openai/gpt-4o-mini',
     'openai/gpt-5-nano',
+    'openai/gpt-oss-120b',
+    'anthropic/claude-haiku-5.5',
     'google/gemini-2.5-flash-lite',
-    'google/gemini-3-flash-preview',
     'google/gemini-3.1-flash-lite',
-    'anthropic/claude-3-haiku',
     'deepseek/deepseek-v4-flash',
     'deepseek/deepseek-v4-pro',
-    'x-ai/grok-4.3',
+    'qwen/qwen3.7-flash',
     'minimax/minimax-m2.7',
-    'nvidia/nemotron-3-super-120b-a12b:free',
-    'qwen/qwen3-32b'
+    'nvidia/nemotron-3-super-120b-a12b:free'
 ]);
 
 function clampString(value, maxLength = 20000) {
