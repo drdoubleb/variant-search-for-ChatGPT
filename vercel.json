@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/ai-review.js": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "api/clinvar-gene.js": {
       "maxDuration": 30

@@ -68,6 +68,7 @@ const USER_NOTES_MAX_CHARS = 4000;    // free-text notes from the user
 // room for both. Cost per call is still bounded; volume is bounded by the rate
 // limiter / Turnstile / BYO-key valve.
 const COMPLETION_MAX_TOKENS = 8000;
+const UPSTREAM_TIMEOUT_MS = 290000;  // see the AbortController note below
 const MAX_BODY_BYTES = 4 * 1024 * 1024; // ~4 MB, just under Vercel's request-body ceiling
 const ALLOWED_MODELS = new Set([
     'openai/gpt-6-luna',
@@ -230,8 +231,12 @@ export default async function handler(req, res) {
         }
     }
 
+    // Abort just under the function's maxDuration in vercel.json (300s, the
+    // Hobby ceiling with Fluid Compute) so the caller gets this handler's own
+    // error rather than a platform FUNCTION_INVOCATION_TIMEOUT. Large contexts
+    // (e.g. ERBB2 at ~219k tokens) on reasoning models can run well past 60s.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 55000);
+    const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
     try {
         const response = await fetch(OPENROUTER_API_URL, {
