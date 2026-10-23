@@ -7,6 +7,7 @@
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
 import { ncbiFetchJson, ncbiFetchResponse } from './_ncbi.js';
+import { boundedQueryText, positiveQueryInteger } from './_input.js';
 
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
@@ -131,13 +132,22 @@ export default async function handler(req, res) {
     // (no-Origin callers pass — see api/_origin.js).
     if (rejectDisallowedOrigin(req, res)) return;
 
-    const { term, limit = '5', gene = '', variant = '', extra = '' } = req.query;
-    if ((!term || !String(term).trim()) && !String(variant).trim()) {
+    // Bound free-text inputs to prevent oversized public requests to NCBI.
+    const query = req.query || {};
+    const term = query.term === undefined ? '' : boundedQueryText(query.term, 512);
+    const gene = query.gene === undefined ? '' : boundedQueryText(query.gene, 64);
+    const variant = query.variant === undefined ? '' : boundedQueryText(query.variant, 128);
+    const extra = query.extra === undefined ? '' : boundedQueryText(query.extra, 256);
+    const limit = positiveQueryInteger(query.limit === undefined ? '5' : query.limit, 100000);
+    if (term === null || gene === null || variant === null || extra === null || limit === null) {
+        return res.status(400).json({ error: 'Invalid or oversized PubMed query parameter' });
+    }
+    if (!term && !variant) {
         return res.status(400).json({ error: 'Missing required query parameter: term (or variant)' });
     }
 
     const apiKey = process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';
-    const maxResults = Math.min(Math.max(1, parseInt(limit, 10) || 5), 20);
+    const maxResults = Math.min(limit, 20);
 
     // Successful lookups are shared across users — let Vercel's CDN serve
     // repeats without re-invoking the function or hitting the upstream.
