@@ -36,11 +36,17 @@ export function isOriginAllowed(origin, envValue) {
     if (!origin) return true; // no browser Origin → not a third-party website embedding
     const allowed = parseAllowedOrigins(envValue);
     if (allowed.includes('*')) return true;
-    let host;
-    try { host = new URL(origin).host; } catch { return false; }
+    let parsedOrigin;
+    try {
+        parsedOrigin = new URL(origin);
+        // Require an actual Origin (scheme + host only), not a URL with a path.
+        if (parsedOrigin.origin !== origin || !['https:', 'http:'].includes(parsedOrigin.protocol)) return false;
+    } catch { return false; }
+    const host = parsedOrigin.host;
+    const isHttps = parsedOrigin.protocol === 'https:';
     return allowed.some((entry) => {
         if (entry === origin) return true;
-        if (entry.startsWith('*.')) return host === entry.slice(2) || host.endsWith(entry.slice(1));
+        if (entry.startsWith('*.')) return isHttps && (host === entry.slice(2) || host.endsWith(entry.slice(1)));
         // Host pattern with an embedded wildcard, e.g.
         // "variant-search-for-chat-gpt-*.vercel.app". The wildcard matches within
         // a single DNS label (no dots), so it cannot be stretched across domains.
@@ -48,10 +54,11 @@ export function isOriginAllowed(origin, envValue) {
             const escaped = entry.split('*')
                 .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
                 .join('[a-z0-9-]*');
-            return new RegExp(`^${escaped}$`, 'i').test(host);
+            return isHttps && new RegExp(`^${escaped}$`, 'i').test(host);
         }
         if (entry === 'localhost') return host === 'localhost' || host.startsWith('localhost:');
-        try { return new URL(entry).host === host; } catch { return false; }
+        // Full configured origins must match the scheme as well as the hostname.
+        try { return new URL(entry).origin === parsedOrigin.origin; } catch { return false; }
     });
 }
 

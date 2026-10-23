@@ -17,6 +17,7 @@
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
 import { ncbiFetchJson } from './_ncbi.js';
+import { validatedGene, boundedQueryText } from './_input.js';
 
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
@@ -57,14 +58,18 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Missing required query parameters: gene, change' });
     }
 
-    const safeGene = String(gene).replace(/[^A-Za-z0-9\-_.]/g, '');
+    const safeGene = validatedGene(gene);
     if (!safeGene) {
         return res.status(400).json({ error: 'Invalid gene value' });
     }
 
     // Accept one or more comma-separated change forms; sanitise each to the
     // alphanumeric/`*` characters that appear in HGVS protein bodies.
-    const changeForms = String(change)
+    const safeChange = boundedQueryText(change, 128);
+    if (!safeChange || safeChange.split(',').length > 8) {
+        return res.status(400).json({ error: 'Invalid or oversized change value' });
+    }
+    const changeForms = safeChange
         .split(',')
         .map((s) => s.replace(/[^A-Za-z0-9*]/g, ''))
         .filter(Boolean);

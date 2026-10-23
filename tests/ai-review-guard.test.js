@@ -39,6 +39,11 @@ check('someone else\'s Vercel deployment blocked', isOriginAllowed('https://atta
 check('project-prefix on another domain blocked', isOriginAllowed('https://variant-search-for-chat-gpt-x.evil.com') === false);
 check('wildcard cannot span a dot', isOriginAllowed('https://variant-search-for-chat-gpt-x.y.vercel.app') === false);
 check('malformed origin blocked', isOriginAllowed('not-a-url') === false);
+check('insecure HTTP origin cannot match HTTPS allowlist', isOriginAllowed('http://drdoubleb.com') === false);
+check('insecure preview host blocked', isOriginAllowed('http://variant-search-for-chat-gpt-git-test-drdoubleb.vercel.app') === false);
+check('trusted host with an unknown port blocked', isOriginAllowed('https://drdoubleb.com:444') === false);
+check('Origin with path rejected', isOriginAllowed('https://drdoubleb.com/path') === false);
+check('malformed origin with userinfo rejected', isOriginAllowed('https://user@drdoubleb.com') === false);
 
 // Origin allowlist — env override (passed as the second argument)
 check('env override allows configured origin', isOriginAllowed('https://example.org', 'https://example.org') === true);

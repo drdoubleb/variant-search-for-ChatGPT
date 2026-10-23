@@ -7,6 +7,7 @@
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
 import { ncbiFetchJson } from './_ncbi.js';
+import { validatedChromosome, positiveQueryInteger } from './_input.js';
 
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
@@ -29,13 +30,14 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Missing required query parameters: chrom, pos' });
     }
 
-    const c = String(chrom).replace(/^chr/i, '').toUpperCase();
-    const p = Number(pos);
-    if (!c || !Number.isFinite(p)) {
-        return res.status(400).json({ error: 'Invalid chrom or pos value' });
+    const c = validatedChromosome(chrom);
+    const p = positiveQueryInteger(pos);
+    const parsedWindow = positiveQueryInteger(win, 100000);
+    if (!c || p === null || parsedWindow === null) {
+        return res.status(400).json({ error: 'Invalid chrom, pos or window value' });
     }
 
-    const windowSize = Math.min(Math.max(1, parseInt(win, 10) || 10), 500);
+    const windowSize = Math.min(parsedWindow, 500);
     const start = Math.max(1, p - windowSize);
     const end = p + windowSize;
     const apiKey = process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';

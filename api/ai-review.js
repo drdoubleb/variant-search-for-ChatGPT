@@ -186,7 +186,21 @@ export default async function handler(req, res) {
         return res.status(403).json({ error: 'Origin not allowed' });
     }
 
-    const body = req.body || {};
+    // Content-Length is user-controlled and may be absent or inaccurate.
+    // Also measure the parsed JSON body before building a potentially huge prompt.
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return res.status(400).json({ error: 'Expected a JSON object body' });
+    }
+    let actualBytes;
+    try {
+        actualBytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
+    } catch {
+        return res.status(400).json({ error: 'Invalid JSON body' });
+    }
+    if (actualBytes > MAX_BODY_BYTES) {
+        return res.status(413).json({ error: 'Request body too large' });
+    }
     const model = parseModel(body.model);
     const context = body.context || {};
 

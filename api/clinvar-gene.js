@@ -8,6 +8,7 @@
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
 import { ncbiFetchJson } from './_ncbi.js';
+import { validatedGene } from './_input.js';
 
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 
@@ -30,7 +31,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Missing required query parameter: gene' });
     }
 
-    const safeGene = String(gene).replace(/[^A-Za-z0-9\-_.]/g, '');
+    const safeGene = validatedGene(gene);
     if (!safeGene) {
         return res.status(400).json({ error: 'Invalid gene value' });
     }

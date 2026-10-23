@@ -9,6 +9,7 @@
 // common path faster and immune to Ensembl outages.
 
 import { liftoverPosition, normalizeChrom } from './_liftover.js';
+import { validatedChromosome, validatedAllele, positiveQueryInteger } from './_input.js';
 
 const GNOMAD_API = 'https://gnomad.broadinstitute.org/api';
 
@@ -109,6 +110,33 @@ async function gnomadPost(operationName, query, variables) {
     }
 }
 
+// Validate every public argument before liftover or GraphQL. The browser sends
+// strings, but repeated query parameters can otherwise arrive as arrays.
+export function parseGnomadQuery(query = {}) {
+    if (!query || typeof query !== 'object') return { ok: false, message: 'Missing required parameters: chrom, pos37, ref, alt' };
+    const { chrom: rawChrom, pos37: rawPos37, ref: rawRef, alt: rawAlt, pos38: rawPos38 } = query;
+    if (rawChrom == null || rawPos37 == null || rawRef == null || rawAlt == null) {
+        return { ok: false, message: 'Missing required parameters: chrom, pos37, ref, alt' };
+    }
+    const chrom = validatedChromosome(rawChrom);
+    const pos37 = positiveQueryInteger(rawPos37);
+    const ref = validatedAllele(rawRef);
+    const alt = validatedAllele(rawAlt);
+    if (!chrom || pos37 === null || !ref || !alt) {
+        return { ok: false, message: 'Invalid chromosome, coordinate or alleles' };
+    }
+    const pos38 = (rawPos38 == null || rawPos38 === '') ? undefined : positiveQueryInteger(rawPos38);
+    if (pos38 === null) return { ok: false, message: 'Invalid pos38 hint' };
+    return {
+        ok: true,
+        chrom,
+        pos37: String(pos37),
+        ref,
+        alt,
+        pos38: pos38 === undefined ? undefined : String(pos38)
+    };
+}
+
 import { rejectDisallowedOrigin } from './_origin.js';
 import { setEdgeCache } from './_cache.js';
 
@@ -116,14 +144,14 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
     // Block third-party websites from using this deployment as their backend
     // (no-Origin callers pass — see api/_origin.js).
     if (rejectDisallowedOrigin(req, res)) return;
 
-    const { chrom, pos37, ref, alt, pos38: pos38Hint } = req.query;
-    if (!chrom || !pos37 || !ref || !alt) {
-        return res.status(200).json({ status: 'error', message: 'Missing required parameters: chrom, pos37, ref, alt' });
-    }
+    const parsed = parseGnomadQuery(req.query);
+    if (!parsed.ok) return res.status(400).json({ status: 'error', message: parsed.message });
+    const { chrom, pos37, ref, alt, pos38: pos38Hint } = parsed;
 
     // Step 1: resolve the GRCh38 position (caller hint, else liftover).
     // A provider outage and a genuinely unmappable coordinate get distinct
