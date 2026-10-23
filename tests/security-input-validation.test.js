@@ -65,7 +65,7 @@ await expectStatus(gnomadHandler, good, 405, { method: 'POST' });
 await expectStatus(clinvarGeneHandler, { gene: 'BRAF'.repeat(100) }, 400);
 await expectStatus(clinvarGeneHandler, { gene: ['BRAF', 'KRAS'] }, 400);
 await expectStatus(clinvarProteinHandler, { gene: 'BRAF', change: 'A'.repeat(129) }, 400);
-await expectStatus(clinvarProteinHandler, { gene: 'BRAF', change: 'G34R', retmax: '200', extra: 'ignored' }, 400, { method: 'PUT' });
+await expectStatus(clinvarProteinHandler, { gene: 'BRAF', change: 'G34R', retmax: '200', extra: 'ignored' }, 405, { method: 'PUT' });
 await expectStatus(clinvarRegionHandler, { chrom: 'chr23', pos: '140453136' }, 400);
 await expectStatus(clinvarRegionHandler, { chrom: 'chr7', pos: '140453136bogus' }, 400);
 await expectStatus(clinvarRegionHandler, { chrom: '7', pos: '140453136', window: '1000000000000' }, 400);
