@@ -206,20 +206,6 @@ function dedupeSymbolList(value) {
         .join(', ');
 }
 
-// selectCanonicalTranscript scores candidates and can throw on odd shapes; the
-// progress panel only needs a best-effort index, never an exception.
-function selectCanonicalTranscriptSafe(transcripts) {
-    try {
-        const idx = selectCanonicalTranscript(
-            transcripts.map((t) => ({ transcript: t.transcript, cDNA: t.cDNA, protein: t.protein, source: 'root' })),
-            typeof targetProtGlobal !== 'undefined' ? targetProtGlobal : null
-        );
-        return typeof idx === 'number' && idx >= 0 && idx < transcripts.length ? idx : 0;
-    } catch {
-        return 0;
-    }
-}
-
 // HTTP statuses that mean "the server is unwell", not "your request is wrong".
 // 429 is included because Ensembl rate-limits bursts and expects a retry.
 const RETRYABLE_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -1427,226 +1413,185 @@ function parseProteinCoordinate(prot) {
     return null;
 }
 
-// Given an array of candidate transcripts and an optional target protein (triple‑coded
-// uppercase string from the user's query), compute the canonical transcript index.
-// Each candidate must have properties: transcript (string), cDNA (string), protein
-// (string), and source (one of 'snpeff', 'dbnsfp', 'root'). The function returns
-// the index of the canonical candidate using a weighted scoring system:
-//   * Prefer RefSeq NM_ transcripts (assign high base score and rank by numeric accession
-//     with smaller numbers ranked higher).
-//   * Prefer candidates whose cDNA coordinate and protein residue position are
-//     closest to the median of all candidate coordinates (to reflect widely used
-//     isoforms when multiple variants exist).
-//   * Prefer candidates that include a protein annotation over those that do not.
-//   * Apply a minor source priority: snpEff > dbNSFP > root‑level.
-//   * When targetProtGlobal is provided, strongly favour candidates whose protein
-//     change matches the target (either triple‑coded or converted to single letter).
-function selectCanonicalTranscript(candidates, targetProtGlobal) {
-    if (!candidates || candidates.length === 0) return 0;
-    // Precompute numeric coordinates for cDNA and protein to calculate medians.
-    const cdnaCoords = [];
-    const protCoords = [];
-    for (const c of candidates) {
-        const cc = parseCdnaCoordinate(c.cDNA);
-        if (cc !== null) cdnaCoords.push(cc);
-        const pc = parseProteinCoordinate(c.protein);
-        if (pc !== null) protCoords.push(pc);
-    }
-    // Compute median values when possible.
-    const median = (arr) => {
-        if (arr.length === 0) return null;
-        const sorted = [...arr].sort((a, b) => a - b);
-        const idx = Math.floor(sorted.length / 2);
-        return sorted[idx];
+// HGVS identity includes the accession and the complete change, including UTR
+// signs and REF/ALT. A search ranking is never evidence of allele identity.
+function splitTranscriptHgvs(value) {
+    const text = String(value || '').trim();
+    const colon = text.indexOf(':');
+    return {
+        transcript: colon < 0 ? '' : text.slice(0, colon).replace(/\([^)]*\)/g, ''),
+        change: (colon < 0 ? text : text.slice(colon + 1)).trim()
     };
-    const medianCdna = median(cdnaCoords);
-    const medianProt = median(protCoords);
-    // Normalise NM accession numbers to numeric part. Returns null if not an NM transcript.
-    const getNmNumber = (tx) => {
-        if (!tx || !/^NM_/i.test(tx)) return null;
-        const m = tx.match(/^NM_0*([0-9]+)(?:\.|$)/i);
-        if (m) {
-            const num = parseInt(m[1], 10);
-            return isNaN(num) ? null : num;
-        }
-        return null;
-    };
-    // Source priority mapping (higher value means preferred). snpEff (3) > dbNSFP (2) > root (1)
-    const sourcePriority = { snpeff: 3, dbnsfp: 2, root: 1 };
-    // Compute scores for each candidate.
-    let bestIndex = 0;
-    let bestScore = -Infinity;
-    candidates.forEach((c, idx) => {
-        let score = 0;
-        // High base score for NM transcripts. Smaller accession numbers yield higher score.
-        const nmNum = getNmNumber(c.transcript);
-        if (nmNum !== null) {
-            // Use a million base to emphasise NM transcripts. Subtract nmNum so that smaller numbers are preferred.
-            score += 1_000_000 - nmNum;
-        }
-        // Add moderate bonus when a protein change exists.
-        if (c.protein) {
-            score += 10_000;
-        }
-        // Subtract distance from median cDNA coordinate (if both exist). Smaller distance increases score.
-        const cc = parseCdnaCoordinate(c.cDNA);
-        if (medianCdna !== null && cc !== null) {
-            const dist = Math.abs(cc - medianCdna);
-            score -= dist;
-        }
-        // Subtract distance from median protein coordinate (if both exist).
-        const pc = parseProteinCoordinate(c.protein);
-        if (medianProt !== null && pc !== null) {
-            const dist = Math.abs(pc - medianProt);
-            score -= dist;
-        }
-        // Apply source priority multiplier. Higher priority sources add more to the score.
-        const pri = sourcePriority[c.source] || 0;
-        score += pri * 100;
-        // If target protein is specified, greatly boost candidates matching it.
-        if (targetProtGlobal && c.protein) {
-            // Compare triple‑coded and single‑letter representations.
-            // Remove the leading p. and non-alphanumeric characters from the protein string.
-            const prot = String(c.protein)
-                .replace(/^p\./i, '')
-                .replace(/[^A-Za-z0-9]/g, '')
-                .toUpperCase();
-            const triple = prot;            // e.g. VAL600GLU
-            const single = tripleToSingle(prot); // e.g. V600E
-            // A match occurs when either the triple‑coded candidate or the single‑letter
-            // form equals the target protein (also in triple‑coded form).
-            if (triple === targetProtGlobal || (single && single === targetProtGlobal)) {
-                score += 100_000_000; // huge bonus to ensure match wins
-            }
-        }
-        // Keep track of the highest scoring candidate.
-        if (score > bestScore) {
-            bestScore = score;
-            bestIndex = idx;
-        }
-    });
-    return bestIndex;
 }
 
-// Build a list of transcript candidates from the MyVariant.info annotation and select
-// the canonical transcript using selectCanonicalTranscript(). Returns an object
-// containing a transcriptsList (with canonical flag), formatted cDNAHTML,
-// formatted proteinHTML, and the canonical protein string. Only used for
-// genomic variants (when Ensembl recoder transcripts are not available).
-function buildCanonicalFromAnnotation(annotation, targetProtGlobal) {
+function sameTranscript(requested, actual) {
+    const a = String(requested || '').toUpperCase();
+    const b = String(actual || '').toUpperCase();
+    // An explicitly versioned accession must match that version.
+    return /\.\d+$/.test(a) ? a === b : a === b.replace(/\.\d+$/, '');
+}
+
+function transcriptEffect(t) {
+    if (t?.effect) return t.effect;
+    const c = String(t?.cDNA || '');
+    if (isNoncodingCdna(c) && /^c\.-\d/i.test(c)) return '5_prime_UTR_variant';
+    if (isNoncodingCdna(c) && /^c\.\*/i.test(c)) return '3_prime_UTR_variant';
+    if (/^n\./i.test(c)) return 'non_coding_transcript_variant';
+    if (isNoncodingCdna(c) && /\d[+-]\d/.test(c)) return 'intron_variant';
+    return '';
+}
+
+function isNoncodingCdna(cdna) {
+    const c = String(cdna || '');
+    if (/^n\./i.test(c)) return true;
+    const m = c.match(/^c\.([*-]?\d+(?:[+-]\d+)?)(?:_([*-]?\d+(?:[+-]\d+)?))?/i);
+    if (!m) return false;
+    if (!m[2]) return /^[*-]/.test(m[1]) || /\d[+-]\d/.test(m[1]);
+    // A range crossing the coding start/end can have a real protein effect.
+    return (m[1].startsWith('-') && m[2].startsWith('-'))
+        || (m[1].startsWith('*') && m[2].startsWith('*'));
+}
+
+// Only structured transcript records (VEP or snpEff) establish a c./p. pair.
+// Recoder hgvsc/hgvsp and dbNSFP arrays are independent, even at equal lengths.
+function transcriptsFromRecoderAllele(allele) {
+    const values = allele?.hgvsc ? [].concat(allele.hgvsc) : [];
+    return values.slice(0, 200).map(value => {
+        const { transcript, change } = splitTranscriptHgvs(value);
+        return { transcript, cDNA: change, protein: '', source: 'recoder' };
+    });
+}
+
+function transcriptsFromVep(consequences) {
+    return (consequences || []).filter(c => c?.hgvsc).map(c => {
+        const sc = splitTranscriptHgvs(c.hgvsc);
+        return {
+            transcript: sc.transcript || c.transcript_id || '',
+            cDNA: sc.change,
+            protein: splitTranscriptHgvs(c.hgvsp).change,
+            proteinAccession: splitTranscriptHgvs(c.hgvsp).transcript,
+            gene: c.gene_symbol || '',
+            effect: (c.consequence_terms || []).join(', '),
+            maneSelect: Boolean(c.mane_select),
+            canonicalSource: c.canonical === 1 || c.canonical === 'YES',
+            source: 'vep'
+        };
+    });
+}
+
+// GRCh37 VEP's "canonical" flag can prefer an extended coding isoform (PTEN
+// is one example). MANE is transcript metadata from the current gene record;
+// no variant coordinates are transferred from that GRCh38 lookup.
+const maneTranscriptCache = new Map();
+function maneSelectAccessions(geneRecord) {
+    const accessions = [];
+    for (const transcript of geneRecord?.Transcript || []) {
+        for (const mane of [].concat(transcript.MANE || [])) {
+            if (mane.type !== 'MANE_Select') continue;
+            if (mane.refseq_match) accessions.push(mane.refseq_match);
+            if (mane.id) accessions.push(mane.version ? `${mane.id}.${mane.version}` : mane.id);
+        }
+    }
+    return accessions;
+}
+
+async function fetchManeSelectAccessions(gene) {
+    const symbol = String(gene || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9-]*$/.test(symbol) || isChromosomeLikeGeneSymbol(symbol)) return [];
+    if (!maneTranscriptCache.has(symbol)) {
+        if (maneTranscriptCache.size >= 128) maneTranscriptCache.delete(maneTranscriptCache.keys().next().value);
+        const pending = (async () => {
+            try {
+                const url = `https://rest.ensembl.org/lookup/symbol/homo_sapiens/${encodeURIComponent(symbol)}?expand=1&mane=1&content-type=application/json`;
+                const response = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } }, API_TIMEOUT_MS.lookup);
+                if (!response.ok) throw new Error('MANE lookup unavailable');
+                return maneSelectAccessions(await response.json());
+            } catch {
+                maneTranscriptCache.delete(symbol);
+                return [];
+            }
+        })();
+        maneTranscriptCache.set(symbol, pending);
+    }
+    return maneTranscriptCache.get(symbol);
+}
+
+function markManeTranscripts(transcripts, accessions) {
+    return transcripts.map(t => ({ ...t,
+        maneSelect: Boolean(t.maneSelect || accessions.some(a => sameTranscript(a, t.transcript)))
+    }));
+}
+
+function selectCanonicalTranscript(candidates, targetProtein) {
+    if (!candidates?.length) return 0;
+    const rank = t => {
+        const nm = String(t.transcript || '').match(/^NM_0*(\d+)/i);
+        const proteinMatch = targetProtein && sameProteinChange(
+            parseProteinChange(t.protein), parseProteinChange(targetProtein));
+        // When MANE is unavailable keep the established RefSeq accession
+        // preference, including UTRs; a longer CDS is not a clinical default.
+        return [proteinMatch ? 1 : 0, t.maneSelect ? 1 : 0,
+            nm ? 1 : 0, nm ? -Number(nm[1]) : 0, t.canonicalSource ? 1 : 0,
+            ({ vep: 4, snpeff: 3, recoder: 2, root: 1 })[t.source] || 0,
+            t.protein ? 1 : 0];
+    };
+    let best = 0;
+    candidates.forEach((t, i) => {
+        const a = rank(t), b = rank(candidates[best]);
+        const difference = a.map((v, j) => v - b[j]).find(v => v !== 0);
+        if (difference > 0) best = i;
+    });
+    return best;
+}
+
+function selectTranscriptForQuery(candidates, query = '') {
+    if (!candidates.length) return 0;
+    const intent = parseMyVariantQueryIntent(query);
+    const accession = /^(?:NM_|NR_|ENST|LRG_)/i.test(intent.gene) ? intent.gene : '';
+    const exact = candidates.findIndex(t => (!accession || sameTranscript(accession, t.transcript))
+        && intent.cdnaTarget && t.cDNA.toLowerCase() === intent.cdnaTarget);
+    if (exact >= 0) {
+        // Multiple transcripts can have the same c. change. Honour an explicit
+        // accession; otherwise prefer MANE/canonical among those exact matches.
+        const matches = candidates.map((t, i) => ({ ...t, originalIndex: i }))
+            .filter(t => (!accession || sameTranscript(accession, t.transcript))
+                && t.cDNA.toLowerCase() === intent.cdnaTarget);
+        return matches[selectCanonicalTranscript(matches)].originalIndex;
+    }
+    const protein = intent.proteinTarget?.triple || intent.proteinTarget?.single;
+    return selectCanonicalTranscript(candidates, protein);
+}
+
+function buildTranscriptDisplay(candidates, query = '') {
+    const unique = Array.from(new Map(candidates.map(t => {
+        const safe = { ...t, protein: isNoncodingCdna(t.cDNA) ? '' : (t.protein || '') };
+        return [`${safe.transcript}|${safe.cDNA}|${safe.protein}`, safe];
+    })).values());
+    const index = selectTranscriptForQuery(unique, query);
+    const transcriptsList = unique.map((t, i) => ({ ...t, canonical: i === index }));
+    const selected = transcriptsList[index] || null;
+    return {
+        transcriptsList, selected,
+        // Downstream searches consume only the selected transcript's notation.
+        cDNAHTML: selected?.cDNA ? `<strong>${escapeHtml(selected.cDNA)}</strong>` : '',
+        canonicalProtein: selected?.protein || ''
+    };
+}
+
+function buildCanonicalFromAnnotation(annotation, targetProtein, query = '') {
     const candidates = [];
-    if (!annotation) return { transcriptsList: [], cDNAHTML: '', proteinHTML: '', canonicalProtein: '' };
-    // Gather candidates from snpEff annotations (preferred source).
-    if (annotation.snpeff && annotation.snpeff.ann) {
-        const annList = Array.isArray(annotation.snpeff.ann) ? annotation.snpeff.ann : [annotation.snpeff.ann];
-        for (const ann of annList) {
-            if (ann && ann.hgvs_c) {
-                const txId = ann.feature_id || '';
-                const cDNAVal = ann.hgvs_c;
-                const protVal = ann.hgvs_p || '';
-                candidates.push({ transcript: txId, cDNA: cDNAVal, protein: protVal, source: 'snpeff' });
-            }
-        }
+    for (const ann of [].concat(annotation?.snpeff?.ann || [])) {
+        if (ann?.hgvs_c) candidates.push({
+            transcript: ann.feature_id || '', cDNA: ann.hgvs_c,
+            protein: ann.hgvs_p || '', effect: ann.effect || '',
+            gene: ann.genename || ann.gene_name || '', source: 'snpeff'
+        });
     }
-    // Gather candidates from dbNSFP hgvsc/hgvsp arrays. These entries are BARE
-    // c./p. strings with no accession ("c.1799T>A"), so an accession-less entry
-    // is the cDNA itself — splitting on ':' used to shove it into the transcript
-    // slot and leave cDNA empty. hgvsp is index-paired only when the arrays
-    // actually align; dbNSFP's hgvsc and hgvsp can have different lengths.
-    if (annotation.dbnsfp && annotation.dbnsfp.hgvsc) {
-        const hgvsc = Array.isArray(annotation.dbnsfp.hgvsc) ? annotation.dbnsfp.hgvsc : [annotation.dbnsfp.hgvsc];
-        const hgvsp = annotation.dbnsfp.hgvsp ? (Array.isArray(annotation.dbnsfp.hgvsp) ? annotation.dbnsfp.hgvsp : [annotation.dbnsfp.hgvsp]) : [];
-        const aligned = hgvsp.length === hgvsc.length;
-        for (let i = 0; i < hgvsc.length; i++) {
-            const sc = hgvsc[i];
-            if (!sc) continue;
-            const scStr = String(sc);
-            const scColon = scStr.indexOf(':');
-            const txId = scColon !== -1 ? scStr.slice(0, scColon) : '';
-            const cpart = scColon !== -1 ? scStr.slice(scColon + 1) : scStr;
-            let ppart = '';
-            if (aligned && hgvsp[i]) {
-                const spStr = String(hgvsp[i]);
-                const spColon = spStr.indexOf(':');
-                ppart = spColon !== -1 ? spStr.slice(spColon + 1) : spStr;
-            }
-            candidates.push({ transcript: txId, cDNA: cpart, protein: ppart, source: 'dbnsfp' });
-        }
+    for (const value of [].concat(annotation?.hgvsc || [], annotation?.clinvar?.hgvs?.coding || [], annotation?.dbnsfp?.hgvsc || [])) {
+        const { transcript, change } = splitTranscriptHgvs(value);
+        if (change) candidates.push({ transcript, cDNA: change, protein: '', source: 'root' });
     }
-    // Gather candidates from root-level hgvsc/hgvsp fields. Only include those not already captured above.
-    if (annotation.hgvsc) {
-        const hgvscList = Array.isArray(annotation.hgvsc) ? annotation.hgvsc : [annotation.hgvsc];
-        const hgvspList = annotation.hgvsp ? (Array.isArray(annotation.hgvsp) ? annotation.hgvsp : [annotation.hgvsp]) : [];
-        for (let i = 0; i < hgvscList.length; i++) {
-            const h = hgvscList[i];
-            if (!h) continue;
-            const parts = String(h).split(':');
-            const txId = parts[0] || '';
-            const cpart = parts.slice(1).join(':');
-            let ppart = '';
-            if (hgvspList[i]) {
-                const pparts = String(hgvspList[i]).split(':');
-                ppart = pparts.slice(1).join(':');
-            }
-            candidates.push({ transcript: txId, cDNA: cpart, protein: ppart, source: 'root' });
-        }
-    }
-    if (candidates.length === 0) {
-        return { transcriptsList: [], cDNAHTML: '', proteinHTML: '', canonicalProtein: '' };
-    }
-    // Deduplicate candidates by transcript ID + cDNA + protein. When duplicates exist from
-    // multiple sources, retain only the candidate from the highest priority source.
-    const unique = [];
-    const seen = {};
-    const sourceRank = { snpeff: 3, dbnsfp: 2, root: 1 };
-    for (const cand of candidates) {
-        const key = `${cand.transcript}|${cand.cDNA}|${cand.protein}`;
-        if (!seen[key]) {
-            seen[key] = cand;
-        } else {
-            // Replace existing candidate only if new one has higher source rank.
-            const existing = seen[key];
-            if ((sourceRank[cand.source] || 0) > (sourceRank[existing.source] || 0)) {
-                seen[key] = cand;
-            }
-        }
-    }
-    for (const key in seen) {
-        unique.push(seen[key]);
-    }
-    // Determine the canonical index among unique candidates.
-    const canonicalIdx = selectCanonicalTranscript(unique, targetProtGlobal);
-    // Mark canonical flag and build formatted strings.
-    let canonicalProtein = '';
-    const cDNAHTML = unique
-        .map((c, idx) => {
-            if (idx === canonicalIdx) {
-                return `<strong>${c.cDNA}</strong>`;
-            }
-            return c.cDNA;
-        })
-        .join(', ');
-    const proteinHTML = unique
-        .map((c, idx) => {
-            if (!c.protein) return '';
-            if (idx === canonicalIdx) {
-                return `<strong>${c.protein}</strong>`;
-            }
-            return c.protein;
-        })
-        .filter(Boolean)
-        .join(', ');
-    // Determine canonical protein string (if any). Prefer the protein from the canonical candidate
-    // if present; otherwise use the first available protein among all candidates.
-    if (unique[canonicalIdx] && unique[canonicalIdx].protein) {
-        canonicalProtein = unique[canonicalIdx].protein;
-    } else {
-        const firstProt = unique.find(c => c.protein);
-        if (firstProt) canonicalProtein = firstProt.protein;
-    }
-    // Set canonical property on unique candidates.
-    unique.forEach((c, idx) => { c.canonical = (idx === canonicalIdx); });
-    return { transcriptsList: unique, cDNAHTML, proteinHTML, canonicalProtein };
+    return buildTranscriptDisplay(candidates, query || (targetProtein ? `GENE:p.${targetProtein}` : ''));
 }
 
 // Convert hgvsg notation (e.g. "NC_000001.11:g.230710048A>C" or "NC_000001.11:g.230710047_230710048delinsGA")
@@ -5142,7 +5087,11 @@ async function fetchMyVariant(variant) {
         err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
         throw err;
     }
-    return response.json();
+    const annotation = await response.json();
+    if (normalizedGenomicId(variant) && normalizedGenomicId(annotation?._id) !== normalizedGenomicId(variant)) {
+        throw new Error('MyVariant returned an annotation for a different genomic allele.');
+    }
+    return annotation;
 }
 
 // Fetch variant consequence information from the Ensembl VEP HGVS endpoint on the GRCh37 server.
@@ -5256,7 +5205,7 @@ async function fetchVepHgvsHg19(variant) {
     // NP_005476.4:p.Lys18del) match the nomenclature users expect. Fall back to the default
     // Ensembl transcript set when RefSeq returns no transcript consequences.
     const requestVep = async (useRefseq) => {
-        const params = useRefseq ? 'hgvs=1&refseq=1' : 'hgvs=1';
+        const params = useRefseq ? 'hgvs=1&refseq=1&mane=1&canonical=1' : 'hgvs=1&mane=1&canonical=1';
         const url = `https://grch37.rest.ensembl.org/vep/human/hgvs/${encodeURIComponent(hgvs)}?content-type=application/json&${params}`;
         const response = await fetchWithRetry(url, {
             headers: {
@@ -5344,7 +5293,7 @@ function getHitGenesUpper(hit) {
     const genes = new Set();
     const addGene = (g) => {
         if (!g) return;
-        genes.add(String(g).trim().toUpperCase());
+        for (const value of [].concat(g)) genes.add(String(value).trim().toUpperCase());
     };
     addGene(hit?.dbnsfp?.genename);
     addGene(hit?.clinvar?.gene?.symbol);
@@ -5399,8 +5348,110 @@ function extractCdnaNotationsFromHit(hit) {
     return vals;
 }
 
+function selectRecoderAlleles(data, query) {
+    const intent = parseMyVariantQueryIntent(query);
+    const accession = /^(?:NM_|NR_|ENST|LRG_)/i.test(intent.gene) ? intent.gene : '';
+    const alleles = (data || []).flatMap(entry => Object.values(entry || {}))
+        .filter(v => v && typeof v === 'object' && !Array.isArray(v) && (v.hgvsg || v.spdi));
+    if (data?.__vsFallback) return alleles; // exact NCBI HGVS contextual mapping
+    if (isGenomicVariant(query)) {
+        return alleles.filter(v => String(v.input || '').toLowerCase() === query.toLowerCase());
+    }
+    return alleles.filter(v => {
+        if (intent.cdnaTarget) return [].concat(v.hgvsc || []).some(value => {
+            const h = splitTranscriptHgvs(value);
+            return (!accession || sameTranscript(accession, h.transcript))
+                && normalizeCdnaForMatch(h.change) === normalizeCdnaForMatch(intent.cdnaTarget);
+        });
+        if (intent.proteinTarget) return [].concat(v.hgvsp || []).some(value => sameProteinChange(
+            parseProteinChange(splitTranscriptHgvs(value).change),
+            parseProteinChange(intent.proteinTarget.triple || intent.proteinTarget.single)));
+        return String(v.input || '').toLowerCase() === query.toLowerCase();
+    });
+}
+
+function recoderTranscriptsForGenomic(data, genomic) {
+    const id = normalizedGenomicId(genomic);
+    for (const entry of data || []) {
+        for (const allele of Object.values(entry || {})) {
+            if (!allele || typeof allele !== 'object') continue;
+            const ids = [].concat(allele.hgvsg || []).map(normalizedGenomicId);
+            for (const spdi of [].concat(allele.spdi || [])) {
+                if (assemblyFromNcAccession(spdi) !== 'GRCh37') continue;
+                try { ids.push(normalizedGenomicId(convertSpdiToMyVariant(spdi))); } catch {}
+            }
+            if (id && ids.includes(id)) return transcriptsFromRecoderAllele(allele);
+        }
+    }
+    return [];
+}
+
+function assertResolvedVariantIdentity(query, resolved, annotation) {
+    const requested = parseGenomicHgvs(query);
+    const actual = parseGenomicHgvs(resolved);
+    // Substitutions have one unambiguous coordinate/REF/ALT tuple. Indels can
+    // legitimately move in repeats through authoritative HGVS normalisation.
+    if (requested?.type === 'sub' && normalizedGenomicId(query) !== normalizedGenomicId(resolved)) {
+        throw new Error('Variant identity mismatch: the resolved allele does not match the genomic input.');
+    }
+    if (actual && annotation?._id && normalizedGenomicId(annotation._id)
+        && normalizedGenomicId(annotation._id) !== normalizedGenomicId(resolved)) {
+        throw new Error('Variant identity mismatch: annotation belongs to a different genomic allele.');
+    }
+}
+
+function normalizedGenomicId(value) {
+    const raw = String(value || '').trim();
+    // MyVariant IDs are GRCh37. Never compare a GRCh38 NC_ coordinate as hg19.
+    if (/^NC_/i.test(raw) && assemblyFromNcAccession(raw) !== 'GRCh37') return '';
+    const hgvs = /^NC_/i.test(raw) ? ncGenomicToChr(raw) : raw;
+    return isGenomicVariant(hgvs || '') ? hgvs.toLowerCase().replace(/\s/g, '') : '';
+}
+
+function hitMatchesVariantQuery(hit, identifier, expectedGenomic = '') {
+    if (!hit) return false;
+    const hitId = normalizedGenomicId(hit._id);
+    const expected = normalizedGenomicId(expectedGenomic);
+    if (expected && hitId !== expected) return false;
+    const genomic = normalizedGenomicId(identifier);
+    if (genomic) return hitId === genomic;
+    const intent = parseMyVariantQueryIntent(identifier);
+    if (/^rs\d+$/i.test(identifier)) {
+        return [].concat(hit.dbsnp?.rsid || []).some(rs => String(rs).toLowerCase() === identifier.toLowerCase());
+    }
+    if (!intent.gene || (!intent.cdnaTarget && !intent.proteinTarget)) return false;
+    const accession = /^(?:N[MRP]_|ENS[TP]|LRG_)/i.test(intent.gene) ? intent.gene : '';
+    if (!accession && !getHitGenesUpper(hit).has(intent.gene)) return false;
+    if (intent.cdnaTarget) {
+        const values = extractCdnaNotationsFromHit(hit).concat([].concat(hit.clinvar?.hgvs?.coding || []));
+        // snpEff carries its accession separately from hgvs_c.
+        for (const ann of [].concat(hit.snpeff?.ann || [])) {
+            if (ann.feature_id && ann.hgvs_c) values.push(`${ann.feature_id}:${ann.hgvs_c}`);
+        }
+        return values.some(value => {
+            const h = splitTranscriptHgvs(value);
+            return h.change.toLowerCase() === intent.cdnaTarget
+                && (!accession || sameTranscript(accession, h.transcript));
+        });
+    }
+    const target = intent.proteinTarget.triple || intent.proteinTarget.single;
+    return extractProteinNotationsFromHit(hit).concat([].concat(hit.clinvar?.hgvs?.protein || []))
+        .some(value => {
+            const h = splitTranscriptHgvs(value);
+            return (!accession || sameTranscript(accession, h.transcript))
+                && sameProteinChange(parseProteinChange(h.change), parseProteinChange(target));
+        });
+}
+
+function selectMyVariantHit(hits, identifier, expectedGenomic = '') {
+    const matches = (hits || []).filter(hit => hitMatchesVariantQuery(hit, identifier, expectedGenomic));
+    // Richer annotations may break ties only AFTER allele identity is established.
+    matches.sort((a, b) => Number(Boolean(b.clinvar)) - Number(Boolean(a.clinvar)));
+    return matches[0] || null;
+}
+
 // Query MyVariant.info by rsID or other variant identifier. Returns the best matching hit when possible.
-async function queryMyVariantById(identifier) {
+async function queryMyVariantById(identifier, expectedGenomic = '') {
     const encoded = encodeURIComponent(identifier);
     const url = `https://myvariant.info/v1/query?q=${encoded}&size=20`;
     const response = await fetchWithRetry(url, {}, API_TIMEOUT_MS.myvariant, {
@@ -5415,42 +5466,7 @@ async function queryMyVariantById(identifier) {
         throw err;
     }
     const data = await response.json();
-    if (data && data.hits && data.hits.length > 0) {
-        const intent = parseMyVariantQueryIntent(identifier);
-        const scored = data.hits.map((hit, idx) => {
-            let score = 0;
-            const id = String(hit?._id || '').trim().toLowerCase();
-            const rawId = String(identifier || '').trim().toLowerCase();
-            if (id && rawId && id === rawId) score += 1_000_000;
-            const hitGenes = getHitGenesUpper(hit);
-            if (intent.gene && hitGenes.has(intent.gene)) score += 50_000;
-            if (intent.proteinTarget) {
-                const protVals = extractProteinNotationsFromHit(hit);
-                for (const p of protVals) {
-                    const parsed = parseProteinTargetFromQueryVariant(p);
-                    if (!parsed) continue;
-                    if (intent.proteinTarget.triple && parsed.triple && parsed.triple === intent.proteinTarget.triple) {
-                        score += 500_000;
-                    } else if (intent.proteinTarget.single && parsed.single && parsed.single === intent.proteinTarget.single) {
-                        score += 350_000;
-                    }
-                }
-            }
-            if (intent.cdnaTarget) {
-                const cdnaVals = extractCdnaNotationsFromHit(hit);
-                if (cdnaVals.some(v => v.endsWith(`:${intent.cdnaTarget}`) || v === intent.cdnaTarget)) {
-                    score += 300_000;
-                }
-            }
-            // Prefer richer records on ties.
-            if (hit?.clinvar) score += 10;
-            if (hit?.dbnsfp) score += 10;
-            return { idx, score, hit };
-        });
-        scored.sort((a, b) => b.score - a.score || a.idx - b.idx);
-        return scored[0].hit;
-    }
-    return null;
+    return selectMyVariantHit(data?.hits, identifier, expectedGenomic);
 }
 
 // Build summary table rows from annotation object.
@@ -5882,118 +5898,8 @@ const initVariantSearchUi = () => {
         try {
             const recResults = await fetchVariantRecoder(q);
             lastRecoderResult = { query: q, data: recResults, error: null };
-            // The Ensembl variant_recoder response is an array with a single object.
-            // Historically the transcripts were stored under recResults[0].A, but newer
-            // versions use lettered keys (A, B, C, ... or even G) depending on the
-            // mapping category. Each of these objects can contain hgvsc/hgvsp arrays.
-            if (Array.isArray(recResults) && recResults.length > 0) {
-                const recEntry = recResults[0];
-                /*
-                 * Ensembl's variant_recoder may return multiple sub-objects keyed by different alternate
-                 * sequences (e.g. duplication or insertion sequences) when a query maps to more than one
-                 * genomic event. In these cases the first object is not guaranteed to correspond to the
-                 * user's intended variant. To improve accuracy, attempt to select the sub-object that
-                 * contains a transcript whose cDNA exactly matches the user's query (for c. inputs) or,
-                 * failing that, that contains a protein change matching a p. input. If neither match,
-                 * fall back to the legacy logic of picking the first object with hgvsc/hgvsp data.
-                 */
-                let objWithTranscripts = null;
-                // Extract the variant part from the query (e.g. "c.181_189dup" from "MSH3:c.181_189dup").
-                let queryVariantPart = null;
-                const qParts = String(q).split(':');
-                if (qParts.length > 1) {
-                    // Use everything after the first colon as the variant part
-                    queryVariantPart = qParts.slice(1).join(':').trim().toLowerCase();
-                }
-                // If this is a genomic variant (g.) with an insertion (ins) or duplication, attempt to
-                // extract the inserted sequence and match it against the keys of the recoder response. For
-                // example, "chr5:g.79950735_79950736insGCAGCGCCC" should match the "GCAGCGCCC" key.
-                if (!objWithTranscripts && queryVariantPart && /^g\./i.test(queryVariantPart)) {
-                    // Attempt to capture the inserted sequence following "ins".
-                    const mIns = queryVariantPart.match(/ins([A-Za-z]+)/i);
-                    if (mIns) {
-                        const altSeq = mIns[1].toLowerCase();
-                        for (const [key, subVal] of Object.entries(recEntry)) {
-                            if (typeof key === 'string' && key.toLowerCase() === altSeq && subVal && typeof subVal === 'object') {
-                                objWithTranscripts = subVal;
-                                break;
-                            }
-                        }
-                    }
-                }
-                // First pass: look for a sub-object whose hgvsc or hgvsp array contains the query variant part.
-                if (!objWithTranscripts && queryVariantPart) {
-                    for (const subVal of Object.values(recEntry)) {
-                        if (!subVal || typeof subVal !== 'object') continue;
-                        const scs = Array.isArray(subVal.hgvsc) ? subVal.hgvsc : (subVal.hgvsc ? [subVal.hgvsc] : []);
-                        const sps = Array.isArray(subVal.hgvsp) ? subVal.hgvsp : (subVal.hgvsp ? [subVal.hgvsp] : []);
-                        // Check if any cDNA matches the variant part exactly (case-insensitive)
-                        let matchFound = false;
-                        for (const sc of scs) {
-                            const cPart = String(sc).split(':').slice(1).join(':').trim().toLowerCase();
-                            if (cPart === queryVariantPart) {
-                                matchFound = true;
-                                break;
-                            }
-                        }
-                        // Check for protein match if no cDNA match yet and query looks like a protein variant
-                        if (!matchFound && /^p\./i.test(queryVariantPart)) {
-                            for (const sp of sps) {
-                                const pPart = String(sp).split(':').slice(1).join(':').trim().toLowerCase();
-                                if (pPart === queryVariantPart) {
-                                    matchFound = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if (matchFound) {
-                            objWithTranscripts = subVal;
-                            break;
-                        }
-                    }
-                }
-                // If no direct match found, prefer the traditional "A" key if it contains transcript data.
-                if (!objWithTranscripts && recEntry.A && typeof recEntry.A === 'object' && (recEntry.A.hgvsc || recEntry.A.hgvsp)) {
-                    objWithTranscripts = recEntry.A;
-                }
-                // Otherwise pick the first sub-object that has hgvsc/hgvsp arrays.
-                if (!objWithTranscripts) {
-                    for (const subVal of Object.values(recEntry)) {
-                        if (subVal && typeof subVal === 'object' && (subVal.hgvsc || subVal.hgvsp)) {
-                            objWithTranscripts = subVal;
-                            break;
-                        }
-                    }
-                }
-                if (objWithTranscripts) {
-                    const hgvscs = Array.isArray(objWithTranscripts.hgvsc) ? objWithTranscripts.hgvsc : (objWithTranscripts.hgvsc ? [objWithTranscripts.hgvsc] : []);
-                    const hgvsp = Array.isArray(objWithTranscripts.hgvsp) ? objWithTranscripts.hgvsp : (objWithTranscripts.hgvsp ? [objWithTranscripts.hgvsp] : []);
-                    const len = Math.max(hgvscs.length, hgvsp.length);
-                    const list = [];
-                    // Limit the number of transcripts we process to avoid freezing the UI on variants with
-                    // extremely large transcript sets (e.g. TP53). We keep the first 200 entries.
-                    const maxEntries = 200;
-                    for (let i = 0; i < Math.min(len, maxEntries); i++) {
-                        const sc = hgvscs[i];
-                        const sp = hgvsp[i];
-                        if (sc) {
-                            const parts = String(sc).split(':');
-                            const transcriptId = parts[0];
-                            // Join remaining parts for cDNA and trim whitespace. Some variant_recoder
-                            // responses include a space after the colon (e.g. "NM_003620.4: c.1518del"), so
-                            // trimming ensures consistent matching.
-                            const cpart = parts.slice(1).join(':').trim();
-                            let prot = '';
-                            if (sp) {
-                                const pparts = String(sp).split(':');
-                                prot = pparts.slice(1).join(':').trim();
-                            }
-                            list.push({ transcript: transcriptId, cDNA: cpart, protein: prot });
-                        }
-                    }
-                    return list;
-                }
-            }
+            const allele = selectRecoderAlleles(recResults, q)[0];
+            if (allele) return transcriptsFromRecoderAllele(allele);
         } catch (err) {
             // If the recoder request fails, fall through and return an empty array.
             // Record it though: an empty transcript list because Ensembl is down
@@ -6799,13 +6705,6 @@ const initVariantSearchUi = () => {
                 targetCdnaGlobal = cdMatch[0].trim().toLowerCase();
             }
         }
-        // Record whether the user's input was genomic (g.) prior to any conversion. We will
-        // use this flag later to decide whether to display cDNA/protein from the Ensembl
-        // variant recoder or fall back to MyVariant.info annotations.  This avoids a bug
-        // where we accidentally treat a non-genomic input (e.g. BRAF V600E) as genomic
-        // after conversion to g. notation and therefore ignore recoder-derived transcripts.
-        const originalIsGenomic = isGenomicVariant(query);
-
         // Fetch transcript list via variant_recoder in parallel to other operations.  Always
         // attempt this call regardless of whether the input is genomic, cDNA or protein.
         // The variant_recoder can still return useful transcript annotations for complex
@@ -6858,6 +6757,11 @@ const initVariantSearchUi = () => {
             // array is defined outside of the recoder loop so that it can be referenced later, e.g. when
             // free‑text MyVariant searches fail and we want to try alternate g. notations such as delins.
             let candidateVariants = [];
+            const vepByVariant = new Map();
+            const fetchLookupVep = variant => {
+                if (!vepByVariant.has(variant)) vepByVariant.set(variant, fetchVepHgvsHg19(variant));
+                return vepByVariant.get(variant);
+            };
 
             // If query is already in genomic HGVS format (chrN:g.posRef>Alt), try fetching directly.
             if (isGenomicVariant(query)) {
@@ -6878,18 +6782,8 @@ const initVariantSearchUi = () => {
                     if (errDirectGenomic && errDirectGenomic.retryable && !errDirectGenomic.notFound) {
                         LookupProgress.markUpstreamOutage('myvariant');
                     }
-                    console.log('[DEBUG] Direct genomic fetch failed, attempting liftover and retry:', errDirectGenomic);
-                    try {
-                        const lifted = await liftoverHg38ToHg19(query);
-                        if (lifted !== query) {
-                            console.log('[DEBUG] Liftover of genomic variant:', query, '->', lifted);
-                            gVariant = lifted;
-                            annotation = await fetchMyVariant(lifted);
-                            console.log('[DEBUG] Fetch after liftover succeeded for', lifted);
-                        }
-                    } catch (liftoverErr) {
-                        console.log('[DEBUG] Liftover and fetch after liftover failed:', liftoverErr);
-                    }
+                    // A miss does not change the declared input assembly or allele.
+                    // Explicit GRCh38 input was already converted above.
                 }
             }
 
@@ -7012,22 +6906,18 @@ const initVariantSearchUi = () => {
                     // (GRCh38) entries each cost an Ensembl /map round-trip and used to
                     // run strictly in series.
                     const conversions = [];
-                    for (const item of recoderData) {
-                        for (const key in item) {
-                            const sub = item[key];
-                            if (!sub) continue;
-                            // hgvsg / spdi entries may be a string or an array
-                            if (sub.hgvsg) {
-                                const hgvsgList = Array.isArray(sub.hgvsg) ? sub.hgvsg : [sub.hgvsg];
-                                for (const hgvsg of hgvsgList) {
-                                    conversions.push(convertCandidate(hgvsg, convertHgvsgToMyVariant, 'hgvsg'));
-                                }
+                    for (const sub of selectRecoderAlleles(recoderData, query)) {
+                        // hgvsg / spdi entries may be a string or an array
+                        if (sub.hgvsg) {
+                            const hgvsgList = Array.isArray(sub.hgvsg) ? sub.hgvsg : [sub.hgvsg];
+                            for (const hgvsg of hgvsgList) {
+                                conversions.push(convertCandidate(hgvsg, convertHgvsgToMyVariant, 'hgvsg'));
                             }
-                            if (sub.spdi) {
-                                const spdiList = Array.isArray(sub.spdi) ? sub.spdi : [sub.spdi];
-                                for (const spdi of spdiList) {
-                                    conversions.push(convertCandidate(spdi, convertSpdiToMyVariant, 'SPDI'));
-                                }
+                        }
+                        if (sub.spdi) {
+                            const spdiList = Array.isArray(sub.spdi) ? sub.spdi : [sub.spdi];
+                            for (const spdi of spdiList) {
+                                conversions.push(convertCandidate(spdi, convertSpdiToMyVariant, 'SPDI'));
                             }
                         }
                     }
@@ -7066,65 +6956,17 @@ const initVariantSearchUi = () => {
                             firstAnn = ann;
                             selectedVar = cand;
                         }
-                        // Determine whether this annotation matches the desired cDNA or protein change.
-                        let cdnaMatch = false;
-                        if (typeof targetCdnaGlobal !== 'undefined' && targetCdnaGlobal) {
-                            // Check dbnsfp hgvsc list
-                            if (ann.dbnsfp && ann.dbnsfp.hgvsc) {
-                                const scList = Array.isArray(ann.dbnsfp.hgvsc) ? ann.dbnsfp.hgvsc : [ann.dbnsfp.hgvsc];
-                                for (const h of scList) {
-                                    const vPart = String(h).split(':').slice(1).join(':').trim().toLowerCase();
-                                    if (vPart === targetCdnaGlobal) {
-                                        cdnaMatch = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            // Check snpEff annotations (hgvs_c)
-                            if (!cdnaMatch && ann.snpeff && ann.snpeff.ann) {
-                                const annList = Array.isArray(ann.snpeff.ann) ? ann.snpeff.ann : [ann.snpeff.ann];
-                                for (const a of annList) {
-                                    if (a.hgvs_c && String(a.hgvs_c).trim().toLowerCase() === targetCdnaGlobal) {
-                                        cdnaMatch = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            // Check dbsnp gene RNA HGVS strings
-                            if (!cdnaMatch && ann.dbsnp && ann.dbsnp.gene) {
-                                const geneList = Array.isArray(ann.dbsnp.gene) ? ann.dbsnp.gene : [ann.dbsnp.gene];
-                                for (const g of geneList) {
-                                    if (g.rnas) {
-                                        const rnas = Array.isArray(g.rnas) ? g.rnas : [g.rnas];
-                                        for (const r of rnas) {
-                                            if (r.hgvs) {
-                                                const vPart = String(r.hgvs).split(':').slice(1).join(':').replace(/=/g,'').trim().toLowerCase();
-                                                if (vPart === targetCdnaGlobal) {
-                                                    cdnaMatch = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if (cdnaMatch) break;
-                                }
-                            }
-                        }
-                        let matchProt = true;
-                        if (targetProtGlobal) {
-                            const annStr = JSON.stringify(ann).toUpperCase();
-                            const tripleSearch = targetProtGlobal;
-                            const singleSearch = tripleToSingle(tripleSearch);
-                            matchProt = annStr.includes(tripleSearch) || (singleSearch && annStr.includes(singleSearch));
-                        }
-                        // Prioritise cDNA matches over protein matches; if cdnaMatch true, use this candidate.
-                        if (cdnaMatch || matchProt) {
+                        const needsTranscriptMatch = Boolean(targetCdnaGlobal || targetProtGlobal);
+                        if (!needsTranscriptMatch || hitMatchesVariantQuery(ann, query)) {
                             selectedAnn = ann;
                             selectedVar = cand;
                             break;
                         }
                     }
-                    if (!selectedAnn && firstAnn) {
+                    // The recoder can resolve an exact HGVS expression even when
+                    // MyVariant omits that transcript's annotation. Its mapped
+                    // genomic allele remains authoritative, not a text search hit.
+                    if (!selectedAnn && firstAnn && uniqueCandidates.length === 1) {
                         selectedAnn = firstAnn;
                     }
                     if (selectedAnn) {
@@ -7150,43 +6992,8 @@ const initVariantSearchUi = () => {
                 // recoderData. This covers cases where getTranscriptsList failed but recoderData exists.
                 if ((!transcriptsFromRecoder || transcriptsFromRecoder.length === 0) && recoderData && recoderData.length > 0) {
                     try {
-                        const recEntry = recoderData[0];
-                        let objWithTranscripts = null;
-                        if (recEntry.A && typeof recEntry.A === 'object' && (recEntry.A.hgvsc || recEntry.A.hgvsp)) {
-                            objWithTranscripts = recEntry.A;
-                        } else {
-                            for (const [subKey, subVal] of Object.entries(recEntry)) {
-                                if (subVal && typeof subVal === 'object' && (subVal.hgvsc || subVal.hgvsp)) {
-                                    objWithTranscripts = subVal;
-                                    break;
-                                }
-                            }
-                        }
-                        if (objWithTranscripts) {
-                            const hgvscs = Array.isArray(objWithTranscripts.hgvsc) ? objWithTranscripts.hgvsc : (objWithTranscripts.hgvsc ? [objWithTranscripts.hgvsc] : []);
-                            const hgvsp = Array.isArray(objWithTranscripts.hgvsp) ? objWithTranscripts.hgvsp : (objWithTranscripts.hgvsp ? [objWithTranscripts.hgvsp] : []);
-                            const len = Math.max(hgvscs.length, hgvsp.length);
-                            const list = [];
-                            const maxEntries = 200;
-                            for (let i = 0; i < Math.min(len, maxEntries); i++) {
-                                const sc = hgvscs[i];
-                                const sp = hgvsp[i];
-                                if (sc) {
-                                    const parts = String(sc).split(':');
-                                    const transcriptId = parts[0];
-                                    const cpart = parts.slice(1).join(':');
-                                    let prot = '';
-                                    if (sp) {
-                                        const pparts = String(sp).split(':');
-                                        prot = pparts.slice(1).join(':');
-                                    }
-                                    list.push({ transcript: transcriptId, cDNA: cpart, protein: prot });
-                                }
-                            }
-                            if (list.length > 0) {
-                                transcriptsFromRecoder = list;
-                            }
-                        }
+                        const allele = selectRecoderAlleles(recoderData, query)[0];
+                        if (allele) transcriptsFromRecoder = transcriptsFromRecoderAllele(allele);
                     } catch {
                         // ignore errors during extraction
                     }
@@ -7222,12 +7029,12 @@ const initVariantSearchUi = () => {
                         const canonical = transcriptsFromRecoder[canonicalIdx];
                         if (canonical && canonical.transcript && canonical.cDNA) {
                             const transcriptQuery = `${canonical.transcript}:${canonical.cDNA}`;
-                            let hit = await queryMyVariantById(transcriptQuery);
+                            let hit = await queryMyVariantById(transcriptQuery, gVariant);
                             console.log('[DEBUG] Transcript‑level MyVariant search for', transcriptQuery, 'returned', hit);
                             // If no hit and there is a space or colon, try replacing colon with space as fallback
                             if (!hit && transcriptQuery.includes(':')) {
                                 const altQuery = transcriptQuery.replace(/:/g, ' ');
-                                hit = await queryMyVariantById(altQuery);
+                                hit = await queryMyVariantById(altQuery, gVariant);
                                 console.log('[DEBUG] Transcript‑level MyVariant search for', altQuery, 'returned', hit);
                             }
                             if (hit && hit._id) {
@@ -7259,11 +7066,11 @@ const initVariantSearchUi = () => {
                         // appears to be an accession (NC_), treat it as unreliable.  Prefer the
                         // gene hint captured from the user's original input, if available.
                         const looksLikeChrom = geneName && /^CHR[0-9XYMT]+$/i.test(geneName);
-                        const looksLikeAccession = geneName && /^NC_/.test(geneName);
+                        const looksLikeAccession = geneName && /^(?:N[CMRP]_\d|ENS[GPT]\d|LRG_\d)/.test(geneName);
                         if ((looksLikeChrom || looksLikeAccession || !geneName) && geneHintGlobal) {
                             geneName = geneHintGlobal;
                         }
-                        if (geneName) {
+                        if (geneName && !/^(?:N[CMRP]_\d|ENS[GPT]\d|LRG_\d)/.test(geneName)) {
                             annotation.dbnsfp = { genename: geneName };
                         }
                         // MyVariant.info has nothing for this variant, so the summary would
@@ -7272,7 +7079,7 @@ const initVariantSearchUi = () => {
                         // rather than leaving the field blank. It also reports the genomic
                         // location, which recovers g. when the recoder gave us no candidate.
                         try {
-                            const vepRes = await fetchVepHgvsHg19(isGenomicVariant(gVariant) ? gVariant : query);
+                            const vepRes = await fetchLookupVep(isGenomicVariant(gVariant) ? gVariant : query);
                             if (vepRes && vepRes.mostSevere) {
                                 annotation.cadd = Object.assign({}, annotation.cadd, { consequence: vepRes.mostSevere });
                             }
@@ -7325,7 +7132,7 @@ const initVariantSearchUi = () => {
                                 try {
                                     // Use the currently normalised gVariant if available; otherwise fall back to the original query.
                                     const hgvsForVep = gVariant || query;
-                                    const vepRes = await fetchVepHgvsHg19(hgvsForVep);
+                                    const vepRes = await fetchLookupVep(hgvsForVep);
                                     const vepConsequences = vepRes.consequences || [];
                                     LookupProgress.step('vep', vepConsequences.length ? 'ok' : 'empty',
                                         vepConsequences.length ? vepRes.mostSevere || 'resolved' : 'no consequences');
@@ -7365,24 +7172,7 @@ const initVariantSearchUi = () => {
                                         // canonical isoform. Split the "accession:change" strings into a transcript
                                         // accession plus the c./p. portion, matching the shape used elsewhere. Skip
                                         // consequences without an hgvsc (e.g. neighbouring upstream/downstream genes).
-                                        transcriptsFromRecoder = vepConsequences
-                                            .filter(c => c && c.hgvsc)
-                                            .map(c => {
-                                                const cParts = String(c.hgvsc).split(':');
-                                                const transcriptId = cParts[0] || (c.transcript_id || '');
-                                                const cDNA = cParts.slice(1).join(':');
-                                                let protein = '';
-                                                if (c.hgvsp) {
-                                                    const pParts = String(c.hgvsp).split(':');
-                                                    protein = pParts.slice(1).join(':');
-                                                }
-                                                return {
-                                                    transcript: transcriptId,
-                                                    cDNA: cDNA,
-                                                    protein: protein,
-                                                    source: 'vep'
-                                                };
-                                            });
+                                        transcriptsFromRecoder = transcriptsFromVep(vepConsequences);
                                         altFound = true;
                                     }
                                 } catch (vepErr) {
@@ -7472,6 +7262,44 @@ const initVariantSearchUi = () => {
             // status line, cards), so a stale run must stop before it overwrites
             // the newer lookup's output.
             if (!isCurrentSearch()) return;
+            assertResolvedVariantIdentity(query, gVariant, annotation);
+            if (transcriptsFromRecoder.some(t => t.source === 'recoder')) {
+                const recoderForQuery = lastRecoderResult.query === query ? lastRecoderResult.data : null;
+                transcriptsFromRecoder = recoderTranscriptsForGenomic(recoderForQuery, gVariant);
+            }
+            const pairedAnnotationRows = buildCanonicalFromAnnotation(annotation, targetProtGlobal, query).transcriptsList;
+            transcriptsFromRecoder = transcriptsFromRecoder.map(t => {
+                const paired = pairedAnnotationRows.find(a => a.source === 'snpeff'
+                    && a.transcript === t.transcript && a.cDNA === t.cDNA);
+                return paired ? { ...t, protein: paired.protein, effect: paired.effect, gene: paired.gene } : t;
+            });
+            if (!codonOnlyResolutionGlobal && isGenomicVariant(gVariant) && transcriptsFromRecoder.length) {
+                try {
+                    const vep = await fetchLookupVep(gVariant);
+                    if (!isCurrentSearch()) return;
+                    assertResolvedVariantIdentity(gVariant, vep.gVariant || gVariant, null);
+                    const paired = transcriptsFromVep(vep.consequences);
+                    const intentGene = parseMyVariantQueryIntent(query).gene;
+                    const gene = geneHintGlobal || (/^(?:N[MRP]_|ENS|LRG_|CHR)/i.test(intentGene) ? '' : intentGene)
+                        || Array.from(getHitGenesUpper(annotation))[0] || '';
+                    const relevant = gene ? paired.filter(t => t.gene.toUpperCase() === gene.toUpperCase()) : paired;
+                    if (relevant.length) transcriptsFromRecoder = relevant;
+                } catch (err) {
+                    // Keep nucleotide-only recoder rows when pairing is unavailable.
+                    // An absent protein annotation is preferable to one from another transcript.
+                    console.warn('Transcript-specific VEP annotation unavailable:', err);
+                }
+            }
+            if (!isCurrentSearch()) return;
+            if (!transcriptsFromRecoder.length) {
+                transcriptsFromRecoder = buildCanonicalFromAnnotation(annotation, targetProtGlobal, query).transcriptsList;
+            }
+            if (transcriptsFromRecoder.length && !codonOnlyResolutionGlobal) {
+                const gene = geneHintGlobal || transcriptsFromRecoder.find(t => t.gene)?.gene
+                    || Array.from(getHitGenesUpper(annotation))[0] || parseMyVariantQueryIntent(query).gene;
+                transcriptsFromRecoder = markManeTranscripts(transcriptsFromRecoder, await fetchManeSelectAccessions(gene));
+                if (!isCurrentSearch()) return;
+            }
             // Display annotation
             statusEl.textContent = 'Annotation retrieved';
             // Show what the input actually resolved to. Users paste a coordinate row
@@ -7479,7 +7307,7 @@ const initVariantSearchUi = () => {
             // transcript, which HGVS form, or even which build the tool settled on.
             {
                 const canonical = Array.isArray(transcriptsFromRecoder) && transcriptsFromRecoder.length
-                    ? transcriptsFromRecoder[selectCanonicalTranscriptSafe(transcriptsFromRecoder)]
+                    ? transcriptsFromRecoder[selectTranscriptForQuery(transcriptsFromRecoder, query)]
                     : null;
                 const summaryForPanel = buildSummary(annotation, gVariant);
                 const rowValue = (name) => {
@@ -7494,7 +7322,7 @@ const initVariantSearchUi = () => {
                     // The summary's gene row can repeat a symbol once per transcript
                     // ("BRAF, BRAF,BRAF"); the panel wants it named once.
                     gene: dedupeSymbolList(rowValue('Gene(s)')) || geneHintGlobal || '',
-                    consequence: rowValue('Consequence'),
+                    consequence: canonical ? transcriptEffect(canonical) : rowValue('Consequence'),
                     assembly: 'GRCh37/hg19'
                 });
                 LookupProgress.finish('ok', 'Variant resolved');
@@ -7651,486 +7479,15 @@ const initVariantSearchUi = () => {
                 const uniq = Array.from(new Set(geneNames.split(',').map(g => g.trim()).filter(Boolean)));
                 geneNames = uniq.join(', ');
             }
-            // Extract cDNA (hgvsc) and protein (hgvsp) from dbNSFP. If arrays are present, select
-            // the variant that best matches the protein change from the user's query. This helps
-            // highlight the canonical transcript when multiple isoforms exist.
-            // Build HTML strings listing all cDNA and protein notations, with the canonical entry in bold.
-            let cDNAHTML = '';
-            let transcriptsList = [];
-            let protein = '';
-            let proteinHTML = '';
-            // If transcripts have been returned from the variant recoder and this is not a genomic-only query,
-            // use them to build the cDNA/protein list. For genomic variants (original user input
-            // was genomic) we ignore recoder results and derive cDNA/protein from the
-            // MyVariant.info annotation instead. We must test the original user query rather
-            // than the converted genomic variant (gVariant) to avoid discarding useful
-            // transcripts for protein or cDNA inputs.
-            // If the Ensembl variant recoder returned transcripts, build the cDNA/protein list
-            // from these transcripts regardless of whether the input was originally genomic.  This
-            // ensures that complex delins variants (which often lack MyVariant annotations) still
-            // display transcript and protein information.  Previously, transcripts were ignored
-            // when originalIsGenomic was true, leading to missing cDNA/protein details for
-            // normalised g. variants.
-            if (transcriptsFromRecoder && transcriptsFromRecoder.length > 0) {
-                // Use transcript data from the variant recoder when available
-                // Determine the canonical cDNA. Prefer RefSeq NM_ transcripts with the
-                // lowest accession number (e.g. NM_004333 before NM_001354609). This
-                // heuristic more consistently selects widely used canonical isoforms
-                // across genes such as EGFR (NM_005228) and BRAF (NM_004333). If no
-                // NM_ transcript is found, fall back to choosing the cDNA with the
-                // largest numeric coordinate as before.
-                // If the user query is a cDNA variant (e.g. contains ":c.") attempt to select
-                // the transcript whose cDNA exactly matches the query's variant part. This helps
-                // return the expected isoform for inputs like "MSH3 c.178_186del" or "PPM1D c.1518del".
-                // Determine a canonical candidate cDNA based on user input and transcript accession/coordinate heuristics.
-                let canonicalCandidate = null;
-                // Track whether the canonical candidate was set directly from the user's cDNA query.
-                let userSpecifiedCandidate = false;
-                // Track the lowest RefSeq NM accession number encountered and the smallest positive cDNA coordinate
-                // for that accession. These will be used to prefer commonly used isoforms when multiple NM_* transcripts
-                // exist for the same gene.
-                let minNmAcc = Infinity;
-                let minCnumForMinNm = Infinity;
-                // 1) If the user's query explicitly contains a cDNA (e.g. "c.1518del"), attempt to select the transcript
-                // whose cDNA exactly matches that value (case-insensitive). This helps ensure that when a user enters
-                // a specific cDNA (such as "MSH3 c.178_186del" or "PPM1D c.1518del"), the resulting summary will reflect
-                // the same nomenclature rather than another isoform.
-                {
-                    const cdnaMatch = query && query.match(/c\.[^\s]+/i);
-                    if (cdnaMatch) {
-                        const userCdna = cdnaMatch[0].toLowerCase();
-                        for (const t of transcriptsFromRecoder) {
-                            if (t.cDNA && t.cDNA.toLowerCase() === userCdna) {
-                                canonicalCandidate = t.cDNA;
-                                userSpecifiedCandidate = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                // 2) Prefer RefSeq NM_* transcripts with positive cDNA coordinates. Among transcripts sharing the
-                // same NM accession number, choose the transcript with the smallest cDNA coordinate (closest to
-                // the N-terminus). This adjustment helps select the widely used canonical isoform when multiple
-                // deletions or indels map to the same NM accession at different positions (e.g. PPM1D c.1518del vs c.1747del).
-                for (const t of transcriptsFromRecoder) {
-                    // Only consider NM_* accessions
-                    if (!/^NM_/i.test(t.transcript)) continue;
-                    const nmMatch = t.transcript.match(/^NM_0*([0-9]+)(?:\.|$)/i);
-                    const cMatch = String(t.cDNA).match(/c\.\s*(-?\d+)/);
-                    if (!nmMatch || !cMatch) continue;
-                    const nmNum = parseInt(nmMatch[1], 10);
-                    const cNum = parseInt(cMatch[1], 10);
-                    // Only consider transcripts with positive coordinate (exclude upstream/promoter/intronic positions)
-                    if (!userSpecifiedCandidate && !isNaN(nmNum) && !isNaN(cNum) && cNum > 0) {
-                        // Skip intronic or upstream positions denoted by '+' or '-' following the coordinate (e.g. c.701+707del).
-                        // Only consider exonic positions where the coordinate is a simple integer or range (contains '_' but no '+' or '-').
-                        const cdnaAfter = String(t.cDNA).replace(/^c\./i, '');
-                        const intronic = /[+-]/.test(cdnaAfter);
-                        if (intronic) continue;
-                        // If this NM accession is smaller than any seen before, or equal but has a smaller cDNA coordinate,
-                        // update canonicalCandidate to this cDNA. This favours widely used isoforms and lower coordinate deletions.
-                        if (nmNum < minNmAcc || (nmNum === minNmAcc && cNum < minCnumForMinNm)) {
-                            minNmAcc = nmNum;
-                            minCnumForMinNm = cNum;
-                            canonicalCandidate = t.cDNA;
-                        }
-                    }
-                }
-                // 3) If no NM transcripts with positive coordinates were found, fall back to choosing the NM transcript
-                // with the smallest accession number, regardless of coordinate sign. This maintains previous behaviour
-                // for genes like EGFR where canonical isoforms have upstream coordinates but still follow NM accession ranking.
-                if (!canonicalCandidate) {
-                    for (const t of transcriptsFromRecoder) {
-                        if (!/^NM_/i.test(t.transcript)) continue;
-                        const nmMatch = t.transcript.match(/^NM_0*([0-9]+)(?:\.|$)/i);
-                        if (!nmMatch) continue;
-                        const nmNum = parseInt(nmMatch[1], 10);
-                        if (!isNaN(nmNum) && (nmNum < minNmAcc)) {
-                            minNmAcc = nmNum;
-                            canonicalCandidate = t.cDNA;
-                        }
-                    }
-                }
-                // 4) As a last resort, choose the cDNA with the largest absolute numeric coordinate when no NM
-                // accessions exist (e.g. genes without RefSeq transcripts). This preserves earlier heuristics.
-                if (!canonicalCandidate) {
-                    let best = transcriptsFromRecoder[0].cDNA;
-                    let bestNum = -Infinity;
-                    for (const t of transcriptsFromRecoder) {
-                        const m = String(t.cDNA).match(/c\.\s*(-?\d+)/);
-                        if (m) {
-                            const num = parseInt(m[1], 10);
-                            if (!isNaN(num) && num > bestNum) {
-                                bestNum = num;
-                                best = t.cDNA;
-                            }
-                        }
-                    }
-                    canonicalCandidate = best;
-                }
-                // Build transcriptsList with canonical flag
-                transcriptsList = transcriptsFromRecoder.map((t) => {
-                    return { ...t, canonical: t.cDNA === canonicalCandidate };
-                });
-                cDNAHTML = transcriptsList
-                    .map((t) => (t.canonical ? `<strong>${t.cDNA}</strong>` : t.cDNA))
-                    .join(', ');
-                const canonicalEntry = transcriptsList.find((t) => t.canonical);
-                // Determine canonical protein: if canonical entry has a protein, use it. Otherwise pick first non-empty protein.
-                let canonicalProt = canonicalEntry ? canonicalEntry.protein : '';
-                // If the canonical cDNA refers to an intronic or upstream position (contains '+' or '-')
-                // then do not display a protein change. Intronic variants do not result in an amino acid
-                // alteration and should leave the p. field blank.
-                if (canonicalEntry && canonicalEntry.cDNA) {
-                    const cdnaNoPrefix = canonicalEntry.cDNA.replace(/^c\./i, '');
-                    if (/[+-]/.test(cdnaNoPrefix)) {
-                        canonicalProt = '';
-                    }
-                }
-                if (!canonicalProt) {
-                    const firstProtEntry = transcriptsList.find(t => t.protein);
-                    canonicalProt = firstProtEntry ? firstProtEntry.protein : '';
-                }
-                // Build protein HTML, bolding the canonical protein. If proteins are missing, skip bolding.
-                proteinHTML = transcriptsList
-                    .map((t) => {
-                        if (!t.protein) return '';
-                        return t.protein === canonicalProt ? `<strong>${t.protein}</strong>` : t.protein;
-                    })
-                    .filter(Boolean)
-                    .join(', ');
-                protein = canonicalProt || '';
-            } else {
-                // Fallback: derive from dbNSFP if recoder data is unavailable
-                if (annotation.dbnsfp && annotation.dbnsfp.hgvsc) {
-                    const hgvscList = Array.isArray(annotation.dbnsfp.hgvsc)
-                        ? annotation.dbnsfp.hgvsc
-                        : [annotation.dbnsfp.hgvsc];
-                    let canonicalCandidate = null;
-                    /*
-                     * Determine the canonical cDNA among multiple dbNSFP hgvsc entries.  The goal
-                     * is to pick the transcript corresponding to the most widely used isoform
-                     * rather than arbitrarily choosing the first entry.  The selection logic is:
-                     *   1. If all entries contain a numeric coordinate (c.<number>), compute
-                     *      these coordinates and select the entry whose coordinate is the median
-                     *      of the set.  This heuristic tends to favour canonical isoforms (e.g.
-                     *      BRAF c.1799T>A) when alternative isoforms with smaller (e.g. 620) or
-                     *      larger (e.g. 1919) coordinates are present.
-                     *   2. If multiple entries share the median coordinate, prefer those with
-                     *      RefSeq NM_ accession prefixes and the lowest accession number.
-                     *   3. If numeric parsing fails for any entry, fall back to preferring NM_
-                     *      transcripts with the lowest accession number overall.
-                     *   4. If no NM_ accession is present, fall back to the entry with the
-                     *      largest numeric coordinate (same as before).
-                     */
-                    // Parse numeric coordinates from each hgvsc entry.  Use an array equal in
-                    // length to hgvscList where non-numeric entries remain null.  This
-                    // enables robust handling when some transcripts have intronic or
-                    // complex notation (e.g. c.1906-7T>A) without failing the median
-                    // selection logic entirely.
-                    const coords = new Array(hgvscList.length).fill(null);
-                    for (let i = 0; i < hgvscList.length; i++) {
-                        const h = hgvscList[i];
-                        const m = String(h).match(/c\.\s*(-?\d+)/i);
-                        if (m) {
-                            const num = parseInt(m[1], 10);
-                            if (!isNaN(num)) coords[i] = num;
-                        }
-                    }
-                    // Extract only the numeric coordinates (filter out null) for median
-                    const validCoords = coords.filter((c) => c !== null);
-                    if (validCoords.length >= 2) {
-                        // Compute median of numeric coordinates
-                        const sorted = [...validCoords].sort((a, b) => a - b);
-                        const medianVal = sorted[Math.floor(sorted.length / 2)];
-                        // Find indexes with coordinate equal to medianVal (ties allowed)
-                        const candidateIndexes = [];
-                        for (let i = 0; i < coords.length; i++) {
-                            if (coords[i] === medianVal) {
-                                candidateIndexes.push(i);
-                            }
-                        }
-                        if (candidateIndexes.length > 0) {
-                            // Among candidates, prefer NM_ transcripts with lowest accession
-                            let bestIndex = candidateIndexes[0];
-                            let bestAcc = Infinity;
-                            for (const idx of candidateIndexes) {
-                                const h = hgvscList[idx];
-                                const txId = String(h).split(':')[0];
-                                if (/^NM_/i.test(txId)) {
-                                    const mAcc = txId.match(/^NM_0*([0-9]+)(?:\.|$)/i);
-                                    if (mAcc) {
-                                        const numAcc = parseInt(mAcc[1], 10);
-                                        if (!isNaN(numAcc) && numAcc < bestAcc) {
-                                            bestAcc = numAcc;
-                                            bestIndex = idx;
-                                        }
-                                    }
-                                }
-                            }
-                            canonicalCandidate = hgvscList[bestIndex];
-                        }
-                    }
-                    if (!canonicalCandidate) {
-                        // Fallback: prefer NM_ transcripts with lowest accession overall
-                        let minNmAcc = Infinity;
-                        for (const h of hgvscList) {
-                            const parts = String(h).split(':');
-                            const txId = parts[0];
-                            if (/^NM_/i.test(txId)) {
-                                const m = txId.match(/^NM_0*([0-9]+)(?:\.|$)/i);
-                                if (m) {
-                                    const num = parseInt(m[1], 10);
-                                    if (!isNaN(num) && num < minNmAcc) {
-                                        minNmAcc = num;
-                                        canonicalCandidate = h;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if (!canonicalCandidate) {
-                        // If no NM transcript found, choose the entry with the largest numeric coordinate.
-                        let best = hgvscList[0];
-                        let bestNum = -Infinity;
-                        for (const h of hgvscList) {
-                            const m = String(h).match(/c\.(-?\d+)/i);
-                            if (m) {
-                                const num = parseInt(m[1], 10);
-                                if (!isNaN(num) && num > bestNum) {
-                                    bestNum = num;
-                                    best = h;
-                                }
-                            }
-                        }
-                        canonicalCandidate = best;
-                    }
-                    // Build a highlighted cDNA HTML string
-                    cDNAHTML = hgvscList
-                        .map((h) => (h === canonicalCandidate ? `<strong>${h}</strong>` : h))
-                        .join(', ');
-                    // Build a list of transcript mappings (transcript ID -> cDNA, protein).
-                    //
-                    // MyVariant's dbnsfp.hgvsc entries are BARE c. strings with no
-                    // accession ("c.1799T>A"), so splitting on ':' used to shove the
-                    // whole string into the transcript slot and leave cDNA empty — the
-                    // Variant card's canonical entry then had no cDNA, the display fell
-                    // back to the FIRST list entry, and BRAF V600E rendered as the
-                    // alternate-isoform c.620T>A whenever the recoder was down. Treat an
-                    // accession-less entry as the cDNA itself. hgvsp is index-paired
-                    // only when the arrays actually align — dbNSFP's hgvsc and hgvsp
-                    // arrays can have different lengths (V600E: 3 vs 4), and pairing
-                    // misaligned arrays attaches the wrong protein to a transcript.
-                    const hgvspListLocal = (annotation.dbnsfp && annotation.dbnsfp.hgvsp) ? (Array.isArray(annotation.dbnsfp.hgvsp) ? annotation.dbnsfp.hgvsp : [annotation.dbnsfp.hgvsp]) : [];
-                    const hgvspAligned = hgvspListLocal.length === hgvscList.length;
-                    for (let i = 0; i < hgvscList.length; i++) {
-                        const sc = hgvscList[i];
-                        if (!sc) continue;
-                        const scStr = String(sc);
-                        const scColon = scStr.indexOf(':');
-                        const transcriptId = scColon !== -1 ? scStr.slice(0, scColon) : '';
-                        const cpart = scColon !== -1 ? scStr.slice(scColon + 1) : scStr;
-                        let ppart = '';
-                        if (hgvspAligned && hgvspListLocal[i]) {
-                            const spStr = String(hgvspListLocal[i]);
-                            const spColon = spStr.indexOf(':');
-                            ppart = spColon !== -1 ? spStr.slice(spColon + 1) : spStr;
-                        }
-                        transcriptsList.push({ transcript: transcriptId, cDNA: cpart, protein: ppart, canonical: sc === canonicalCandidate });
-                    }
-                }
-                if (annotation.dbnsfp && annotation.dbnsfp.hgvsp) {
-                    const hgvspList = Array.isArray(annotation.dbnsfp.hgvsp) ? annotation.dbnsfp.hgvsp : [annotation.dbnsfp.hgvsp];
-                    let canonicalProt = hgvspList[0];
-                    // Choose canonical protein: match triple-coded targetProtGlobal if possible
-                    if (targetProtGlobal) {
-                        for (const p of hgvspList) {
-                            const triple = p.replace(/^.*p\./i, '').toUpperCase();
-                            if (triple === targetProtGlobal) {
-                                canonicalProt = p;
-                                break;
-                            }
-                        }
-                    }
-                    proteinHTML = hgvspList
-                        .map((p) => (p === canonicalProt ? `<strong>${p}</strong>` : p))
-                        .join(', ');
-                    // Also expose the canonical protein string in a variable used later (e.g. for search links)
-                    protein = canonicalProt;
-                }
-            // If no transcripts were gathered from dbNSFP and snpEff annotations are present,
-            // attempt to extract cDNA and protein information from snpEff. This helps capture
-            // upstream/promoter variants where dbNSFP does not provide hgvsc/hgvsp (e.g. TERT
-            // promoter mutations).
-            if (transcriptsList.length === 0 && annotation.snpeff && annotation.snpeff.ann) {
-                const annList = Array.isArray(annotation.snpeff.ann) ? annotation.snpeff.ann : [annotation.snpeff.ann];
-                const snpEffList = [];
-                for (const ann of annList) {
-                    if (ann && ann.hgvs_c) {
-                        // Determine a transcript ID; snpEff feature_id may include version or be absent.
-                        const txId = ann.feature_id || '';
-                        const cDNAVal = ann.hgvs_c;
-                        // snpEff may provide hgvs_p, otherwise leave empty
-                        const protVal = ann.hgvs_p || '';
-                        snpEffList.push({ transcript: txId, cDNA: cDNAVal, protein: protVal });
-                    }
-                }
-                if (snpEffList.length > 0) {
-                    // Determine canonical cDNA among snpEff annotations. Prefer NM accessions with
-                    // the lowest accession number; otherwise pick the first entry.
-                    let canonicalCandidateEff = null;
-                    let minNmEff = Infinity;
-                    for (const t of snpEffList) {
-                        if (/^NM_/i.test(t.transcript)) {
-                            const m = t.transcript.match(/^NM_0*([0-9]+)(?:\.|$)/i);
-                            if (m) {
-                                const num = parseInt(m[1], 10);
-                                if (!isNaN(num) && num < minNmEff) {
-                                    minNmEff = num;
-                                    canonicalCandidateEff = t.cDNA;
-                                }
-                            }
-                        }
-                    }
-                    if (!canonicalCandidateEff) {
-                        canonicalCandidateEff = snpEffList[0].cDNA;
-                    }
-                    transcriptsList = snpEffList.map((t) => ({ ...t, canonical: t.cDNA === canonicalCandidateEff }));
-                    // Build cDNA HTML representation
-                    cDNAHTML = transcriptsList
-                        .map((t) => (t.canonical ? `<strong>${t.cDNA}</strong>` : t.cDNA))
-                        .join(', ');
-                    // Determine canonical protein: use the protein from the canonical entry if available,
-                    // otherwise use the first available protein string.
-                    let canonicalProtEff = '';
-                    const canonEntry = transcriptsList.find(t => t.canonical);
-                    if (canonEntry) {
-                        // Only use the protein if the canonical cDNA is not intronic/upstream (contains '+' or '-')
-                        const cdnaNoPrefixEff = canonEntry.cDNA.replace(/^c\./i, '');
-                        const intronicEff = /[+-]/.test(cdnaNoPrefixEff);
-                        if (!intronicEff && canonEntry.protein) {
-                            canonicalProtEff = canonEntry.protein;
-                        }
-                    }
-                    if (!canonicalProtEff) {
-                        const firstProt = transcriptsList.find(t => t.protein);
-                        canonicalProtEff = firstProt ? firstProt.protein : '';
-                    }
-                    // Build protein HTML (bold the canonical protein) if proteins exist
-                    proteinHTML = transcriptsList
-                        .map((t) => {
-                            if (!t.protein) return '';
-                            return t.protein === canonicalProtEff ? `<strong>${t.protein}</strong>` : t.protein;
-                        })
-                        .filter(Boolean)
-                        .join(', ');
-                    protein = canonicalProtEff;
-                }
-            }
-            }
-            // Additional fallback: if still no transcripts and root-level hgvsc/hgvsp fields exist on the annotation
-            // object, use them directly. MyVariant.info sometimes places HGVS coding and protein changes at the
-            // top level (e.g. annotation.hgvsc and annotation.hgvsp). In such cases we construct a minimal
-            // transcript list and choose a canonical entry (the first entry or one matching the user's protein query).
-            if (transcriptsList.length === 0 && annotation && (annotation.hgvsc || annotation.hgvsp)) {
-                const hgvscList = annotation.hgvsc ? (Array.isArray(annotation.hgvsc) ? annotation.hgvsc : [annotation.hgvsc]) : [];
-                const hgvspList = annotation.hgvsp ? (Array.isArray(annotation.hgvsp) ? annotation.hgvsp : [annotation.hgvsp]) : [];
-                let canonicalIdx = 0;
-                if (targetProtGlobal && hgvspList.length > 0) {
-                    // When a target protein (e.g. from the user's query) is available, select
-                    // the matching hgvsp entry as the canonical index. Compare both
-                    // three‑letter (triple) and single‑letter conversions for robustness.
-                    for (let i = 0; i < hgvspList.length; i++) {
-                        const p = hgvspList[i];
-                        if (!p) continue;
-                        const prot = String(p).replace(/^p\./i, '').toUpperCase();
-                        const triple = prot.replace(/[^A-Z0-9]/g, '');
-                        const single = tripleToSingle(triple);
-                        if (triple === targetProtGlobal || (single && triple === single)) {
-                            canonicalIdx = i;
-                            break;
-                        }
-                    }
-                } else if (hgvscList.length > 1) {
-                    /*
-                     * For genomic variants where multiple cDNA notations exist but no specific
-                     * protein target was provided, choose the cDNA entry whose numeric
-                     * coordinate is the median of all available coordinates.  This heuristic
-                     * tends to select the widely used isoform (e.g. c.1799T>A for BRAF V600E)
-                     * when other isoforms with smaller or larger coordinates are also present
-                     * (e.g. c.620T>A, c.1919T>A).  If coordinate parsing fails for any
-                     * reason, the canonicalIdx remains 0 (defaulting to the first entry).
-                     */
-                    const coords = [];
-                    for (const h of hgvscList) {
-                        const m = String(h).match(/c\.\s*(-?\d+)/);
-                        if (m) {
-                            const num = parseInt(m[1], 10);
-                            if (!isNaN(num)) coords.push(num);
-                        }
-                    }
-                    if (coords.length === hgvscList.length) {
-                        // Compute median coordinate
-                        const sorted = [...coords].sort((a, b) => a - b);
-                        const medianVal = sorted[Math.floor(sorted.length / 2)];
-                        // Select the hgvsc entry whose coordinate is closest to the median
-                        let bestDiff = Infinity;
-                        let bestIdx = 0;
-                        for (let i = 0; i < coords.length; i++) {
-                            const diff = Math.abs(coords[i] - medianVal);
-                            if (diff < bestDiff) {
-                                bestDiff = diff;
-                                bestIdx = i;
-                            }
-                        }
-                        canonicalIdx = bestIdx;
-                    }
-                }
-                cDNAHTML = hgvscList
-                    .map((h, i) => (i === canonicalIdx ? `<strong>${h}</strong>` : h))
-                    .join(', ');
-                proteinHTML = hgvspList
-                    .map((p, i) => {
-                        if (!p) return '';
-                        return i === canonicalIdx ? `<strong>${p}</strong>` : p;
-                    })
-                    .filter(Boolean)
-                    .join(', ');
-                protein = hgvspList[canonicalIdx] || '';
-                // Build a minimal transcriptsList without transcript IDs (empty string)
-                transcriptsList = hgvscList.map((h, i) => {
-                    return { transcript: '', cDNA: h, protein: hgvspList[i] || '', canonical: i === canonicalIdx };
-                });
-            }
-            // Before computing effect/consequence and rendering the variant card, unify
-            // transcripts for genomic inputs. When the original user query was a genomic
-            // variant (g.), transcriptsFromRecoder is unused and transcriptsList may
-            // contain entries derived from dbNSFP, snpEff or root-level fields. To
-            // ensure the canonical transcript is chosen using a unified scoring
-            // heuristic across all sources, we rebuild the transcript list from
-            // annotation here. This step preserves existing transcriptsList for
-            // non-genomic queries (where transcriptsFromRecoder is used).
-            if (originalIsGenomic) {
-                // When the variant_recoder provided transcripts for a genomic input, we keep
-                // those transcripts rather than rebuilding from the MyVariant annotation.  This
-                // ensures complex delins variants retain the recoder‑derived cDNA/protein
-                // information.  Only unify transcripts from the annotation when no recoder
-                // transcripts are available.
-                if (!transcriptsFromRecoder || transcriptsFromRecoder.length === 0) {
-                    const unifyRes = buildCanonicalFromAnnotation(annotation, targetProtGlobal);
-                    // Only overwrite when a non-empty list is returned. Otherwise leave
-                    // transcriptsList unchanged.
-                    if (unifyRes.transcriptsList && unifyRes.transcriptsList.length > 0) {
-                        transcriptsList = unifyRes.transcriptsList;
-                        cDNAHTML = unifyRes.cDNAHTML;
-                        proteinHTML = unifyRes.proteinHTML;
-                        protein = unifyRes.canonicalProtein;
-                    }
-                }
-            }
-            // Effect / consequence
-            let effect = getSummaryValue('Consequence');
-            if (!effect) effect = getSummaryValue('Variant Type');
+            const transcriptDisplay = transcriptsFromRecoder?.length
+                ? buildTranscriptDisplay(transcriptsFromRecoder, query)
+                : buildCanonicalFromAnnotation(annotation, targetProtGlobal, query);
+            const { transcriptsList, cDNAHTML } = transcriptDisplay;
+            const protein = transcriptDisplay.canonicalProtein;
+            const selectedTranscript = transcriptDisplay.selected;
+            const effect = selectedTranscript
+                ? transcriptEffect(selectedTranscript)
+                : getSummaryValue('Consequence') || getSummaryValue('Variant Type');
             // Card: Variant info
             {
                 const card = document.createElement('div');
@@ -8190,61 +7547,13 @@ const initVariantSearchUi = () => {
                     }
                 });
                 content.appendChild(makeLine('Gene', geneNames));
-                /*
-                 * Determine the canonical cDNA (c.) and protein (p.) values to display in the
-                 * summary card.  In earlier builds, certain genomic inputs resulted in
-                 * populated transcripts lists yet the displayed c. and p. fields were
-                 * erroneously reported as "N/A".  This was due to a combination of
-                 * canonical entries lacking a protein (intronic variants) and fallback
-                 * variables (cDNAHTML/protein) not being consulted when transcripts were
-                 * available.  The logic below addresses this by:
-                 *   1. Extracting the canonical entry from transcriptsList when present.
-                 *      If the canonical entry lacks a protein but another transcript has
-                 *      one, that protein is used instead.
-                 *   2. Falling back to root-level annotation.hgvsc/hgvsp arrays when no
-                 *      transcripts are available or the canonical values remain empty.
-                 *   3. Leaving the field blank only when no value can be resolved, allowing
-                 *      the downstream makeLine helper to insert "N/A".
-                 */
-                let canonicalCVal = '';
-                let canonicalProtVal = '';
-                if (transcriptsList && transcriptsList.length > 0) {
-                    const canonicalEntryForDisplay = transcriptsList.find(t => t.canonical) || transcriptsList[0];
-                    if (canonicalEntryForDisplay) {
-                        canonicalCVal = canonicalEntryForDisplay.cDNA || '';
-                        canonicalProtVal = canonicalEntryForDisplay.protein || '';
-                    }
-                    // If canonical protein is empty, but another transcript has a protein, use that
-                    if (!canonicalProtVal) {
-                        const firstProtEntry = transcriptsList.find(t => t.protein);
-                        if (firstProtEntry) canonicalProtVal = firstProtEntry.protein || '';
-                    }
-                }
-                // Fall back to the first hgvsc/hgvsp at the root level of the annotation when still empty
-                if (!canonicalCVal && annotation) {
-                    if (annotation.hgvsc) {
-                        canonicalCVal = Array.isArray(annotation.hgvsc) ? annotation.hgvsc[0] : annotation.hgvsc;
-                    }
-                }
-                if (!canonicalProtVal && annotation) {
-                    if (annotation.hgvsp) {
-                        canonicalProtVal = Array.isArray(annotation.hgvsp) ? annotation.hgvsp[0] : annotation.hgvsp;
-                    }
-                }
-                // As a further fallback, use values derived from cDNAHTML/protein variables when
-                // canonical values are still empty.  These variables capture the first entry from
-                // any formatted lists built earlier (e.g. root‑level hgvsc/hgvsp arrays) and
-                // provide a sensible default when annotation properties are unavailable.
-                if (!canonicalCVal && cDNAHTML) {
-                    // The canonical entry is the <strong>-wrapped one — prefer it over
-                    // whatever happens to be first in the list (dbNSFP's array order is
-                    // arbitrary; taking [0] once showed BRAF V600E as c.620T>A).
-                    const strongMatch = cDNAHTML.match(/<strong>([^<]*)<\/strong>/i);
-                    const cdClean = (strongMatch ? strongMatch[1] : cDNAHTML.replace(/<[^>]+>/g, '').split(',')[0]).trim();
-                    if (cdClean) canonicalCVal = cdClean;
-                }
-                if (!canonicalProtVal && protein) {
-                    canonicalProtVal = protein;
+                // All summary fields refer to this one transcript. A missing
+                // protein consequence must not be borrowed from another isoform.
+                const canonicalCVal = selectedTranscript?.cDNA || '';
+                const canonicalProtVal = selectedTranscript?.protein || '';
+                if (selectedTranscript?.transcript) {
+                    content.appendChild(makeLine('Transcript', selectedTranscript.transcript
+                        + (selectedTranscript.maneSelect ? ' (MANE Select)' : '')));
                 }
                 content.appendChild(makeLine('c.', canonicalCVal));
                 content.appendChild(makeLine('p.', formatProteinDisplayWithSingleLetter(canonicalProtVal)));
@@ -8280,7 +7589,8 @@ const initVariantSearchUi = () => {
                         // dbNSFP entries have no transcript accession — render just the
                         // cDNA rather than a dangling ": c.1799T>A".
                         let inner = [t.transcript, t.cDNA].filter(Boolean).join(': ');
-                        if (t.protein) inner += `, ${t.protein}`;
+                        if (t.protein) inner += `, ${t.proteinAccession ? t.proteinAccession + ':' : ''}${t.protein}`;
+                        if (transcriptEffect(t)) inner += ` — ${transcriptEffect(t)}`;
                         if (t.canonical) {
                             li.innerHTML = `<strong>${escapeHtml(inner)}</strong>`;
                         } else {
@@ -8443,7 +7753,7 @@ const initVariantSearchUi = () => {
                 if (recoveredFromRegion) {
                     const recNote = document.createElement('div');
                     recNote.style.cssText = 'font-size:0.78rem;color:#6b7280;margin-top:1px;';
-                    recNote.textContent = "Matched via live ClinVar query — MyVariant.info's ClinVar mirror has no record for this allele (expected for somatic-only entries).";
+                    recNote.textContent = "Matched via live ClinVar query — MyVariant.info's ClinVar mirror has no record for this allele.";
                     content.appendChild(recNote);
                 }
                 // ClinGen expert-panel (VCEP) classification, when one exists —
@@ -8535,9 +7845,9 @@ const initVariantSearchUi = () => {
                         ? (Array.isArray(annotation.snpeff.ann) ? annotation.snpeff.ann : [annotation.snpeff.ann])
                         : [];
                     const hgvsP = (spAnns.find((a) => a.hgvs_p) || {}).hgvs_p || '';
-                    const queryPC = parseProteinChange(hgvsP)
-                        || parseProteinChange(targetProtGlobal)
-                        || parseProteinChange(protein);
+                    const queryPC = parseProteinChange(targetProtGlobal)
+                        || parseProteinChange(protein)
+                        || (!selectedTranscript ? parseProteinChange(hgvsP) : null);
                     const firstGene = geneNames ? geneNames.split(',')[0].trim() : '';
                     if (queryPC && firstGene) {
                         const threeRef = aaSingleToThree(queryPC.ref);
@@ -8694,9 +8004,9 @@ const initVariantSearchUi = () => {
                         // Extract canonical c. position (e.g. c.454 → 454) from the snpEff annotation
                         // that has a protein change; used to compute transcript-agnostic protein positions.
                         const canonicalAnn = snpEffAnns.find(a => a.hgvs_p);
-                        const queryHgvsP = canonicalAnn?.hgvs_p || '';
+                        const queryHgvsP = selectedTranscript ? protein : canonicalAnn?.hgvs_p || '';
                         const queryProteinPos = parseProteinPos(queryHgvsP);
-                        const queryC = parseCdnaCoordinate(canonicalAnn?.hgvs_c || '');
+                        const queryC = parseCdnaCoordinate(selectedTranscript?.cDNA || canonicalAnn?.hgvs_c || '');
 
                         if (nearby.length > 0) {
                             const nearbyTitle = document.createElement('div');
@@ -10691,6 +10001,12 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,
         mapVariantToResidueSpan,
+        // Allele identity and transcript-bound annotations
+        hitMatchesVariantQuery, selectMyVariantHit, queryMyVariantById,
+        selectRecoderAlleles, recoderTranscriptsForGenomic, assertResolvedVariantIdentity, fetchMyVariant,
+        transcriptsFromRecoderAllele, transcriptsFromVep, buildTranscriptDisplay,
+        maneSelectAccessions, markManeTranscripts,
+        buildCanonicalFromAnnotation, selectCanonicalTranscript, transcriptEffect,
         // HTML/URL escaping
         escapeHtml, safeUrl,
         // openFDA label filtering

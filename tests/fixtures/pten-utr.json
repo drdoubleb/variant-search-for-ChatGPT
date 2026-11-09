@@ -1,0 +1,1168 @@
+{
+  "source": "Live Ensembl GRCh37 / MyVariant / NCBI responses retrieved 2026-11-09; only relevant annotation fields retained.",
+  "recoder": [
+    {
+      "G": {
+        "hgvsg": [
+          "NC_000010.10:g.89624219T>G",
+          "LRG_311:g.6024T>G"
+        ],
+        "hgvsc": [
+          "ENST00000371953.3:c.-8T>G",
+          "ENST00000487939.1:n.14T>G",
+          "NM_000314.8:c.-8T>G",
+          "NM_001304717.5:c.512T>G",
+          "NM_001304718.2:c.-713T>G",
+          "LRG_311t1:c.-8T>G"
+        ],
+        "hgvsp": [
+          "NP_001291646.4:p.Leu171Arg"
+        ],
+        "input": "chr10:g.89624219T>G",
+        "spdi": [
+          "NC_000010.10:89624218:T:G",
+          "LRG_311:6023:T:G"
+        ]
+      }
+    }
+  ],
+  "vep": [
+    {
+      "end": 89624219,
+      "strand": 1,
+      "most_severe_consequence": "missense_variant",
+      "allele_string": "T/G",
+      "seq_region_name": "10",
+      "input": "chr10:g.89624219T>G",
+      "start": 89624219,
+      "transcript_consequences": [
+        {
+          "gene_symbol": "PTEN",
+          "consequence_terms": [
+            "5_prime_UTR_variant"
+          ],
+          "gene_id": "5728",
+          "hgvsc": "NM_000314.8:c.-8T>G",
+          "transcript_id": "NM_000314.8"
+        },
+        {
+          "transcript_id": "NM_001304717.5",
+          "hgvsp": "NP_001291646.4:p.Leu171Arg",
+          "consequence_terms": [
+            "missense_variant"
+          ],
+          "gene_id": "5728",
+          "hgvsc": "NM_001304717.5:c.512T>G",
+          "gene_symbol": "PTEN",
+          "canonical": 1
+        },
+        {
+          "transcript_id": "NM_001304718.2",
+          "gene_id": "5728",
+          "consequence_terms": [
+            "5_prime_UTR_variant"
+          ],
+          "hgvsc": "NM_001304718.2:c.-713T>G",
+          "gene_symbol": "PTEN"
+        }
+      ]
+    }
+  ],
+  "searchHits": {
+    "mv-gene-space": [
+      {
+        "_id": "chr10:g.89725237T>G",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "3_prime_UTR_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.*8T>G"
+            },
+            {
+              "effect": "3_prime_UTR_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.*8T>G"
+            },
+            {
+              "effect": "3_prime_UTR_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.*8T>G"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.*8T>G",
+              "NM_001304717.5:c.*8T>G",
+              "NM_001304718.2:c.*8T>G"
+            ],
+            "genomic": [
+              "LRG_311:g.107042T>G",
+              "NC_000010.10:g.89725237T>G",
+              "NC_000010.11:g.87965480T>G",
+              "NG_007466.2:g.107042T>G"
+            ]
+          },
+          "variant_id": 167551
+        }
+      },
+      {
+        "_id": "chr10:g.89711867T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.1012-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.493-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-99-8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.493-8T>C",
+              "NM_001304717.5:c.1013-8T>C",
+              "NM_001304718.2:c.-99-8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.93672T>C",
+              "NC_000010.10:g.89711867T>C",
+              "NC_000010.11:g.87952110T>C",
+              "NG_007466.2:g.93672T>C"
+            ]
+          },
+          "variant_id": 2031374
+        }
+      },
+      {
+        "_id": "chr10:g.89725036T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.1546-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.1027-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.436-8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.1027-8T>C",
+              "NM_001304717.5:c.1547-8T>C",
+              "NM_001304718.2:c.436-8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.106841T>C",
+              "NC_000010.10:g.89725036T>C",
+              "NC_000010.10:g.89725036T>C",
+              "NC_000010.11:g.87965279T>C",
+              "NG_007466.2:g.106841T>C"
+            ]
+          },
+          "variant_id": 928468
+        }
+      },
+      {
+        "_id": "chr10:g.89690795T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.729-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.210-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-541-8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.210-8T>C",
+              "NM_001304717.5:c.730-8T>C",
+              "NM_001304718.2:c.-541-8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.72600T>C",
+              "NC_000010.10:g.89690795T>C",
+              "NC_000010.11:g.87931038T>C",
+              "NG_007466.2:g.72600T>C"
+            ]
+          },
+          "variant_id": 1137872
+        }
+      },
+      {
+        "_id": "chr10:g.89690854T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.772+8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.253+8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-498+8T>C"
+            },
+            {
+              "effect": "sequence_feature",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.253+8T>C"
+            },
+            {
+              "effect": "sequence_feature",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.253+8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.253+8T>C",
+              "NM_001304717.5:c.773+8T>C",
+              "NM_001304718.2:c.-498+8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.72659T>C",
+              "NC_000010.10:g.89690854T>C",
+              "NC_000010.11:g.87931097T>C",
+              "NG_007466.2:g.72659T>C"
+            ]
+          },
+          "variant_id": 928033
+        }
+      },
+      {
+        "_id": "chr10:g.89690795T>G",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.729-8T>G"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.210-8T>G"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-541-8T>G"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.210-8T>G",
+              "NM_001304717.5:c.730-8T>G",
+              "NM_001304718.2:c.-541-8T>G"
+            ],
+            "genomic": [
+              "LRG_311:g.72600T>G",
+              "NC_000010.10:g.89690795T>G",
+              "NC_000010.11:g.87931038T>G",
+              "NG_007466.2:g.72600T>G"
+            ]
+          },
+          "variant_id": 2708133
+        }
+      },
+      {
+        "_id": "chr10:g.89624219T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.512T>C",
+              "hgvs_p": "p.Leu171Pro"
+            },
+            {
+              "effect": "5_prime_UTR_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.-8T>C"
+            },
+            {
+              "effect": "5_prime_UTR_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-713T>C"
+            },
+            {
+              "effect": "upstream_gene_variant",
+              "feature_id": "NM_001126049.1",
+              "genename": "KLLN",
+              "hgvs_c": "c.-1975A>G"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.-8T>C",
+              "NM_001304717.5:c.512T>C",
+              "NM_001304718.2:c.-713T>C"
+            ],
+            "genomic": [
+              "LRG_1087:g.3976A>G",
+              "LRG_311:g.6024T>C",
+              "NC_000010.10:g.89624219T>C",
+              "NC_000010.11:g.87864462T>C",
+              "NG_007466.2:g.6024T>C",
+              "NG_033079.1:g.3976A>G"
+            ],
+            "protein": [
+              "",
+              "NP_001291646.4:p.Leu171Pro"
+            ]
+          },
+          "variant_id": 631126
+        }
+      },
+      {
+        "_id": "chr10:g.89711981T>C",
+        "dbnsfp": {
+          "genename": [
+            "PTEN",
+            "PTEN"
+          ],
+          "hgvsc": [
+            "c.26T>C",
+            "c.599T>C"
+          ],
+          "hgvsp": [
+            "p.Phe9Ser",
+            "p.F200S",
+            "p.Phe200Ser"
+          ]
+        },
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "structural_interaction_variant",
+              "feature_id": "1D5R:A_200-A_239:NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.599T>C"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.1118T>C",
+              "hgvs_p": "p.Phe373Ser"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.599T>C",
+              "hgvs_p": "p.Phe200Ser"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.8T>C",
+              "hgvs_p": "p.Phe3Ser"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "LRG_311t1:c.599T>C",
+              "NM_000314.7(PTEN):c.599T>C",
+              "NM_000314.8:c.599T>C",
+              "NM_001304717.5:c.1118T>C",
+              "NM_001304718.2:c.8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.93786T>C",
+              "NC_000010.10:g.89711981T>C",
+              "NC_000010.11:g.87952224T>C",
+              "NG_007466.2:g.93786T>C"
+            ],
+            "protein": [
+              "",
+              "NP_000305.3:p.Phe200Ser",
+              "NP_001291646.4:p.Phe373Ser",
+              "NP_001291647.1:p.Phe3Ser",
+              "p.Phe200Ser"
+            ]
+          },
+          "variant_id": 189414
+        }
+      },
+      {
+        "_id": "chr10:g.89711966T>C",
+        "dbnsfp": {
+          "genename": [
+            "PTEN",
+            "PTEN"
+          ],
+          "hgvsc": [
+            "c.584T>C",
+            "c.11T>C"
+          ],
+          "hgvsp": [
+            "p.F195S",
+            "p.Phe195Ser",
+            "p.Phe4Ser"
+          ]
+        },
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "structural_interaction_variant",
+              "feature_id": "1D5R:A_195-A_243:NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.584T>C"
+            },
+            {
+              "effect": "structural_interaction_variant",
+              "feature_id": "1D5R:A_195-A_247:NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.584T>C"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.1103T>C",
+              "hgvs_p": "p.Phe368Ser"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.584T>C",
+              "hgvs_p": "p.Phe195Ser"
+            },
+            {
+              "effect": "5_prime_UTR_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "LRG_311t1:c.584T>C",
+              "NM_000314.8:c.584T>C",
+              "NM_001304717.5:c.1103T>C",
+              "NM_001304718.2:c.-8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.93771T>C",
+              "NC_000010.10:g.89711966T>C",
+              "NC_000010.11:g.87952209T>C",
+              "NG_007466.2:g.93771T>C"
+            ],
+            "protein": [
+              "LRG_311p1:p.Phe195Ser",
+              "NP_000305.3:p.Phe195Ser",
+              "NP_000305.3:p.Phe195Ser",
+              "NP_001291646.4:p.Phe368Ser"
+            ]
+          },
+          "variant_id": 1750073
+        }
+      }
+    ],
+    "mv-nm-short-space": [
+      {
+        "_id": "chr10:g.89725237T>G",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "3_prime_UTR_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.*8T>G"
+            },
+            {
+              "effect": "3_prime_UTR_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.*8T>G"
+            },
+            {
+              "effect": "3_prime_UTR_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.*8T>G"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.*8T>G",
+              "NM_001304717.5:c.*8T>G",
+              "NM_001304718.2:c.*8T>G"
+            ],
+            "genomic": [
+              "LRG_311:g.107042T>G",
+              "NC_000010.10:g.89725237T>G",
+              "NC_000010.11:g.87965480T>G",
+              "NG_007466.2:g.107042T>G"
+            ]
+          },
+          "variant_id": 167551
+        }
+      },
+      {
+        "_id": "chr10:g.89690795T>G",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.729-8T>G"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.210-8T>G"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-541-8T>G"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.210-8T>G",
+              "NM_001304717.5:c.730-8T>G",
+              "NM_001304718.2:c.-541-8T>G"
+            ],
+            "genomic": [
+              "LRG_311:g.72600T>G",
+              "NC_000010.10:g.89690795T>G",
+              "NC_000010.11:g.87931038T>G",
+              "NG_007466.2:g.72600T>G"
+            ]
+          },
+          "variant_id": 2708133
+        }
+      },
+      {
+        "_id": "chr10:g.89711867T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.1012-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.493-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-99-8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.493-8T>C",
+              "NM_001304717.5:c.1013-8T>C",
+              "NM_001304718.2:c.-99-8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.93672T>C",
+              "NC_000010.10:g.89711867T>C",
+              "NC_000010.11:g.87952110T>C",
+              "NG_007466.2:g.93672T>C"
+            ]
+          },
+          "variant_id": 2031374
+        }
+      },
+      {
+        "_id": "chr10:g.89690795T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.729-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.210-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-541-8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.210-8T>C",
+              "NM_001304717.5:c.730-8T>C",
+              "NM_001304718.2:c.-541-8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.72600T>C",
+              "NC_000010.10:g.89690795T>C",
+              "NC_000010.11:g.87931038T>C",
+              "NG_007466.2:g.72600T>C"
+            ]
+          },
+          "variant_id": 1137872
+        }
+      },
+      {
+        "_id": "chr10:g.89690854T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.772+8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.253+8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-498+8T>C"
+            },
+            {
+              "effect": "sequence_feature",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.253+8T>C"
+            },
+            {
+              "effect": "sequence_feature",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.253+8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.253+8T>C",
+              "NM_001304717.5:c.773+8T>C",
+              "NM_001304718.2:c.-498+8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.72659T>C",
+              "NC_000010.10:g.89690854T>C",
+              "NC_000010.11:g.87931097T>C",
+              "NG_007466.2:g.72659T>C"
+            ]
+          },
+          "variant_id": 928033
+        }
+      },
+      {
+        "_id": "chr10:g.89725036T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.1546-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.1027-8T>C"
+            },
+            {
+              "effect": "splice_region_variant&intron_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.436-8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.1027-8T>C",
+              "NM_001304717.5:c.1547-8T>C",
+              "NM_001304718.2:c.436-8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.106841T>C",
+              "NC_000010.10:g.89725036T>C",
+              "NC_000010.10:g.89725036T>C",
+              "NC_000010.11:g.87965279T>C",
+              "NG_007466.2:g.106841T>C"
+            ]
+          },
+          "variant_id": 928468
+        }
+      },
+      {
+        "_id": "chr10:g.89624219T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.512T>C",
+              "hgvs_p": "p.Leu171Pro"
+            },
+            {
+              "effect": "5_prime_UTR_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.-8T>C"
+            },
+            {
+              "effect": "5_prime_UTR_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-713T>C"
+            },
+            {
+              "effect": "upstream_gene_variant",
+              "feature_id": "NM_001126049.1",
+              "genename": "KLLN",
+              "hgvs_c": "c.-1975A>G"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.-8T>C",
+              "NM_001304717.5:c.512T>C",
+              "NM_001304718.2:c.-713T>C"
+            ],
+            "genomic": [
+              "LRG_1087:g.3976A>G",
+              "LRG_311:g.6024T>C",
+              "NC_000010.10:g.89624219T>C",
+              "NC_000010.11:g.87864462T>C",
+              "NG_007466.2:g.6024T>C",
+              "NG_033079.1:g.3976A>G"
+            ],
+            "protein": [
+              "",
+              "NP_001291646.4:p.Leu171Pro"
+            ]
+          },
+          "variant_id": 631126
+        }
+      },
+      {
+        "_id": "chr10:g.89711966T>C",
+        "dbnsfp": {
+          "genename": [
+            "PTEN",
+            "PTEN"
+          ],
+          "hgvsc": [
+            "c.584T>C",
+            "c.11T>C"
+          ],
+          "hgvsp": [
+            "p.F195S",
+            "p.Phe195Ser",
+            "p.Phe4Ser"
+          ]
+        },
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "structural_interaction_variant",
+              "feature_id": "1D5R:A_195-A_243:NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.584T>C"
+            },
+            {
+              "effect": "structural_interaction_variant",
+              "feature_id": "1D5R:A_195-A_247:NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.584T>C"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.1103T>C",
+              "hgvs_p": "p.Phe368Ser"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.584T>C",
+              "hgvs_p": "p.Phe195Ser"
+            },
+            {
+              "effect": "5_prime_UTR_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-8T>C"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "LRG_311t1:c.584T>C",
+              "NM_000314.8:c.584T>C",
+              "NM_001304717.5:c.1103T>C",
+              "NM_001304718.2:c.-8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.93771T>C",
+              "NC_000010.10:g.89711966T>C",
+              "NC_000010.11:g.87952209T>C",
+              "NG_007466.2:g.93771T>C"
+            ],
+            "protein": [
+              "LRG_311p1:p.Phe195Ser",
+              "NP_000305.3:p.Phe195Ser",
+              "NP_000305.3:p.Phe195Ser",
+              "NP_001291646.4:p.Phe368Ser"
+            ]
+          },
+          "variant_id": 1750073
+        }
+      },
+      {
+        "_id": "chr10:g.89711981T>C",
+        "dbnsfp": {
+          "genename": [
+            "PTEN",
+            "PTEN"
+          ],
+          "hgvsc": [
+            "c.26T>C",
+            "c.599T>C"
+          ],
+          "hgvsp": [
+            "p.Phe9Ser",
+            "p.F200S",
+            "p.Phe200Ser"
+          ]
+        },
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "structural_interaction_variant",
+              "feature_id": "1D5R:A_200-A_239:NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.599T>C"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.1118T>C",
+              "hgvs_p": "p.Phe373Ser"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.599T>C",
+              "hgvs_p": "p.Phe200Ser"
+            },
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.8T>C",
+              "hgvs_p": "p.Phe3Ser"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "LRG_311t1:c.599T>C",
+              "NM_000314.7(PTEN):c.599T>C",
+              "NM_000314.8:c.599T>C",
+              "NM_001304717.5:c.1118T>C",
+              "NM_001304718.2:c.8T>C"
+            ],
+            "genomic": [
+              "LRG_311:g.93786T>C",
+              "NC_000010.10:g.89711981T>C",
+              "NC_000010.11:g.87952224T>C",
+              "NG_007466.2:g.93786T>C"
+            ],
+            "protein": [
+              "",
+              "NP_000305.3:p.Phe200Ser",
+              "NP_001291646.4:p.Phe373Ser",
+              "NP_001291647.1:p.Phe3Ser",
+              "p.Phe200Ser"
+            ]
+          },
+          "variant_id": 189414
+        }
+      }
+    ],
+    "mv-nm-long-space": [
+      {
+        "_id": "chr10:g.89624219T>C",
+        "snpeff": {
+          "ann": [
+            {
+              "effect": "missense_variant",
+              "feature_id": "NM_001304717.2",
+              "genename": "PTEN",
+              "hgvs_c": "c.512T>C",
+              "hgvs_p": "p.Leu171Pro"
+            },
+            {
+              "effect": "5_prime_UTR_variant",
+              "feature_id": "NM_000314.6",
+              "genename": "PTEN",
+              "hgvs_c": "c.-8T>C"
+            },
+            {
+              "effect": "5_prime_UTR_variant",
+              "feature_id": "NM_001304718.1",
+              "genename": "PTEN",
+              "hgvs_c": "c.-713T>C"
+            },
+            {
+              "effect": "upstream_gene_variant",
+              "feature_id": "NM_001126049.1",
+              "genename": "KLLN",
+              "hgvs_c": "c.-1975A>G"
+            }
+          ]
+        },
+        "clinvar": {
+          "gene": {
+            "id": "5728",
+            "symbol": "PTEN"
+          },
+          "hgvs": {
+            "coding": [
+              "NM_000314.8:c.-8T>C",
+              "NM_001304717.5:c.512T>C",
+              "NM_001304718.2:c.-713T>C"
+            ],
+            "genomic": [
+              "LRG_1087:g.3976A>G",
+              "LRG_311:g.6024T>C",
+              "NC_000010.10:g.89624219T>C",
+              "NC_000010.11:g.87864462T>C",
+              "NG_007466.2:g.6024T>C",
+              "NG_033079.1:g.3976A>G"
+            ],
+            "protein": [
+              "",
+              "NP_001291646.4:p.Leu171Pro"
+            ]
+          },
+          "variant_id": 631126
+        }
+      }
+    ]
+  },
+  "clinvar": {
+    "id": "4757098",
+    "title": "NM_000314.8(PTEN):c.-8T>G",
+    "germline": "Uncertain significance",
+    "pos": 89624219
+  },
+  "mane": {
+    "display_name": "PTEN",
+    "Transcript": [
+      {
+        "id": "ENST00000371953",
+        "MANE": [
+          {
+            "strand": 1,
+            "start": 87863625,
+            "end": 87971930,
+            "refseq_match": "NM_000314.8",
+            "type": "MANE_Select",
+            "Parent": "ENSG00000171862",
+            "object_type": "mane",
+            "species": "homo_sapiens",
+            "assembly_name": "GRCh38",
+            "id": "ENST00000371953",
+            "version": 8,
+            "db_type": "core",
+            "seq_region_name": "10"
+          }
+        ]
+      }
+    ]
+  }
+}

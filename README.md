@@ -1,5 +1,40 @@
 # Variant Search (Beta)
 
+## Variant identity and transcript consistency
+
+Exact genomic alleles are preserved through annotation fallback. A missing
+MyVariant record is not evidence of a different genome assembly, and free-text
+search hits are accepted only after matching the requested HGVS change and
+gene/accession. Transcript fallback hits must also match the resolved genomic
+allele. Candidate recoder alleles are filtered against the query, and a final
+identity check rejects inconsistent substitution coordinates or annotations.
+
+The Variant card displays the selected transcript accession and keeps its
+cDNA, protein and effect together. Ensembl recoder and dbNSFP arrays are not
+paired by index. VEP and snpEff provide transcript-specific pairs; unavailable
+protein annotations remain blank. Explicit transcript/cDNA queries are honored.
+For genomic queries, MANE Select is preferred using a cached, bounded Ensembl
+gene lookup. That lookup supplies transcript metadata only, never GRCh38 variant
+coordinates. If MANE metadata is unavailable, the RefSeq accession fallback
+includes UTR transcripts rather than preferring the longest coding isoform.
+Ensembl's GRCh37 canonical flag is not treated as equivalent to MANE Select.
+
+Regression example: both `PTEN c.-8T>G` and `10 89624219 PTEN T G` resolve to
+`chr10:g.89624219T>G`, `NM_000314.8:c.-8T>G` (5′ UTR), and ClinVar 4757098.
+The alternative `NM_001304717.5:c.512T>G / NP_001291646.4:p.Leu171Arg` is
+shown with its own transcript. Missing annotation must never select ClinVar
+189414, 1750073, or the same-position T>C allele 631126.
+
+`npm test` includes real-response identity fixtures and full form/card regression
+checks using LinkeDOM, with external requests mocked. It covers both PTEN input
+paths, explicit transcript selection, VEP/MANE outages, and BRAF V600E while the
+recoder is unavailable. LinkeDOM is a development-only test dependency.
+
+Deployment for this frontend fix: upload **`script.js` and `index.html` together**
+to the Hostinger `/variant/` directory after merging. The HTML contains the
+matching script content hash to invalidate caches. No API-handler changes or
+stylesheet upload are required.
+
 ## Accepted input formats
 
 Coordinates are interpreted as **GRCh37/hg19 by default** — that is the assembly
