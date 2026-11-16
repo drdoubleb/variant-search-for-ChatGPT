@@ -591,6 +591,10 @@ const resolved = (page, label) => {
         + 'If these coordinates are GRCh38/hg38, tick the GRCh38 box and look it up again; otherwise check the position and the reference allele.');
     assert.equal(page.hidden, true, 'nothing is rendered for a variant this build does not have');
     assert.match(page.panel, /input gives G at chrX:20156693; GRCh37 has C/);
+    // Said at once: the verdict is in before MyVariant's first answer, so the
+    // lookup stops there instead of resolving and annotating the wrong locus
+    // first (a real lookup spent nine seconds doing that).
+    assert(!page.requests.some(r => r.includes('/vep/') || r.includes('/v1/query')), 'nothing more is fetched for it');
     console.log('ok indel lookup: a row whose REF is not the reference is refused');
 }
 // ...and bases spelled out in HGVS, which Ensembl ignores: it answers

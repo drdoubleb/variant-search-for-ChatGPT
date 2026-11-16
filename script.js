@@ -7155,7 +7155,29 @@ const initVariantSearchUi = () => {
             // out in HGVS) against GRCh37 — started now, collected before anything
             // is rendered. See statedReferenceBases.
             const statedReference = isGenomicVariant(query) ? statedReferenceBases(rawInput, query) : null;
-            const statedReferenceCheck = statedReference ? verifyStatedReference(statedReference) : null;
+            let statedReferenceVerdict = null;
+            const statedReferenceCheck = statedReference
+                ? verifyStatedReference(statedReference).then((verdict) => (statedReferenceVerdict = verdict))
+                : null;
+            // The verdict usually lands within half a second, long before the rest
+            // of the lookup. It is looked at wherever the lookup pauses anyway, so
+            // a wrong-build input is told so at once rather than after everything
+            // else has been fetched for it.
+            const refuseStatedReferenceMismatch = () => {
+                if (!statedReferenceVerdict || statedReferenceVerdict.status !== 'mismatch' || !isCurrentSearch()) return;
+                const clip = bases => (bases.length > 24 ? `${bases.slice(0, 24)}…` : bases);
+                const end = statedReference.start + statedReference.bases.length - 1;
+                const where = `${statedReference.chrom}:${statedReference.start}${end > statedReference.start ? `-${end}` : ''}`;
+                LookupProgress.step('identity', 'fail',
+                    `input gives ${clip(statedReference.bases)} at ${where}; GRCh37 has ${clip(statedReferenceVerdict.actual)}`);
+                throw new Error(
+                    `Reference mismatch: the input gives ${clip(statedReference.bases)} at ${where}, but GRCh37/hg19 has `
+                    + `${clip(statedReferenceVerdict.actual)} there. `
+                    + (inputLiftoverGlobal
+                        ? 'Check the position and the reference allele.'
+                        : 'If these coordinates are GRCh38/hg38, tick the GRCh38 box and look it up again; '
+                            + 'otherwise check the position and the reference allele.'));
+            };
             const alleleCheckByVariant = new Map();
             const checkResolvedAllele = resolved => {
                 if (!alleleCheckByVariant.has(resolved)) {
@@ -7227,6 +7249,7 @@ const initVariantSearchUi = () => {
                     // A miss does not change the declared input assembly or allele.
                     // Explicit GRCh38 input was already converted above.
                 }
+                refuseStatedReferenceMismatch();
             }
 
             // If this appears to be a protein variant (e.g. contains p.) and not already genomic
@@ -7283,6 +7306,7 @@ const initVariantSearchUi = () => {
                 // needed — wait for the in-flight call (this also guarantees
                 // lastRecoderResult below reflects this query's attempt).
                 await transcriptsPromise;
+                refuseStatedReferenceMismatch();
                 // getTranscriptsList already asked the recoder for this exact query at
                 // the start of the lookup (and fetchWithRetry exhausted its retries if
                 // Ensembl was unwell) — reuse that answer instead of a second 12s-class
@@ -7757,22 +7781,9 @@ const initVariantSearchUi = () => {
             // as described does not exist on this assembly, and whatever was
             // resolved from its coordinates is about somewhere else.
             if (statedReferenceCheck) {
-                const stated = await statedReferenceCheck;
+                await statedReferenceCheck;
                 if (!isCurrentSearch()) return;
-                if (stated.status === 'mismatch') {
-                    const clip = bases => (bases.length > 24 ? `${bases.slice(0, 24)}…` : bases);
-                    const end = statedReference.start + statedReference.bases.length - 1;
-                    const where = `${statedReference.chrom}:${statedReference.start}${end > statedReference.start ? `-${end}` : ''}`;
-                    LookupProgress.step('identity', 'fail',
-                        `input gives ${clip(statedReference.bases)} at ${where}; GRCh37 has ${clip(stated.actual)}`);
-                    throw new Error(
-                        `Reference mismatch: the input gives ${clip(statedReference.bases)} at ${where}, but GRCh37/hg19 has `
-                        + `${clip(stated.actual)} there. `
-                        + (inputLiftoverGlobal
-                            ? 'Check the position and the reference allele.'
-                            : 'If these coordinates are GRCh38/hg38, tick the GRCh38 box and look it up again; '
-                                + 'otherwise check the position and the reference allele.'));
-                }
+                refuseStatedReferenceMismatch();
             }
             assertResolvedVariantIdentity(query, gVariant, annotation);
             // A genomic input that came back spelled differently (ins → dup, a 3'
