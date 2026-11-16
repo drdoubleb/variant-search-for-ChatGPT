@@ -14,6 +14,15 @@
 // CHROMIUM_PATH defaults to /opt/pw-browsers/chromium (the Claude Code web
 // sandbox's preinstalled build); locally, `npx playwright install chromium`
 // and point CHROMIUM_PATH at it, or omit executablePath by editing below.
+// Where Playwright is installed outside the repo (that sandbox keeps it in
+// /opt/node-tools), say where: NODE_PATH=/opt/node-tools/node_modules node …
+import { createRequire } from 'node:module';
+
+// package.json declares "type": "module", so this file is an ES module and a
+// bare `require` is a ReferenceError — the script could not start at all.
+// createRequire rather than `import`: it keeps CommonJS resolution, which is
+// what honours NODE_PATH for a Playwright that lives outside the repo.
+const require = createRequire(import.meta.url);
 const { chromium } = require('playwright-core');
 const CHROMIUM_PATH = process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium';
 
