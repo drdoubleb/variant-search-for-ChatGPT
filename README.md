@@ -181,6 +181,53 @@ transcript rows on "CHR16" — losing the protein change and the effect — and 
 "CHR16" to every gene-level source. When no gene column was pasted the gene now
 comes from VEP.
 
+### Mitochondrial variants
+
+`m.8993T>G` — MT-ATP6 p.Leu156Arg, NARP/Leigh syndrome — was shown as
+`Gene: MT-ATP6, MT-ATP8, RNR2-END · Transcript: RNR2-END · c.: n.8993T>G ·
+Effect: intergenic_region`. Each source the page read is wrong about the
+mitochondrial genome in its own way, and each needed its own answer:
+
+| Source | What it says | What the page does |
+| --- | --- | --- |
+| snpEff (in MyVariant) | No gene models beyond the two rRNAs: everything else is `intergenic_region` against a made-up feature, `RNR2-END` (nine of nine well-known variants checked) | The block is set aside for `chrMT` records (`withoutUnusableBlocks`); the reason is left in the raw JSON under `_not_used` |
+| ClinVar's gene (in MyVariant) | ClinVar's list is whatever submitters sent — 26 genes for m.8993T>G — and MyVariant keeps one: MT-ATP8 for that variant, MT-ND1 for m.1555A>G in MT-RNR1 | Used for the gene line only when CADD, which works from the position, names none |
+| VEP, RefSeq transcripts | RefSeq has no accessions for the 37 mitochondrial genes; VEP invents them — gene `ATP6`, transcript `ATP6.1` | VEP is asked for Ensembl's own set on `MT`: `MT-ATP6`, `ENST00000361899` |
+| Ensembl recoder | Answers `NC_012920.1:m.8993T>G`; cannot parse MyVariant's `chrMT:g.…` | Asked as `MT:g.…`; `m.` on NC_012920 is read as the same allele (the sequence is identical in both assemblies, so it is never lifted) |
+
+The result is `Gene: MT-ATP6 · ENST00000361899.2 · c.467T>G · p.Leu156Arg ·
+missense_variant`; m.1555A>G is `MT-RNR1 n.908A>G` and m.3243A>G `MT-TL1
+n.14A>G`. With Ensembl down nothing has computed a coding change, so none is
+shown — and CADD still names the gene.
+
+Every common spelling reads as the same query, `chrMT:g.8993T>G`:
+
+```
+M 8993 T G        NC_012920.1:m.8993T>G        m.8993T>G        MT-ATP6 m.8993T>G
+chrM:g.8993T>G    chrMT:g.8993T>G              MT:g.8993T>G
+```
+
+Only the bare `m.` form and the rows used to work. ClinVar's own name for the
+variant, `NC_012920.1:m.8993T>G`, was read as the protein change `p.M.8993T>G`,
+and `chrM` — the hg19 name — was asked of MyVariant as such, a guaranteed miss
+that was recovered only when Ensembl answered and re-spelled it.
+
+Two things found here apply to every chromosome:
+
+- **A genomic query's transcripts survive a re-spelling.** The record for
+  m.3271del is filed as `g.3271del`; Ensembl answers `g.3273del`, the same
+  deletion at the other end of a run of T's. The recoder's transcript rows were
+  matched to the allele by spelling, found no match and were discarded. A
+  genomic query has exactly one allele in the recoder's answer — its own — so
+  the rows are kept; a name (`c.`, `p.`) can still come back as several alleles
+  and is still matched by id.
+- **snpEff's protein-structure contacts are not transcripts.** TP53 R213*
+  carries 762 `structural_interaction_variant` rows
+  (`4QO1:B_169-B_213:NM_001126114.2`), each of which was listed under "Other
+  transcripts".
+
+See `tests/mitochondrial.test.js`.
+
 `npm test` includes real-response identity fixtures and full form/card regression
 checks using LinkeDOM, with external requests mocked. It covers both PTEN input
 paths, explicit transcript selection, VEP/MANE outages, BRAF V600E while the

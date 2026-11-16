@@ -359,7 +359,9 @@ async function lookup(input, fx, {
         }
         if (path.includes('/variant_recoder/')) {
             if (!recoder) return response({ error: 'Service Unavailable' }, 503);
-            return path.endsWith(`/${fx.query}`) ? response(recoder) : response({ error: 'unexpected recoder query' }, 400);
+            // Ensembl is asked about the mitochondrial chromosome as "MT:".
+            const asked = fx.query.replace(/^chrMT?:g\./i, 'MT:g.');
+            return path.endsWith(`/${asked}`) ? response(recoder) : response({ error: 'unexpected recoder query' }, 400);
         }
         if (path.includes('/vep/human/hgvs/')) {
             return path.endsWith(`/${fx.vep[0].input}`) ? response(fx.vep) : response({ error: 'unexpected VEP query' }, 400);

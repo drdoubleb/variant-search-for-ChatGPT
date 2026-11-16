@@ -45,6 +45,21 @@ function assemblyFromNcAccession(value) {
     return null;
 }
 
+// The mitochondrial genome is one sequence in both assemblies — NC_012920.1,
+// the revised Cambridge Reference Sequence — so its accession declares no
+// build and its coordinates never need lifting. (Ensembl's GRCh37 and
+// MyVariant's hg19 both serve it, as "MT" / "chrMT".)
+function isMitochondrialAccession(value) {
+    return /^NC_012920\.\d+/i.test(String(value || '').trim());
+}
+
+// "NC_012920.1:m.8993T>G" (or ":g.") in the chr form the pipeline speaks,
+// "chrMT:g.8993T>G"; null for anything else.
+function mitochondrialToChr(value) {
+    const m = String(value || '').trim().match(/^NC_012920\.\d+:[gm]\.(.+)$/i);
+    return m ? `chrMT:g.${m[1]}` : null;
+}
+
 const DEFAULT_BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
 // The canonical production Vercel host. Any *other* *.vercel.app host is a
 // preview/branch deployment.
@@ -1859,6 +1874,10 @@ function buildTranscriptDisplay(candidates, query = '') {
 function buildCanonicalFromAnnotation(annotation, targetProtein, query = '') {
     const candidates = [];
     for (const ann of [].concat(annotation?.snpeff?.ann || [])) {
+        // snpEff also reports protein-structure contacts, one row per PDB pair
+        // ("4QO1:B_169-B_213:NM_001126114.2", structural_interaction_variant) —
+        // 762 of them for TP53 R213*, each of which was listed as a transcript.
+        if (ann?.feature_type === 'interaction') continue;
         if (ann?.hgvs_c) candidates.push({
             transcript: ann.feature_id || '', cDNA: ann.hgvs_c,
             protein: ann.hgvs_p || '', effect: ann.effect || '',
@@ -1962,7 +1981,10 @@ function recoderHostsFor(query) {
 }
 
 async function fetchVariantRecoderEnsembl(query) {
-    const encoded = encodeURIComponent(query);
+    // Ensembl names the mitochondrial chromosome MT ("MT:g.8993T>G") and cannot
+    // parse MyVariant's "chrMT:g.…" — the one spelling the rest of this pipeline
+    // uses, since it is the one MyVariant files records under.
+    const encoded = encodeURIComponent(String(query).replace(/^chrMT:g\./i, 'MT:g.'));
     const attemptsPerHost = 2;
     const hosts = recoderHostsFor(query);
     let lastErr = null;
@@ -5472,7 +5494,27 @@ async function fetchMyVariant(variant) {
     if (normalizedGenomicId(variant) && normalizedGenomicId(annotation?._id) !== normalizedGenomicId(variant)) {
         throw new Error('MyVariant returned an annotation for a different genomic allele.');
     }
-    return annotation;
+    return withoutUnusableBlocks(annotation);
+}
+
+/*
+ * A MyVariant record minus the blocks that cannot be used for the variant it
+ * is filed under.
+ *
+ * snpEff's hg19 database has no mitochondrial gene models beyond the two rRNA
+ * genes. Everything else in the mitochondrial genome is reported as
+ * "intergenic_region" against a made-up feature, "RNR2-END" — m.8993T>G
+ * (MT-ATP6 p.Leu156Arg, NARP), m.11778G>A (MT-ND4, LHON), m.3243A>G (MT-TL1,
+ * MELAS): nine of nine well-known variants checked. That block named the
+ * gene, the transcript, the coding change and the effect on the page, and
+ * went to the AI review as the variant's consequence. It is set aside, with
+ * the reason left in the raw JSON; VEP and CADD describe these variants.
+ */
+function withoutUnusableBlocks(record) {
+    if (!record || typeof record !== 'object' || !record.snpeff) return record;
+    if (!normalizedGenomicId(record._id).startsWith('chrmt:')) return record;
+    const { snpeff, ...rest } = record;
+    return { ...rest, _not_used: { snpeff: 'snpEff (hg19) has no mitochondrial gene models: it reports these variants as intergenic' } };
 }
 
 // Fetch variant consequence information from the Ensembl VEP HGVS endpoint on the GRCh37 server.
@@ -5610,14 +5652,20 @@ async function fetchVepHgvsHg19(variant) {
         return data;
     };
     let data;
+    // RefSeq has no transcript accessions for the 37 mitochondrial genes, and
+    // VEP's RefSeq set fills the gap with names of its own: m.8993T>G comes back
+    // as gene "ATP6", transcript "ATP6.1". Ensembl's set gives the HGNC symbol
+    // and a real transcript (MT-ATP6, ENST00000361899), so use that one there.
+    const mitochondrial = /^MT?:/i.test(hgvs);
     try {
-        data = await requestVep(true);
+        data = await requestVep(!mitochondrial);
         const cons = (data[0] && data[0].transcript_consequences) || [];
-        if (cons.length === 0) {
+        if (cons.length === 0 && !mitochondrial) {
             data = await requestVep(false);
         }
     } catch (refseqErr) {
         // If the RefSeq request failed outright, fall back to the default Ensembl transcript set.
+        if (mitochondrial) throw refseqErr;
         data = await requestVep(false);
     }
     // Extract transcript consequences list from the first result
@@ -5680,8 +5728,12 @@ function getHitGenesUpper(hit) {
         if (!g) return;
         for (const value of [].concat(g)) genes.add(String(value).trim().toUpperCase());
     };
+    for (const cadd of [].concat(hit?.cadd?.gene || [])) addGene(cadd?.genename || cadd?.symbol);
     addGene(hit?.dbnsfp?.genename);
-    addGene(hit?.clinvar?.gene?.symbol);
+    for (const clinvar of [].concat(hit?.clinvar || [])) {
+        addGene(clinvarPreferredGene(clinvar));
+        addGene(clinvar?.gene?.symbol);
+    }
     if (hit?.snpeff?.ann) {
         const annList = Array.isArray(hit.snpeff.ann) ? hit.snpeff.ann : [hit.snpeff.ann];
         for (const ann of annList) {
@@ -5740,7 +5792,10 @@ function selectRecoderAlleles(data, query) {
         .filter(v => v && typeof v === 'object' && !Array.isArray(v) && (v.hgvsg || v.spdi));
     if (data?.__vsFallback) return alleles; // exact NCBI HGVS contextual mapping
     if (isGenomicVariant(query)) {
-        return alleles.filter(v => String(v.input || '').toLowerCase() === query.toLowerCase());
+        // The recoder echoes its input, which for the mitochondrial chromosome is
+        // spelled for Ensembl ("MT:g.…"), not as the query is ("chrMT:g.…").
+        const spelling = value => normalizedGenomicId(value) || String(value || '').toLowerCase();
+        return alleles.filter(v => spelling(v.input) === spelling(query));
     }
     return alleles.filter(v => {
         if (intent.cdnaTarget) return [].concat(v.hgvsc || []).some(value => {
@@ -5755,18 +5810,38 @@ function selectRecoderAlleles(data, query) {
     });
 }
 
-function recoderTranscriptsForGenomic(data, genomic) {
+// The recoder's transcript rows for the allele `genomic`. `query` is what the
+// recoder was asked.
+function recoderTranscriptsForGenomic(data, genomic, query = '') {
     const id = normalizedGenomicId(genomic);
+    const rowsOf = (allele) => {
+        const rows = transcriptsFromRecoderAllele(allele);
+        // RefSeq has no transcript accessions for mitochondrial genes; the
+        // recoder fills the gap with ids of its own ("ATP6.1"). Its Ensembl
+        // rows name real transcripts.
+        const ensembl = rows.filter(t => /^ENST/i.test(t.transcript));
+        return id.startsWith('chrmt:') && ensembl.length ? ensembl : rows;
+    };
     for (const entry of data || []) {
         for (const allele of Object.values(entry || {})) {
             if (!allele || typeof allele !== 'object') continue;
             const ids = [].concat(allele.hgvsg || []).map(normalizedGenomicId);
             for (const spdi of [].concat(allele.spdi || [])) {
-                if (assemblyFromNcAccession(spdi) !== 'GRCh37') continue;
+                if (assemblyFromNcAccession(spdi) !== 'GRCh37' && !isMitochondrialAccession(spdi)) continue;
                 try { ids.push(normalizedGenomicId(convertSpdiToMyVariant(spdi))); } catch {}
             }
-            if (id && ids.includes(id)) return transcriptsFromRecoderAllele(allele);
+            if (id && ids.includes(id)) return rowsOf(allele);
         }
+    }
+    // No allele is spelled the way `genomic` is. A name (c., p.) can come back
+    // as several alleles, and only the id says which is which — but a genomic
+    // query has one allele in the answer, its own, and the caller has already
+    // established `genomic` as that allele. An indel in a repeat is simply
+    // written differently by each service: the record for m.3271del is filed
+    // as g.3271del, Ensembl answers g.3273del, and its rows were discarded.
+    if (id && isGenomicVariant(query)) {
+        const own = selectRecoderAlleles(data, query);
+        if (own.length === 1) return rowsOf(own[0]);
     }
     return [];
 }
@@ -5798,9 +5873,12 @@ function assertResolvedVariantIdentity(query, resolved, annotation) {
 
 function normalizedGenomicId(value) {
     const raw = String(value || '').trim();
+    // The mitochondrial accession is the same sequence in both builds, and its
+    // HGVS is written "m." — Ensembl answers "NC_012920.1:m.8993T>G".
+    const mito = mitochondrialToChr(raw);
     // MyVariant IDs are GRCh37. Never compare a GRCh38 NC_ coordinate as hg19.
-    if (/^NC_/i.test(raw) && assemblyFromNcAccession(raw) !== 'GRCh37') return '';
-    const hgvs = /^NC_/i.test(raw) ? ncGenomicToChr(raw) : raw;
+    if (!mito && /^NC_/i.test(raw) && assemblyFromNcAccession(raw) !== 'GRCh37') return '';
+    const hgvs = mito || (/^NC_/i.test(raw) ? ncGenomicToChr(raw) : raw);
     if (!isGenomicVariant(hgvs || '')) return '';
     // One chromosome, one name. "7:g." is "chr7:g.", and UCSC's chrM is the
     // chrMT of Ensembl and MyVariant — a mitochondrial variant typed the hg19
@@ -5937,8 +6015,20 @@ function buildSummary(annotation, variant) {
     if (annotation.dbnsfp?.genename) {
         geneNames.add(annotation.dbnsfp.genename);
     }
-    if (annotation.clinvar?.gene?.symbol) {
-        geneNames.add(annotation.clinvar.gene.symbol);
+    // MyVariant keeps ONE of the genes ClinVar lists, and not always the one
+    // the variant is in. ClinVar's preferred name states the gene it describes
+    // the variant in, so that one goes first.
+    //
+    // For the mitochondrial genome ClinVar's gene list is whatever submitters
+    // sent (26 genes for m.8993T>G), so the one MyVariant keeps is close to
+    // arbitrary — MT-ATP8 for that MT-ATP6 variant, MT-ND1 for m.1555A>G in
+    // MT-RNR1. There it is only used when nothing computed from the position
+    // (CADD, above) has named a gene.
+    const mitochondrial = normalizedGenomicId(annotation._id || variant).startsWith('chrmt:');
+    if (annotation.clinvar && !(mitochondrial && geneNames.size > 0)) {
+        const named = clinvarPreferredGene(annotation.clinvar);
+        if (named) geneNames.add(named);
+        if (annotation.clinvar.gene?.symbol) geneNames.add(annotation.clinvar.gene.symbol);
     }
     if (annotation.civic?.gene?.name) {
         geneNames.add(annotation.civic.gene.name);
@@ -6530,6 +6620,24 @@ const initVariantSearchUi = () => {
 
         const normalizeVariantInput = (raw) => {
             let s = raw.trim();
+            // Mitochondrial HGVS is written "m.": m.8993T>G, alone or after the
+            // sequence (NC_012920.1:m.8993T>G — ClinVar's own name — chrM:, MT:)
+            // or the gene (MT-ATP6 m.8993T>G). Only the bare form used to be
+            // read; the rest became the protein change "p.M.8993T>G".
+            {
+                const mito = s.match(/^(?:(\S+?)\s*[:\s]\s*)?m\.(\d\S*)$/i);
+                if (mito) {
+                    const prefix = mito[1] || '';
+                    const isSequence = !prefix || isMitochondrialAccession(prefix) || /^(?:chr)?MT?$/i.test(prefix);
+                    const isGene = /^(?:MT-)?[A-Z][A-Z0-9]{1,7}$/i.test(prefix);
+                    if (isSequence || isGene) {
+                        if (!isSequence) geneHintGlobal = prefix.toUpperCase();
+                        // Bases in capitals, HGVS keywords in lower case.
+                        const change = mito[2].toUpperCase().replace(/DELINS|DEL|INS|DUP|INV/g, k => k.toLowerCase());
+                        return `chrMT:g.${change}`;
+                    }
+                }
+            }
             // If the input contains a '>' (looks like genomic substitution), attempt to parse flexible genomic formats.
             if (s.includes('>')) {
                 try {
@@ -6650,6 +6758,10 @@ const initVariantSearchUi = () => {
             return s;
         };
         query = normalizeVariantInput(query);
+        // MyVariant and Ensembl call the mitochondrial chromosome MT; hg19 files
+        // call it chrM. Asking for "chrM:g.…" was a guaranteed miss at MyVariant,
+        // recovered only if Ensembl answered and re-spelled it.
+        query = query.replace(/^chrM:g\./i, 'chrMT:g.');
         // Log normalized query for debugging
         console.log('[DEBUG] Normalized query:', query);
 
@@ -7371,7 +7483,9 @@ const initVariantSearchUi = () => {
                     try {
                         const mv = converter(raw);
                         const assembly = assemblyFromNcAccession(raw);
-                        if (assembly === 'GRCh37') {
+                        // The mitochondrial sequence is the same in both builds:
+                        // there is nothing to lift (it used to be sent to /map twice).
+                        if (assembly === 'GRCh37' || isMitochondrialAccession(raw)) {
                             console.log(`[DEBUG] Converted ${label} to MV:`, raw, '->', mv, '(already GRCh37)');
                             return mv;
                         }
@@ -7832,7 +7946,7 @@ const initVariantSearchUi = () => {
             }
             if (transcriptsFromRecoder.some(t => t.source === 'recoder')) {
                 const recoderForQuery = lastRecoderResult.query === query ? lastRecoderResult.data : null;
-                transcriptsFromRecoder = recoderTranscriptsForGenomic(recoderForQuery, gVariant);
+                transcriptsFromRecoder = recoderTranscriptsForGenomic(recoderForQuery, gVariant, query);
             }
             const pairedAnnotationRows = buildCanonicalFromAnnotation(annotation, targetProtGlobal, query).transcriptsList;
             transcriptsFromRecoder = transcriptsFromRecoder.map(t => {
@@ -7860,10 +7974,23 @@ const initVariantSearchUi = () => {
                     const namedRow = namedAccession
                         ? paired.find(t => String(t.transcript).toUpperCase().replace(/\.\d+$/, '') === namedAccession)
                         : null;
-                    const gene = geneHintGlobal || (namedRow && namedRow.gene)
-                        || (/^(?:N[MRP]_|ENS|LRG_|CHR)/i.test(intentGene) ? '' : intentGene)
-                        || Array.from(getHitGenesUpper(annotation))[0] || '';
-                    const relevant = gene ? paired.filter(t => t.gene.toUpperCase() === gene.toUpperCase()) : paired;
+                    const namedGene = geneHintGlobal || (namedRow && namedRow.gene)
+                        || (/^(?:N[MRP]_|ENS|LRG_|CHR)/i.test(intentGene) ? '' : intentGene);
+                    let relevant;
+                    if (namedGene) {
+                        relevant = paired.filter(t => t.gene.toUpperCase() === namedGene.toUpperCase());
+                    } else {
+                        // No gene was asked for. Keep the transcripts of the genes
+                        // the record is labelled with — any of them, not the first
+                        // label alone: MyVariant's ClinVar gene for m.8993T>G is
+                        // MT-ATP8, a neighbour the variant is not in, and filtering
+                        // on it discarded the MT-ATP6 row and with it the protein
+                        // change. A label VEP places no transcript in is no reason
+                        // to drop what VEP worked out from the allele itself.
+                        const labelled = getHitGenesUpper(annotation);
+                        relevant = paired.filter(t => labelled.has(t.gene.toUpperCase()));
+                        if (!relevant.length) relevant = paired;
+                    }
                     if (relevant.length) transcriptsFromRecoder = relevant;
                 } catch (err) {
                     // Keep nucleotide-only recoder rows when pairing is unavailable.
@@ -10539,6 +10666,9 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         minimalSpdiForms, parseGenomicHgvs, buildVariantCoordinateTuple, buildGenomicHgvsFromVep,
         reverseComplementSeq, vcfAllelesFromGenomicHgvs, leftNormalizeVcfAlleles,
         convertSpdiToMyVariant, convertHgvsgToMyVariant, recoderHostsFor,
+        // the mitochondrial genome
+        isMitochondrialAccession, mitochondrialToChr, withoutUnusableBlocks, normalizedGenomicId,
+        getHitGenesUpper, buildSummary,
         // reference bases the input states; allele identity across spellings
         statedReferenceBases, verifyStatedReference,
         applyGenomicHgvsToReference, sameGenomicAllele, compareGenomicAlleles,
