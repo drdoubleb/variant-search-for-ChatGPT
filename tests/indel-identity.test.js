@@ -278,6 +278,49 @@ assert.throws(() => h.assertResolvedVariantIdentity(mito.query, 'chr1:g.8993T>G'
         assert.equal(unverified.record, brca1Dup.record);
     }
 }
+// ── Reference bases the input states ───────────────────────────────────────
+{
+    const stated = h.statedReferenceBases;
+    assert.deepEqual(stated('16 2122946 TSC2 TTAA T', 'chr16:g.2122947_2122949del'), { chrom: 'chr16', start: 2122946, bases: 'TTAA' });
+    assert.deepEqual(stated('X\t20148674\tEIF1AX\tT\tTG', 'chrX:g.20148674_20148675insG'), { chrom: 'chrX', start: 20148674, bases: 'T' });
+    assert.deepEqual(stated('7 140453136 BRAF AC TT', 'chr7:g.140453136_140453137delinsTT'), { chrom: 'chr7', start: 140453136, bases: 'AC' });
+    assert.deepEqual(stated('chr7:g.117199645_117199647delAAA', 'chr7:g.117199645_117199647delAAA'), { chrom: 'chr7', start: 117199645, bases: 'AAA' });
+    // Nothing stated, or a substitution (its REF is in the MyVariant id, and
+    // Ensembl rejects a wrong one itself).
+    assert.equal(stated('chr7:g.117199645_117199647del', 'chr7:g.117199645_117199647del'), null);
+    assert.equal(stated('7 140453136 BRAF A T', 'chr7:g.140453136A>T'), null);
+    assert.equal(stated('chr7:g.140453136A>T', 'chr7:g.140453136A>T'), null);
+    assert.equal(stated('X 20148674 EIF1AX - G', 'chrX:g.20148674_20148675insG'), null, 'MAF "-" states no bases');
+    assert.equal(stated('BRCA1 c.5266dup', 'BRCA1:c.5266dup'), null);
+
+    const reference = async (chrom, start, end) => referenceSlice(cftr.reference, start, end);
+    assert.deepEqual(await h.verifyStatedReference({ chrom: 'chr7', start: 117199645, bases: 'TCT' }, reference), { status: 'matches', actual: 'TCT' });
+    assert.deepEqual(await h.verifyStatedReference({ chrom: 'chr7', start: 117199645, bases: 'AAA' }, reference), { status: 'mismatch', actual: 'TCT' });
+    assert.equal((await h.verifyStatedReference({ chrom: 'chr7', start: 117199645, bases: 'TNT' }, reference)).status, 'unverified');
+    assert.equal((await h.verifyStatedReference({ chrom: 'chr7', start: 117199645, bases: 'TCT' }, async () => null)).status, 'unverified');
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+        assert.equal((await h.verifyStatedReference({ chrom: 'chr7', start: 117199645, bases: 'TCT' },
+            async () => { throw new Error('Ensembl sequence request failed (503)'); })).status, 'unverified', 'an outage is not a mismatch');
+    } finally {
+        console.warn = warn;
+    }
+}
+
+// ── Who may answer, and how an answer is read ──────────────────────────────
+// A chromosomal coordinate is only ever asked of the GRCh37 mirror: the main
+// host would read the same numbers as GRCh38.
+assert.deepEqual(h.recoderHostsFor('chr9:g.21971058del'), ['https://grch37.rest.ensembl.org']);
+assert.deepEqual(h.recoderHostsFor('chrX:g.20156693_20156694insAGATT'), ['https://grch37.rest.ensembl.org']);
+for (const assemblyFree of ['NM_000077.5:c.300del', 'CDKN2A:c.300del', 'BRAF:p.Val600Glu', 'rs80357906', 'chrMT:g.8993T>G', 'chrM:g.8993T>G']) {
+    assert.equal(h.recoderHostsFor(assemblyFree).length, 2, `${assemblyFree} still fails over`);
+}
+// Ensembl writes the mitochondrial genome "m.", not "g.".
+assert.equal(h.convertHgvsgToMyVariant('NC_012920.1:m.8993T>G'), 'chrMT:g.8993T>G');
+assert.equal(h.convertHgvsgToMyVariant('NC_000023.10:g.20156694_20156723dup'), 'chrX:g.20156694_20156723dup');
+assert.throws(() => h.convertHgvsgToMyVariant('LRG_292:g.160921dup'), /Cannot map accession/);
+assert.throws(() => h.convertHgvsgToMyVariant('NC_012920.1'), /Cannot read genomic HGVS/);
 console.log('Indel identity unit checks passed');
 
 // ── Full lookups through the real form handler ─────────────────────────────
@@ -377,7 +420,10 @@ const resolved = (page, label) => {
     assert.match(page.panel, /Confirm allele · GRCh37 reference/);
     assert.match(page.panel, /chrX:g\.20156694_20156723dup is the same allele as the input/);
     assert(!page.requests.some(r => r.includes('20156694_20156695ins')), 'the one-base-off candidate is never formed');
-    assert.equal(page.requests.filter(r => r.includes('/sequence/region/')).length, 1, 'one reference request');
+    // Two small reference requests, both started early: the row's REF base, and
+    // the stretch both spellings are applied to.
+    assert.deepEqual(page.requests.filter(r => r.includes('/sequence/region/')).map(r => r.match(/human\/([^?]+)/)[1]).sort(),
+        ['X:20156691..20156725', 'X:20156693..20156693']);
     console.log('ok indel lookup: reported EIF1AX 30-bp duplication');
 }
 
@@ -532,4 +578,72 @@ const resolved = (page, label) => {
     assert.doesNotMatch(page.clinvar, /2505518|Likely pathogenic/, 'another variant\'s ClinVar entry');
     assert.match(page.panel, /MyVariant\.infoannotation found/, 'the rest of the record is still used');
     console.log('ok indel lookup: an allele does not inherit a neighbour\'s ClinVar entry');
+}
+
+// 10. Bases the input states that GRCh37 does not hold. A pasted row whose REF
+//     is wrong for this build (GRCh38 coordinates with the box unticked is the
+//     usual way) used to resolve to whatever sits at those numbers in GRCh37.
+{
+    const wrongRef = eif1axDup.row.replace('\tC\tC', '\tG\tG');
+    assert.notEqual(wrongRef, eif1axDup.row);
+    const page = await lookup(wrongRef, eif1axDup);
+    assert.equal(page.status, 'Error: Reference mismatch: the input gives G at chrX:20156693, but GRCh37/hg19 has C there. '
+        + 'If these coordinates are GRCh38/hg38, tick the GRCh38 box and look it up again; otherwise check the position and the reference allele.');
+    assert.equal(page.hidden, true, 'nothing is rendered for a variant this build does not have');
+    assert.match(page.panel, /input gives G at chrX:20156693; GRCh37 has C/);
+    console.log('ok indel lookup: a row whose REF is not the reference is refused');
+}
+// ...and bases spelled out in HGVS, which Ensembl ignores: it answers
+// g.117199645_117199647delAAA as F508del although the reference there is TCT.
+{
+    const withBases = bases => {
+        const query = `chr7:g.117199645_117199647del${bases}`;
+        const recoder = structuredClone(cftr.recoder);
+        Object.values(recoder[0])[0].input = query;
+        return { ...cftr, query, recoder };
+    };
+    const wrong = await lookup('chr7:g.117199645_117199647delAAA', withBases('AAA'));
+    assert.match(wrong.status, /^Error: Reference mismatch: the input gives AAA at chr7:117199645-117199647, but GRCh37\/hg19 has TCT there\./);
+    assert.equal(wrong.hidden, true);
+    const right = await lookup('chr7:g.117199645_117199647delTCT', withBases('TCT'));
+    resolved(right, 'correctly spelled-out deletion');
+    assert.match(right.variant, /g\.: chr7:g\.117199646_117199648del/);
+    assert.match(right.variant, /p\.: p\.Phe508del/);
+    assert.match(right.panel, /chr7:g\.117199646_117199648del is the same allele as the input/);
+    console.log('ok indel lookup: spelled-out bases must be the reference\'s');
+}
+
+// 11. GRCh37 mirror down. The recoder used to fail over to rest.ensembl.org,
+//     which read the hg19 coordinate as GRCh38; its SPDI was then "lifted back"
+//     one base and chr9:g.21971057C>- — the deletion of a different base —
+//     rendered as the result. A genomic query now fails over to nobody.
+{
+    const { cdkn2aFailover } = fixture;
+    const fx = { query: cdkn2aFailover.query, vep: [{ input: 'unused' }], mane: {}, reference: { chrom: '9', start: 0, seq: '' } };
+    const page = await lookup(cdkn2aFailover.row, fx, {
+        route: (url, path, response) => {
+            if (url.hostname === 'grch37.rest.ensembl.org') return response({ error: 'Service Unavailable' }, 503);
+            if (url.hostname !== 'rest.ensembl.org') return undefined;
+            if (path.includes('/variant_recoder/')) return response(cdkn2aFailover.grch38Recoder);
+            if (path.includes('/map/human/GRCh38/')) return response(cdkn2aFailover.map);
+            return undefined;
+        }
+    });
+    assert(!page.requests.some(r => r.startsWith('rest.ensembl.org/variant_recoder/')), 'the GRCh38 host is not asked about an hg19 coordinate');
+    assert.match(page.status, /^Error: Lookup could not complete: .*did not respond\. This is an upstream outage/);
+    assert.equal(page.hidden, true);
+    assert.doesNotMatch(page.panel + page.variant, /21971057C>-/, 'never the neighbouring base');
+    console.log('ok indel lookup: mirror outage is reported, not answered from the wrong assembly');
+}
+
+// 12. A mitochondrial variant MyVariant does not hold. Ensembl answers
+//     NC_012920.1:m.16300A>C; split on ":g." that became "chrMT:g.undefined",
+//     which was looked up and then sent to VEP.
+{
+    const { mitoNovel } = fixture;
+    const page = await lookup(mitoNovel.row, mitoNovel);
+    resolved(page, 'novel mitochondrial row');
+    assert.match(page.variant, /g\.: chrMT:g\.16300A>C/);
+    assert(!page.requests.some(r => r.includes('undefined')), page.requests.filter(r => r.includes('undefined')).join('\n'));
+    console.log('ok indel lookup: mitochondrial "m." answer is read as a variant');
 }

@@ -1170,6 +1170,51 @@ async function compareGenomicAlleles(query, resolved, fetchReference = fetchGrch
 }
 
 /*
+ * ── Reference bases the input itself states ─────────────────────────────────
+ *
+ * A pasted row carries a REF column and HGVS can spell its bases out
+ * ("delAAT"), but neither survives into the lookup: the row is reduced to the
+ * minimal event, and Ensembl ignores spelled-out bases on anything but a
+ * substitution (it answers chr7:g.117199645_117199647delAAA as F508del,
+ * though the reference there is TCT). So an indel given in the wrong build —
+ * GRCh38 coordinates with the GRCh38 box unticked is the usual way — resolved
+ * to whatever sits at those numbers in GRCh37 and was presented as the answer.
+ *
+ * Stated bases that are not what GRCh37 holds are evidence against the input,
+ * not something to work around, so they are checked and a mismatch is refused.
+ * Substitutions are left out: their REF is part of the MyVariant id and Ensembl
+ * rejects a wrong one itself, and checking them would put an Ensembl request
+ * on the commonest lookup there is.
+ */
+
+// { chrom, start, bases } for the reference bases the input states, or null.
+function statedReferenceBases(rawInput, query) {
+    const row = parseCoordinateRow(rawInput);
+    if (row && row.ref && !(row.ref.length === 1 && row.alt.length === 1)) {
+        return { chrom: `chr${row.chrom}`, start: Number(row.pos), bases: row.ref };
+    }
+    const desc = parseGenomicHgvs(normalizedGenomicId(query));
+    if (desc && desc.refSeq && desc.type !== 'sub') return { chrom: desc.chrom, start: desc.start, bases: desc.refSeq };
+    return null;
+}
+
+// Does GRCh37 hold those bases there? Returns { status, actual } with status
+// 'matches', 'mismatch', or 'unverified' when the reference cannot be read.
+// Never throws; `fetchReference` is injectable for the test suite.
+async function verifyStatedReference(stated, fetchReference = fetchGrch37ReferenceSequence) {
+    const unverified = { status: 'unverified', actual: '' };
+    if (!stated || !/^[ACGT]+$/.test(stated.bases) || stated.bases.length > MAX_VCF_ALLELE_SPAN) return unverified;
+    let seq = null;
+    try {
+        seq = await fetchReference(stated.chrom, stated.start, stated.start + stated.bases.length - 1);
+    } catch (err) {
+        console.warn('Reference sequence unavailable for checking the stated bases', err);
+    }
+    if (!seq) return unverified;
+    return { status: seq === stated.bases ? 'matches' : 'mismatch', actual: seq };
+}
+
+/*
  * ── MyVariant's id versus the ClinVar HGVS in the same record ───────────────
  *
  * `_id` is MyVariant's own construction, and for records it builds from
@@ -1820,11 +1865,15 @@ function buildCanonicalFromAnnotation(annotation, targetProtein, query = '') {
 // Convert hgvsg notation (e.g. "NC_000001.11:g.230710048A>C" or "NC_000001.11:g.230710047_230710048delinsGA")
 // to MyVariant.info notation ("chr1:g.230710048A>C" etc.).
 function convertHgvsgToMyVariant(hgvsg) {
-    // Split accession and variant part
-    const [accession, remainder] = hgvsg.split(':g.');
-    const chr = accessionToChr(accession);
-    if (!chr) throw new Error(`Cannot map accession ${accession} to chromosome`);
-    return `chr${chr}:g.${remainder}`;
+    // Split accession and variant part. The mitochondrial genome is written
+    // "m." rather than "g." (NC_012920.1:m.8993T>G); splitting on ":g." alone
+    // turned every mitochondrial answer into "chrMT:g.undefined", which was
+    // then looked up, and handed to VEP, as if it were a variant.
+    const m = String(hgvsg).match(/^([^:]+):[gm]\.(.+)$/);
+    if (!m) throw new Error(`Cannot read genomic HGVS ${hgvsg}`);
+    const chr = accessionToChr(m[1]);
+    if (!chr) throw new Error(`Cannot map accession ${m[1]} to chromosome`);
+    return `chr${chr}:g.${m[2]}`;
 }
 
 // Convert SPDI notation (e.g. "NC_000001.11:230710047:A:C") to MyVariant.info notation.
@@ -1884,12 +1933,31 @@ function convertSpdiToMyVariant(spdi) {
 // detects from the NC_ accession version and lifts back to hg19.
 const RECODER_HOSTS = ['https://grch37.rest.ensembl.org', 'https://rest.ensembl.org'];
 
+// Which of those hosts may answer this query.
+//
+// A chromosomal coordinate means nothing without its assembly, and every
+// genomic query that reaches the recoder is GRCh37 (GRCh38 input was lifted up
+// front). The main host reads the very same numbers as GRCh38 — another locus —
+// and answers without complaint: asked for chr9:g.21971058del it returns SPDI
+// NC_000009.12:21971057:C:, which the candidate conversion then "lifts back" to
+// chr9:g.21971057C>-, one base away, the deletion of a different base. So a
+// genomic query fails over to nobody: with the mirror down the lookup reports
+// an outage instead of answering about somewhere else.
+//
+// A transcript-level query carries no coordinate and fails over as before, and
+// so does the mitochondrion, whose sequence is the same in both assemblies.
+function recoderHostsFor(query) {
+    const parts = splitGenomicHgvsPositions(query);
+    return parts && !/^MT?$/.test(parts.chrom) ? RECODER_HOSTS.slice(0, 1) : RECODER_HOSTS;
+}
+
 async function fetchVariantRecoderEnsembl(query) {
     const encoded = encodeURIComponent(query);
     const attemptsPerHost = 2;
+    const hosts = recoderHostsFor(query);
     let lastErr = null;
-    for (let hostIdx = 0; hostIdx < RECODER_HOSTS.length; hostIdx++) {
-        const url = `${RECODER_HOSTS[hostIdx]}/variant_recoder/human/${encoded}?content-type=application/json`;
+    for (let hostIdx = 0; hostIdx < hosts.length; hostIdx++) {
+        const url = `${hosts[hostIdx]}/variant_recoder/human/${encoded}?content-type=application/json`;
         let response;
         try {
             response = await fetchWithRetry(url, {
@@ -1899,12 +1967,12 @@ async function fetchVariantRecoderEnsembl(query) {
             }, API_TIMEOUT_MS.recoder, {
                 attempts: attemptsPerHost,
                 onAttempt: ({ attempt }) => LookupProgress.attempt(
-                    'recoder', hostIdx * attemptsPerHost + attempt, RECODER_HOSTS.length * attemptsPerHost)
+                    'recoder', hostIdx * attemptsPerHost + attempt, hosts.length * attemptsPerHost)
             });
         } catch (err) {
             // Transport-level failure after this host's retries — try the next host.
             lastErr = err;
-            if (err && err.retryable && hostIdx < RECODER_HOSTS.length - 1) continue;
+            if (err && err.retryable && hostIdx < hosts.length - 1) continue;
             throw err;
         }
         if (!response.ok) {
@@ -1916,7 +1984,7 @@ async function fetchVariantRecoderEnsembl(query) {
             // is unwell and the variant may be perfectly fine, so fail over.
             err.retryable = RETRYABLE_HTTP_STATUS.has(response.status);
             lastErr = err;
-            if (err.retryable && hostIdx < RECODER_HOSTS.length - 1) continue;
+            if (err.retryable && hostIdx < hosts.length - 1) continue;
             throw err;
         }
         return response.json();
@@ -7073,6 +7141,11 @@ const initVariantSearchUi = () => {
             // collected once the rest of the lookup has settled, instead of adding
             // a round trip at the end. It never rejects, so an early start that is
             // never collected cannot surface as an unhandled rejection.
+            // The input's own reference bases (a row's REF column, bases spelled
+            // out in HGVS) against GRCh37 — started now, collected before anything
+            // is rendered. See statedReferenceBases.
+            const statedReference = isGenomicVariant(query) ? statedReferenceBases(rawInput, query) : null;
+            const statedReferenceCheck = statedReference ? verifyStatedReference(statedReference) : null;
             const alleleCheckByVariant = new Map();
             const checkResolvedAllele = resolved => {
                 if (!alleleCheckByVariant.has(resolved)) {
@@ -7670,6 +7743,27 @@ const initVariantSearchUi = () => {
             // status line, cards), so a stale run must stop before it overwrites
             // the newer lookup's output.
             if (!isCurrentSearch()) return;
+            // Bases the input states that GRCh37 does not hold there: the variant
+            // as described does not exist on this assembly, and whatever was
+            // resolved from its coordinates is about somewhere else.
+            if (statedReferenceCheck) {
+                const stated = await statedReferenceCheck;
+                if (!isCurrentSearch()) return;
+                if (stated.status === 'mismatch') {
+                    const clip = bases => (bases.length > 24 ? `${bases.slice(0, 24)}…` : bases);
+                    const end = statedReference.start + statedReference.bases.length - 1;
+                    const where = `${statedReference.chrom}:${statedReference.start}${end > statedReference.start ? `-${end}` : ''}`;
+                    LookupProgress.step('identity', 'fail',
+                        `input gives ${clip(statedReference.bases)} at ${where}; GRCh37 has ${clip(stated.actual)}`);
+                    throw new Error(
+                        `Reference mismatch: the input gives ${clip(statedReference.bases)} at ${where}, but GRCh37/hg19 has `
+                        + `${clip(stated.actual)} there. `
+                        + (inputLiftoverGlobal
+                            ? 'Check the position and the reference allele.'
+                            : 'If these coordinates are GRCh38/hg38, tick the GRCh38 box and look it up again; '
+                                + 'otherwise check the position and the reference allele.'));
+                }
+            }
             assertResolvedVariantIdentity(query, gVariant, annotation);
             // A genomic input that came back spelled differently (ins → dup, a 3'
             // shift through a repeat) is only the same variant if it is the same
@@ -10434,8 +10528,9 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         GRCH37_NC_VERSIONS, assemblyFromNcAccession, splitGenomicHgvsPositions, ncGenomicToChr,
         minimalSpdiForms, parseGenomicHgvs, buildVariantCoordinateTuple, buildGenomicHgvsFromVep,
         reverseComplementSeq, vcfAllelesFromGenomicHgvs, leftNormalizeVcfAlleles,
-        convertSpdiToMyVariant,
-        // allele identity across spellings
+        convertSpdiToMyVariant, convertHgvsgToMyVariant, recoderHostsFor,
+        // reference bases the input states; allele identity across spellings
+        statedReferenceBases, verifyStatedReference,
         applyGenomicHgvsToReference, sameGenomicAllele, compareGenomicAlleles,
         // MyVariant ids versus ClinVar's own HGVS; which hit a name means
         clinvarGenomicAllele, recordFoundThroughClinvar, reconcileClinvarAllele, variantNameRank,

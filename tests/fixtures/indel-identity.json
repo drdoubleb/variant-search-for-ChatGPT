@@ -408,7 +408,257 @@
    "chrom": "7",
    "start": 117199550,
    "seq": "GGAGCCTTCAGAGGGTAAAATTAAGCACAGTGGAAGAATTTCATTCTGTTCTCAGTTTTCCTGGATTATGCCTGGCACCATTAAAGAAAATATCATCTTTGGTGTTTCCTATGATGAATATAGATACAGAAGCGTCATCAAAGCATGCCAACTAGAAGAGGTAAGAAACTATGTGAAAACTTTTTGATTATGCATATGAAC"
-  }
+  },
+  "vep": [
+   {
+    "end": 117199648,
+    "id": "7:g.117199646_117199648del",
+    "colocated_variants": [
+     {
+      "var_synonyms": {
+       "OMIM": [
+        602421.0001
+       ],
+       "PharmGKB": [
+        "PA166157525"
+       ],
+       "ClinVar": [
+        "RCV000058929",
+        "RCV000119038",
+        "RCV000007524",
+        "RCV000007523",
+        "VCV000007105",
+        "RCV000624683",
+        "RCV001004459",
+        "RCV001000022",
+        "RCV000626693",
+        "RCV000626692",
+        "RCV000785641",
+        "VCV000634837",
+        "RCV001787371",
+        "RCV001787370",
+        "RCV001642198",
+        "RCV003227599",
+        "RCV002251888",
+        "RCV002243627",
+        "RCV002490332",
+        "RCV001831519"
+       ]
+      },
+      "start": 117199645,
+      "id": "rs113993960",
+      "pubmed": [
+       25741868,
+       24033266,
+       31019283,
+       22992668,
+       23757202,
+       34288589,
+       29193749,
+       15367919,
+       26249223,
+       26831755,
+       22981120,
+       34086412,
+       2236053,
+       27917292,
+       32143663,
+       10950058,
+       20977904,
+       21520337,
+       18507830,
+       30996306,
+       23974870,
+       35573065,
+       15371902,
+       22293084,
+       25514096,
+       11280952,
+       21416780,
+       32971794,
+       33623413,
+       15948195,
+       33718573,
+       19774621,
+       19846789,
+       22942289,
+       1937486,
+       1536179,
+       15141088,
+       20301428,
+       1377276,
+       1370875,
+       1381146,
+       1384321,
+       1673094,
+       1756602,
+       1997384,
+       2210767,
+       2220803,
+       2300168,
+       2475911,
+       2570460,
+       7509564,
+       7537148,
+       9135274,
+       9439669,
+       15246977,
+       17206681,
+       17413420,
+       17692578,
+       20595578,
+       20705837,
+       21602569,
+       21825083,
+       21976485,
+       22383668,
+       24559724,
+       24973281,
+       25981758,
+       26968770,
+       27214033,
+       27298017,
+       20021716,
+       23951356,
+       19885835,
+       32109416,
+       36552859,
+       33613790,
+       27899611,
+       35663788,
+       29655499,
+       35338580,
+       30770838,
+       35328596,
+       36819667,
+       35627274,
+       35887629,
+       22140107,
+       27636560,
+       29581887,
+       32398304,
+       26618866,
+       1380673,
+       24958810,
+       21097845,
+       29327948,
+       7691813,
+       28606620,
+       19837664,
+       20301295,
+       11733566,
+       29451946,
+       26574590,
+       29099333,
+       20580320,
+       20696241,
+       19227414,
+       2378364,
+       18234567,
+       26095523,
+       29126871,
+       24375076,
+       20667826,
+       21411740,
+       21486785,
+       27469177,
+       21111762,
+       27334259,
+       24
+      ],
+      "end": 117199648,
+      "strand": 1,
+      "phenotype_or_disease": 1,
+      "frequencies": {
+       "-": {
+        "gnomadg_fin": 0.001508,
+        "af": 0.004,
+        "gnomadg_asj": 0.004032,
+        "gnomade_mid": 0.001735,
+        "gnomade_sas": 0.00247,
+        "gnomadg_mid": 0.003401,
+        "gnomadg": 0.007884,
+        "gnomadg_nfe": 0.0143,
+        "amr": 0.0101,
+        "gnomade_remaining": 0.01009,
+        "gnomadg_ami": 0.001096,
+        "gnomade_fin": 0.002757,
+        "sas": 0.0041,
+        "eur": 0.0089,
+        "gnomadg_eas": 0,
+        "gnomade": 0.01235,
+        "gnomade_nfe": 0.01498,
+        "afr": 0,
+        "gnomadg_afr": 0.002599,
+        "gnomadg_remaining": 0.007583,
+        "gnomadg_sas": 0.003108,
+        "gnomade_asj": 0.006319,
+        "gnomadg_amr": 0.003728,
+        "gnomade_amr": 0.003958,
+        "gnomade_afr": 0.002302,
+        "eas": 0,
+        "gnomade_eas": 2.524e-05
+       }
+      },
+      "seq_region_name": "7",
+      "clin_sig": [
+       "likely_pathogenic",
+       "pathogenic",
+       "drug_response",
+       "risk_factor"
+      ],
+      "allele_string": "TCTT/T/TCTTCTT"
+     },
+     {
+      "var_synonyms": {
+       "COSMIC": [
+        "COSM1684119"
+       ]
+      },
+      "start": 117199646,
+      "somatic": 1,
+      "allele_string": "COSMIC_MUTATION",
+      "id": "COSV50043929",
+      "end": 117199648,
+      "strand": 1,
+      "phenotype_or_disease": 1,
+      "seq_region_name": "7"
+     }
+    ],
+    "start": 117199646,
+    "assembly_name": "GRCh37",
+    "seq_region_name": "7",
+    "allele_string": "CTT/-",
+    "most_severe_consequence": "inframe_deletion",
+    "input": "7:g.117199646_117199648del",
+    "strand": 1,
+    "transcript_consequences": [
+     {
+      "transcript_id": "NM_000492.4",
+      "gene_symbol": "CFTR",
+      "hgvsc": "NM_000492.4:c.1521_1523del",
+      "hgvsp": "NP_000483.3:p.Phe508del",
+      "consequence_terms": [
+       "inframe_deletion"
+      ],
+      "canonical": 1,
+      "strand": 1
+     },
+     {
+      "transcript_id": "NR_149084.1",
+      "gene_symbol": "CFTR-AS1",
+      "hgvsc": "NR_149084.1:n.221+1140_221+1142del",
+      "consequence_terms": [
+       "intron_variant",
+       "non_coding_transcript_variant"
+      ],
+      "canonical": 1,
+      "strand": -1
+     }
+    ]
+   }
+  ],
+  "mane": {}
  },
  "mito": {
   "row": "M 8993 T G",
@@ -1148,5 +1398,134 @@
     ]
    }
   ]
+ },
+ "cdkn2aFailover": {
+  "_note": "rest.ensembl.org (GRCh38) answering an hg19 coordinate, and its GRCh38->GRCh37 map of the same number. Recorded live.",
+  "row": "9 21971057 CDKN2A CG C",
+  "query": "chr9:g.21971058del",
+  "grch38Recoder": [
+   {
+    "-": {
+     "hgvsg": [
+      "NC_000009.12:g.21971058del",
+      "LRG_11:g.28437del"
+     ],
+     "hgvsc": [
+      "ENST00000304494.10:c.304del",
+      "ENST00000380150.2:n.278del",
+      "ENST00000380151.3:c.*227del",
+      "ENST00000479692.2:c.151del"
+     ],
+     "hgvsp": [
+      "ENSP00000307101.5:p.Ala102ArgfsTer44",
+      "ENSP00000466887.1:p.Ala51ArgfsTer44",
+      "ENSP00000464952.1:p.Ala51ArgfsTer44",
+      "ENSP00000468510.1:p.Ala51ArgfsTer44"
+     ],
+     "spdi": [
+      "NC_000009.12:21971057:C:",
+      "LRG_11:28433:G:"
+     ],
+     "input": "chr9:g.21971058del"
+    }
+   }
+  ],
+  "map": {
+   "mappings": [
+    {
+     "mapped": {
+      "coord_system": "chromosome",
+      "seq_region_name": "9",
+      "strand": 1,
+      "end": 21971057,
+      "start": 21971057,
+      "assembly": "GRCh37"
+     },
+     "original": {
+      "seq_region_name": "9",
+      "coord_system": "chromosome",
+      "end": 21971058,
+      "strand": 1,
+      "start": 21971058,
+      "assembly": "GRCh38"
+     }
+    }
+   ]
+  }
+ },
+ "mitoNovel": {
+  "row": "M 16300 A C",
+  "query": "chrM:g.16300A>C",
+  "resolved": "chrMT:g.16300A>C",
+  "recoder": [
+   {
+    "C": {
+     "spdi": [
+      "NC_012920.1:16299:A:C"
+     ],
+     "hgvsg": [
+      "NC_012920.1:m.16300A>C"
+     ],
+     "input": "chrM:g.16300A>C"
+    }
+   }
+  ],
+  "vep": [
+   {
+    "allele_string": "A/C",
+    "strand": 1,
+    "end": 16300,
+    "seq_region_name": "MT",
+    "assembly_name": "GRCh37",
+    "start": 16300,
+    "input": "MT:g.16300A>C",
+    "id": "MT:g.16300A>C",
+    "most_severe_consequence": "upstream_gene_variant",
+    "transcript_consequences": [
+     {
+      "transcript_id": "CYTB",
+      "gene_symbol": "CYTB",
+      "consequence_terms": [
+       "downstream_gene_variant"
+      ],
+      "canonical": 1,
+      "strand": 1
+     },
+     {
+      "transcript_id": "ND4",
+      "gene_symbol": "ND4",
+      "consequence_terms": [
+       "downstream_gene_variant"
+      ],
+      "canonical": 1,
+      "strand": 1
+     },
+     {
+      "transcript_id": "ND5",
+      "gene_symbol": "ND5",
+      "consequence_terms": [
+       "downstream_gene_variant"
+      ],
+      "canonical": 1,
+      "strand": 1
+     },
+     {
+      "transcript_id": "ND6",
+      "gene_symbol": "ND6",
+      "consequence_terms": [
+       "upstream_gene_variant"
+      ],
+      "canonical": 1,
+      "strand": -1
+     }
+    ]
+   }
+  ],
+  "mane": {},
+  "reference": {
+   "chrom": "MT",
+   "start": 16290,
+   "seq": ""
+  }
  }
 }
