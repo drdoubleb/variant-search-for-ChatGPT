@@ -168,6 +168,116 @@ assert.throws(() => h.assertResolvedVariantIdentity(mito.query, 'chrMT:g.8993T>C
     /does not match the genomic input/, 'the alleles still have to agree');
 assert.throws(() => h.assertResolvedVariantIdentity(mito.query, 'chr1:g.8993T>G', { _id: 'chr1:g.8993T>G' }),
     /does not match the genomic input/, 'only M and MT are the same chromosome');
+
+// ── Which variant a gene-symbol name means ─────────────────────────────────
+// MyVariant's hits for "BRCA1 c.5266dup", in the order it ranks them. Each is
+// c.5266dup on SOME RefSeq transcript; only ClinVar 17677 is c.5266dup on the
+// transcript ClinVar names it by (5382insC). It ranks fourth, and the first
+// hit used to be the answer.
+{
+    const { brca1Dup } = fixture;
+    const hits = brca1Dup.searchHits;
+    assert.deepEqual(hits.map(hit => hit.clinvar.variant_id), [266551, 55618, 2583814, 17677, 548237, 55526], 'fixture keeps MyVariant\'s ranking');
+    for (const hit of hits) assert(h.hitMatchesVariantQuery(hit, 'BRCA1 c.5266dup'), `${hit._id} matches on some transcript`);
+    for (const name of ['BRCA1 c.5266dup', 'BRCA1:c.5266dup', 'BRCA1:c.5266dupC']) {
+        assert.equal(h.selectMyVariantHit(hits, name)?.clinvar.variant_id, 17677, name);
+    }
+    // An explicit accession was always unambiguous and still is.
+    assert.equal(h.selectMyVariantHit(hits, 'NM_007294.4:c.5266dup').clinvar.variant_id, 17677);
+    assert.equal(h.selectMyVariantHit(hits, 'NM_007294.4:c.5389dup').clinvar.variant_id, 266551);
+    assert.equal(h.selectMyVariantHit(hits, 'NM_001407664.1:c.5266dup').clinvar.variant_id, 266551, 'the alternative transcript is honoured when named');
+    // Without the variant ClinVar names this way, the name still resolves — a
+    // preference, not a filter — on the lowest-numbered NM_ it matched.
+    const others = hits.filter(hit => hit.clinvar.variant_id !== 17677);
+    const fallback = h.selectMyVariantHit(others, 'BRCA1 c.5266dup');
+    assert(fallback && h.variantNameRank(fallback, 'BRCA1 c.5266dup')[0] === 0);
+    assert.equal(h.variantNameRank(hits[3], 'BRCA1 c.5266dup')[0], 1);
+    assert.equal(h.variantNameRank(hits[3], 'BRCA1:c.5266dupC')[0], 1, 'trailing bases do not change the name');
+    assert.deepEqual(h.variantNameRank(hits[0], 'chr17:g.41201154_41201155dup'), [0, 0, 0], 'genomic queries are not ranked by name');
+    // The same for protein names: an isoform-shifted p. match must not outrank
+    // the variant ClinVar calls by that name.
+    const shifted = { _id: 'chr7:g.140453256A>T', dbnsfp: { genename: 'BRAF', hgvsp: ['p.Val600Glu', 'p.Val560Glu'] },
+        clinvar: { gene: { symbol: 'BRAF' }, rcv: { preferred_name: 'NM_004333.6(BRAF):c.1679T>A (p.Val560Glu)' } } };
+    const v600e = { _id: 'chr7:g.140453136A>T', dbnsfp: { genename: 'BRAF', hgvsp: ['p.Val640Glu', 'p.Val600Glu'] },
+        clinvar: { gene: { symbol: 'BRAF' }, rcv: [{ preferred_name: 'NM_004333.6(BRAF):c.1799T>A (p.Val600Glu)' }] } };
+    assert.equal(h.selectMyVariantHit([shifted, v600e], 'BRAF:p.V600E'), v600e);
+    assert.equal(h.selectMyVariantHit([shifted, v600e], 'BRAF:p.Val560Glu'), shifted);
+}
+
+// ── A MyVariant id that contradicts the record's own ClinVar HGVS ──────────
+{
+    const { brca1Dup, egfrDup } = fixture;
+    const compareWith = fx => (a, b) => h.compareGenomicAlleles(a, b, async (chrom, start, end) => referenceSlice(fx.reference, start, end));
+    const neverCompared = () => { throw new Error('nothing here needs the reference'); };
+
+    // 5382insC: filed under the insertion flanks + "dup", which as HGVS is a
+    // 2-bp duplication. ClinVar's own HGVS in the same record is the 1-bp one.
+    assert.equal(h.clinvarGenomicAllele(brca1Dup.record), brca1Dup.resolved);
+    assert.equal(same(brca1Dup.recordId, brca1Dup.resolved, brca1Dup.reference), false, 'the id is not the allele ClinVar describes');
+    assert.equal(h.recordFoundThroughClinvar(brca1Dup.record, 'BRCA1 c.5266dup'), true);
+    {
+        const out = await h.reconcileClinvarAllele(brca1Dup.record, true, compareWith(brca1Dup));
+        assert.equal(out.status, 'rekeyed');
+        assert.equal(out.record._id, 'chr17:g.41209082dup');
+        assert.equal(out.record._myvariant_id, brca1Dup.recordId, 'provenance kept');
+        assert.equal(out.record.clinvar.variant_id, 17677);
+        assert.equal(out.record.dbnsfp.genename, 'BRCA1');
+        assert.equal(out.record.dbsnp, undefined, 'the dbSNP block is rs2051500205, the literal 2-bp dup — not this variant');
+    }
+    {
+        // Looked up as the id's own allele, the ClinVar entry is someone else's.
+        const out = await h.reconcileClinvarAllele(brca1Dup.record, false, compareWith(brca1Dup));
+        assert.equal(out.status, 'clinvar-dropped');
+        assert.equal(out.record.clinvar, undefined);
+        assert.equal(out.record.dbsnp.rsid, 'rs2051500205', 'what was merged in by id stays');
+        assert.equal(out.record._id, brca1Dup.recordId);
+    }
+    // EGFR exon 20 duplication: ClinVar-only record, and MyVariant's ClinVar
+    // block names the antisense gene.
+    {
+        assert.equal(egfrDup.record.clinvar.gene.symbol, 'EGFR-AS1');
+        const out = await h.reconcileClinvarAllele(egfrDup.record, true, compareWith(egfrDup));
+        assert.equal(out.record._id, 'chr7:g.55249002_55249010dup');
+        assert.equal(out.record.dbnsfp.genename, 'EGFR', 'gene taken from ClinVar\'s preferred name');
+        const literal = await h.reconcileClinvarAllele(egfrDup.record, false, compareWith(egfrDup));
+        assert.equal(literal.status, 'clinvar-dropped');
+        assert.equal(literal.record, null, 'nothing else was filed under that id');
+    }
+    // BRCA2 insCA: a record with its own vcf block, one base off ClinVar 2505518.
+    {
+        const record = brca2Ins.neighbour;
+        assert.equal(h.clinvarGenomicAllele(record), 'chr13:g.32906700_32906701insCA');
+        assert.equal(h.recordFoundThroughClinvar(record, 'NM_000059.4:c.1085_1086insCA'), true);
+        assert.equal(h.recordFoundThroughClinvar(record, 'NM_000059.4:c.1084_1085insCA'), false);
+        const literal = await h.reconcileClinvarAllele(record, false, compareWith(brca2Ins));
+        assert.equal(literal.status, 'clinvar-dropped');
+        assert.deepEqual(literal.record.vcf, record.vcf, 'its own annotations stay');
+        assert.equal(literal.record.clinvar, undefined);
+        const named = await h.reconcileClinvarAllele(record, true, compareWith(brca2Ins));
+        assert.equal(named.record._id, 'chr13:g.32906700_32906701insCA');
+        assert.equal(named.record.vcf, undefined, 'the vcf block is the other allele\'s');
+        assert.equal(named.record.clinvar.variant_id, 2505518);
+    }
+    // Consistent records are returned untouched.
+    {
+        const sameAllele = { _id: 'chrX:g.20148674_20148675insG', vcf: { ref: 'T', alt: 'TG' },
+            clinvar: { variant_id: 1, hgvs: { genomic: ['NC_000023.11:g.20130557dup', 'NC_000023.10:g.20148675dup'] } } };
+        const out = await h.reconcileClinvarAllele(sameAllele, true, compareWith(eif1axReadme));
+        assert.equal(out.status, 'consistent');
+        assert.equal(out.record, sameAllele);
+        assert.equal(h.clinvarGenomicAllele(sameAllele), 'chrX:g.20148675dup', 'GRCh38 entries are skipped');
+        // Deletions and substitutions cannot go wrong this way and cost nothing.
+        const del = { _id: 'chr7:g.117199645_117199647del', clinvar: { hgvs: { genomic: ['NC_000007.13:g.117199646_117199648del'] } } };
+        assert.equal((await h.reconcileClinvarAllele(del, true, neverCompared)).record, del);
+        const snv = { _id: 'chr7:g.140453136A>T', clinvar: { hgvs: { genomic: ['NC_000007.13:g.140453136A>T'] } } };
+        assert.equal((await h.reconcileClinvarAllele(snv, true, neverCompared)).record, snv);
+        assert.equal((await h.reconcileClinvarAllele({ _id: 'chrX:g.20148674_20148675insG' }, true, neverCompared)).status, 'consistent', 'no ClinVar block');
+        // No reference, no verdict: left exactly as it was.
+        const unverified = await h.reconcileClinvarAllele(brca1Dup.record, true, async () => ({ status: 'unverified', detail: 'reference sequence unavailable' }));
+        assert.equal(unverified.status, 'unverified');
+        assert.equal(unverified.record, brca1Dup.record);
+    }
+}
 console.log('Indel identity unit checks passed');
 
 // ── Full lookups through the real form handler ─────────────────────────────
@@ -175,8 +285,12 @@ const script = readFileSync(new URL('../script.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 
 // `fx` supplies the recorded upstream answers. `myvariant` maps ids MyVariant
-// holds to their records (everything else is a 404, as it was live).
-async function lookup(input, fx, { myvariant = {}, recoder = fx.recoder, referenceDown = false } = {}) {
+// holds to their records (everything else is a 404, as it was live); `search`
+// answers its free-text endpoint; a null `recoder` is Ensembl not answering;
+// `route` may answer any request first (return undefined to fall through).
+async function lookup(input, fx, {
+    myvariant = {}, search = () => [], recoder = fx.recoder, referenceDown = false, route = () => undefined, settleMs = 15
+} = {}) {
     const { document } = parseHTML(html);
     const form = document.getElementById('variantForm');
     const listen = form.addEventListener.bind(form);
@@ -193,12 +307,15 @@ async function lookup(input, fx, { myvariant = {}, recoder = fx.recoder, referen
         const url = new URL(address);
         const path = decodeURIComponent(url.pathname);
         requests.push(`${url.hostname}${path}${decodeURIComponent(url.search)}`);
+        const routed = route(url, path, response);
+        if (routed) return routed;
         if (url.hostname === 'myvariant.info') {
-            if (!path.startsWith('/v1/variant/')) return response({ hits: [] });
+            if (!path.startsWith('/v1/variant/')) return response({ hits: search(url.searchParams.get('q')) || [] });
             const id = path.slice('/v1/variant/'.length);
             return myvariant[id] ? response(myvariant[id]) : response({ success: false, error: 'Not Found.' }, 404);
         }
         if (path.includes('/variant_recoder/')) {
+            if (!recoder) return response({ error: 'Service Unavailable' }, 503);
             return path.endsWith(`/${fx.query}`) ? response(recoder) : response({ error: 'unexpected recoder query' }, 400);
         }
         if (path.includes('/vep/human/hgvs/')) {
@@ -227,7 +344,7 @@ async function lookup(input, fx, { myvariant = {}, recoder = fx.recoder, referen
         vm.runInContext('initVariantSearchUi()', context);
         document.getElementById('variantInput').value = input;
         await submit({ preventDefault() {} });
-        await new Promise(resolve => setTimeout(resolve, 15));
+        await new Promise(resolve => setTimeout(resolve, settleMs));
         const card = name => [...document.querySelectorAll('.card')].find(el => el.querySelector('h3')?.textContent === name);
         return {
             status: document.getElementById('status').textContent,
@@ -342,4 +459,77 @@ const resolved = (page, label) => {
     assert.doesNotMatch(page.panel, /Confirm allele/, 'a chromosome alias is not a re-spelling');
     assert(!page.requests.some(r => r.includes('/sequence/region/')), 'so it costs no reference request');
     console.log('ok indel lookup: chrM input resolves to its chrMT record');
+}
+
+// 7. "BRCA1 c.5266dup" — 5382insC. Was: ClinVar 266551 (c.5389dup on the
+//    standard transcript), because it ranks first of six hits that are
+//    c.5266dup on some transcript. And once the right record is chosen, its
+//    MyVariant id is the insertion flanks + "dup": read as HGVS that gave VCF
+//    17-41209078-C-CTG, a 2-bp insertion, for gnomAD and SpliceAI.
+//    Ensembl does not answer a gene-symbol BRCA1 query in time; it is down here.
+{
+    const { brca1Dup } = fixture;
+    const records = Object.fromEntries(brca1Dup.searchHits.map(hit => [hit._id, hit]));
+    records[brca1Dup.recordId] = brca1Dup.record;
+    const page = await lookup(brca1Dup.input, brca1Dup, {
+        recoder: null, myvariant: records, settleMs: 80,
+        search: q => (/^BRCA1[ :]c\.5266dup$/.test(q) ? brca1Dup.searchHits : [])
+    });
+    resolved(page, 'BRCA1 c.5266dup');
+    assert.match(page.clinvar, /Variation ID: 17677/);
+    assert.doesNotMatch(page.clinvar + page.variant, /266551|5389dup/);
+    assert(!page.requests.some(r => r.includes('41201154')), 'the first-ranked hit is not even fetched');
+    assert.match(page.variant, /g\.: chr17:g\.41209082dup/, 'ClinVar\'s own HGVS, not MyVariant\'s id');
+    assert.doesNotMatch(page.variant, /41209079_41209080dup/);
+    assert.match(page.variant, /VCF \(hg19\): 17-41209079-T-TG/);
+    assert.match(page.variant, /Gene: BRCA1/);
+    assert.match(page.variant, /Transcript: NM_007294\.4 \(MANE Select\)/);
+    assert.match(page.variant, /c\.: c\.5266dup/);
+    assert.match(page.variant, /p\.: p\.Gln1756ProfsTer74/);
+    assert.match(page.panel, /allele chr17:g\.41209082dup from ClinVar's own HGVS \(MyVariant files it under chr17:g\.41209079_41209080dup\)/);
+    const downstream = page.requests.filter(r => /\/api\/(?:gnomad-v4|spliceai)/.test(r));
+    assert(downstream.some(r => /gnomad-v4\?chrom=17&pos37=41209079&ref=T&alt=TG\b/.test(r)), downstream.join('\n'));
+    assert(downstream.some(r => r.includes('variant=chr17-41209079-T-TG&')), downstream.join('\n'));
+    assert(!downstream.some(r => /41209078|CTG/.test(r)), 'never the 2-bp insertion');
+    console.log('ok indel lookup: BRCA1 c.5266dup is 5382insC, with ClinVar\'s allele');
+}
+
+// 8. EGFR exon 20 duplication by accession. Was: VCF 7-55248997-G-GAT (2 bp)
+//    for a 9-bp duplication, and "EGFR-AS1" as the gene for every gene card.
+{
+    const { egfrDup } = fixture;
+    const page = await lookup(egfrDup.input, egfrDup, {
+        myvariant: { [egfrDup.recordId]: egfrDup.record }, settleMs: 80,
+        search: q => (q === 'NM_005228.5 c.2300_2308dup' ? egfrDup.searchHits : [])
+    });
+    resolved(page, 'EGFR exon 20 dup');
+    assert.match(page.variant, /g\.: chr7:g\.55249002_55249010dup/);
+    assert.match(page.variant, /VCF \(hg19\): 7-55248998-A-ATGGCCAGCG/);
+    assert.match(page.variant, /Gene: EGFR, EGFR-AS1/, 'the gene ClinVar names the variant in comes first');
+    assert.match(page.variant, /Transcript: NM_005228\.5 \(MANE Select\)/);
+    assert.match(page.variant, /c\.: c\.2300_2308dup/);
+    assert.match(page.variant, /p\.: p\.Ala767_Val769dup/);
+    assert.doesNotMatch(page.variant, /Transcript: NR_|c\.: n\./, 'not the antisense transcript');
+    assert.match(page.clinvar, /Variation ID: 177678/);
+    assert(page.requests.some(r => /\/api\/civic\?gene=EGFR&/.test(r)), 'gene cards ask about EGFR');
+    assert(!page.requests.some(r => /[?&](?:gene|term)=EGFR-AS1/.test(r)), 'not about the antisense gene');
+    assert(page.requests.some(r => r.includes('variant=chr7-55248998-A-ATGGCCAGCG&')));
+    assert(!page.requests.some(r => /55248997|G-GAT/.test(r)), 'never the 2-bp insertion');
+    console.log('ok indel lookup: EGFR exon 20 duplication, right allele and right gene');
+}
+
+// 9. The other direction. "13 32906699 BRCA2 G GCA" is literally the allele
+//    MyVariant files ClinVar 2505518 under — and it is not that variant
+//    (2505518 is c.1085_1086insCA; this is c.1084_1085insCA). Was: ClinVar
+//    2505518 "Likely pathogenic" shown for it.
+{
+    const fx = { ...brca2Ins, ...fixture.brca2Literal };
+    const page = await lookup(fx.row, fx, { myvariant: { [brca2Ins.neighbourId]: brca2Ins.neighbour } });
+    resolved(page, 'literal BRCA2 row');
+    assert.match(page.variant, /g\.: chr13:g\.32906699_32906700insCA/);
+    assert.match(page.variant, /c\.: c\.1084_1085insCA/);
+    assert.match(page.variant, /p\.: p\.Asp362AlafsTer6/);
+    assert.doesNotMatch(page.clinvar, /2505518|Likely pathogenic/, 'another variant\'s ClinVar entry');
+    assert.match(page.panel, /MyVariant\.infoannotation found/, 'the rest of the record is still used');
+    console.log('ok indel lookup: an allele does not inherit a neighbour\'s ClinVar entry');
 }

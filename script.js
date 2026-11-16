@@ -1169,6 +1169,112 @@ async function compareGenomicAlleles(query, resolved, fetchReference = fetchGrch
     return { status: same ? 'same' : 'different', detail: '' };
 }
 
+/*
+ * ── MyVariant's id versus the ClinVar HGVS in the same record ───────────────
+ *
+ * `_id` is MyVariant's own construction, and for records it builds from
+ * ClinVar it is often not the allele ClinVar describes. Measured over 200
+ * ClinVar records of each kind (BRCA1, BRCA2, TP53, MLH1, APC), comparing the
+ * id with the GRCh37 genomic HGVS in the record's own ClinVar block:
+ *
+ *   insertions     49 / 200  name a different allele (the position comes from
+ *                            one normalisation, the inserted bases from another)
+ *   duplications  199 / 200  are written "g.A_Bdup" with the insertion FLANKS,
+ *                            which as HGVS duplicates those two bases instead
+ *   deletions       0 / 200  and delins 0 / 200 — there is no inserted
+ *                            sequence to get out of step
+ *
+ * The site read the id as genomic HGVS. BRCA1 c.5266dupC (5382insC, ClinVar
+ * 17677) is filed under chr17:g.41209079_41209080dup while its ClinVar block
+ * says NC_000017.10:g.41209082dup, so the lookup showed the right ClinVar
+ * record beside VCF 17-41209078-C-CTG — a 2-bp insertion — and asked gnomAD
+ * and SpliceAI about that allele instead of 17-41209079-T-TG.
+ *
+ * ClinVar's HGVS is the authority for a ClinVar variant, so the two are
+ * compared against the reference and, where they disagree, the record is put
+ * right for whatever the lookup was actually for.
+ */
+
+// The GRCh37 genomic HGVS a MyVariant record's own ClinVar block gives for the
+// variant, in chr form; '' when it gives none this parser can read.
+function clinvarGenomicAllele(record) {
+    for (const clinvar of [].concat(record?.clinvar || [])) {
+        for (const hgvs of [].concat(clinvar?.hgvs?.genomic || [])) {
+            if (assemblyFromNcAccession(hgvs) !== 'GRCh37') continue;
+            const chrForm = ncGenomicToChr(hgvs);
+            if (chrForm && parseGenomicHgvs(chrForm)) return chrForm;
+        }
+    }
+    return '';
+}
+
+// The gene in a ClinVar preferred name, "NM_005228.5(EGFR):c.2300_2308dup
+// (p.Ala767_Val769dup)" → "EGFR"; '' when there is none.
+function clinvarPreferredGene(clinvar) {
+    for (const rcv of [].concat(clinvar?.rcv || [])) {
+        const m = String(rcv?.preferred_name || '').match(/^[A-Z]{2}_\d+(?:\.\d+)?\(([A-Za-z0-9-]+)\):/);
+        if (m) return m[1];
+    }
+    return '';
+}
+
+// Did a name search find this record through what ClinVar calls the variant,
+// rather than through what MyVariant attached to the record's own id?
+//
+// Only the ClinVar block travels with the ClinVar variant. Everything else in
+// the record — vcf, snpEff, population frequencies, and dbSNP too — was merged
+// in by id: the 5382insC record carries ClinVar's rs80357906 inside the
+// ClinVar block and, beside it, a dbSNP block for rs2051500205, the literal
+// 2-bp duplication its id spells.
+function recordFoundThroughClinvar(record, query) {
+    return Boolean(record?.clinvar) && hitMatchesVariantQuery({ _id: record._id, clinvar: record.clinvar }, query);
+}
+
+/*
+ * Returns { record, status, clinvarAllele }:
+ *
+ *   'consistent'       the id and ClinVar's HGVS agree, or there is nothing to
+ *                      compare — record returned untouched
+ *   'unverified'       they are spelled differently and the reference could
+ *                      not be consulted — record returned untouched
+ *   'rekeyed'          the lookup was for the ClinVar variant
+ *                      (`foundThroughClinvar`): the record is re-keyed to
+ *                      ClinVar's allele and keeps only what ClinVar said, since
+ *                      everything MyVariant computed from the id (vcf, snpEff,
+ *                      population frequencies) describes the other allele
+ *   'clinvar-dropped'  the lookup was for the id's own allele: the ClinVar
+ *                      block is about a different variant and is removed.
+ *                      `record` is null when nothing else was filed there.
+ *
+ * `compare` is injectable for the test suite.
+ */
+async function reconcileClinvarAllele(record, foundThroughClinvar, compare = compareGenomicAlleles) {
+    const untouched = { record, status: 'consistent', clinvarAllele: '' };
+    const own = parseGenomicHgvs(normalizedGenomicId(record?._id));
+    if (!own || (own.type !== 'ins' && own.type !== 'dup')) return untouched;
+    const clinvarAllele = clinvarGenomicAllele(record);
+    if (!clinvarAllele) return untouched;
+    const verdict = await compare(record._id, clinvarAllele);
+    if (verdict.status !== 'different') {
+        return { record, status: verdict.status === 'unverified' ? 'unverified' : 'consistent', clinvarAllele };
+    }
+    const { clinvar, ...rest } = record;
+    if (foundThroughClinvar) {
+        // `_myvariant_id` keeps the provenance visible in the raw-JSON panel.
+        const rekeyed = { _id: clinvarAllele, _myvariant_id: record._id, clinvar };
+        // MyVariant keeps ONE of the genes ClinVar lists, and for a locus with an
+        // overlapping antisense gene it can be that one: every EGFR exon 20
+        // insertion is labelled EGFR-AS1. ClinVar's preferred name states the
+        // gene the variant is named in — "NM_005228.5(EGFR):c.2300_2308dup".
+        const namedGene = clinvarPreferredGene(clinvar);
+        if (namedGene) rekeyed.dbnsfp = { genename: namedGene };
+        return { record: rekeyed, status: 'rekeyed', clinvarAllele };
+    }
+    const bookkeeping = new Set(['chrom', 'hg19', 'hg38', 'observed']);
+    const hasContent = Object.keys(rest).some(key => !key.startsWith('_') && !bookkeeping.has(key));
+    return { record: hasContent ? rest : null, status: 'clinvar-dropped', clinvarAllele };
+}
+
 // Build a gnomAD variant-browser URL from either raw token input (preferred) or
 // a simple genomic substitution HGVS string.
 // vcfData: optional annotation.vcf object {ref, alt, position} from myvariant.info —
@@ -5591,10 +5697,61 @@ function hitMatchesVariantQuery(hit, identifier, expectedGenomic = '') {
         });
 }
 
+/*
+ * How strongly a matching hit can claim to be THE variant a query names.
+ *
+ * A gene symbol does not choose a transcript, and c./p. numbering differs from
+ * one transcript to the next. "BRCA1 c.5266dup" is c.5266dup on SOME RefSeq
+ * transcript for six different ClinVar variants; five of them are not the
+ * 5382insC founder mutation everyone typing that means, and whichever came
+ * first in MyVariant's search ranking used to be presented as the answer
+ * (ClinVar 266551, which on the standard transcript is c.5389dup).
+ *
+ * ClinVar's preferred name is written on the transcript the field treats as
+ * standard (MANE Select), so a hit ClinVar itself names this way outranks one
+ * that only matches on an alternative transcript. Failing that, prefer the
+ * lowest-numbered NM_ the change matched on — the same fallback
+ * selectCanonicalTranscript uses when MANE is unknown.
+ *
+ * Returns a tuple compared left to right, larger first.
+ */
+function variantNameRank(hit, identifier) {
+    const intent = parseMyVariantQueryIntent(identifier);
+    const names = [].concat(hit?.clinvar?.rcv || []).map(rcv => rcv?.preferred_name).filter(Boolean).map(String);
+    if (intent.proteinTarget) {
+        // "NM_004333.6(BRAF):c.1799T>A (p.Val600Glu)"
+        const wanted = parseProteinChange(intent.proteinTarget.triple || intent.proteinTarget.single);
+        const named = names.some(name => sameProteinChange(parseProteinChange((name.match(/\((p\.[^)]+)\)/) || [])[1]), wanted));
+        return [named ? 1 : 0, 0, 0];
+    }
+    if (!intent.cdnaTarget) return [0, 0, 0];
+    const wanted = normalizeCdnaForMatch(intent.cdnaTarget);
+    const named = names.some(name => normalizeCdnaForMatch((name.match(/:\s*([cn]\.[^\s()]+)/) || [])[1]) === wanted);
+    const values = [].concat(hit?.clinvar?.hgvs?.coding || []);
+    for (const ann of [].concat(hit?.snpeff?.ann || [])) {
+        if (ann?.feature_id && ann?.hgvs_c) values.push(`${ann.feature_id}:${ann.hgvs_c}`);
+    }
+    let lowestNm = Infinity;
+    for (const value of values) {
+        const h = splitTranscriptHgvs(value);
+        const nm = h.transcript.match(/^NM_0*(\d+)/i);
+        if (nm && h.change.toLowerCase() === intent.cdnaTarget) lowestNm = Math.min(lowestNm, Number(nm[1]));
+    }
+    return [named ? 1 : 0, Number.isFinite(lowestNm) ? 1 : 0, Number.isFinite(lowestNm) ? -lowestNm : 0];
+}
+
 function selectMyVariantHit(hits, identifier, expectedGenomic = '') {
     const matches = (hits || []).filter(hit => hitMatchesVariantQuery(hit, identifier, expectedGenomic));
-    // Richer annotations may break ties only AFTER allele identity is established.
-    matches.sort((a, b) => Number(Boolean(b.clinvar)) - Number(Boolean(a.clinvar)));
+    const rank = new Map(matches.map(hit => [hit, variantNameRank(hit, identifier)]));
+    matches.sort((a, b) => {
+        const ra = rank.get(a);
+        const rb = rank.get(b);
+        for (let i = 0; i < ra.length; i++) {
+            if (ra[i] !== rb[i]) return rb[i] - ra[i];
+        }
+        // Richer annotations may break ties only AFTER allele identity is established.
+        return Number(Boolean(b.clinvar)) - Number(Boolean(a.clinvar));
+    });
     return matches[0] || null;
 }
 
@@ -6923,13 +7080,54 @@ const initVariantSearchUi = () => {
                 }
                 return alleleCheckByVariant.get(resolved);
             };
+            // MyVariant's id for a ClinVar insertion or duplication is frequently
+            // not the allele ClinVar describes (see reconcileClinvarAllele). Every
+            // record passes through one of these two before it is used.
+            //
+            // By genomic id — the lookup already knows which allele it wants, so a
+            // ClinVar block belonging to another one is removed. A record that held
+            // nothing else is "no record", reported the way a 404 is.
+            const fetchRecordForAllele = async (id) => {
+                const reconciled = await reconcileClinvarAllele(await fetchMyVariant(id), false);
+                if (reconciled.status === 'clinvar-dropped') {
+                    console.log('[DEBUG] MyVariant files ClinVar allele', reconciled.clinvarAllele, 'under', id, '— ClinVar block not used');
+                }
+                if (!reconciled.record) {
+                    const err = new Error(`MyVariant.info holds no record for ${id} itself`);
+                    err.status = 404;
+                    err.notFound = true;
+                    throw err;
+                }
+                return reconciled.record;
+            };
+            // By name (c., p., rsID) — if ClinVar's name is what matched, ClinVar's
+            // HGVS says which allele that is. Returns null when the hit turns out
+            // to hold nothing for the allele the name matched.
+            let clinvarRekeyed = false;
+            const adoptNamedHit = async (hit) => {
+                const record = await fetchMyVariant(hit._id);
+                const reconciled = await reconcileClinvarAllele(record, recordFoundThroughClinvar(record, query));
+                if (!reconciled.record) return null;
+                clinvarRekeyed = reconciled.status === 'rekeyed';
+                if (reconciled.status === 'rekeyed') {
+                    LookupProgress.step('myvariant', 'ok',
+                        `ClinVar record found — allele ${reconciled.clinvarAllele} from ClinVar's own HGVS (MyVariant files it under ${hit._id})`);
+                } else if (reconciled.status === 'clinvar-dropped') {
+                    LookupProgress.step('myvariant', 'ok',
+                        `record found — its ClinVar entry describes ${reconciled.clinvarAllele}, a different allele, and is not used`);
+                } else if (reconciled.status === 'unverified') {
+                    LookupProgress.step('myvariant', 'warn',
+                        `record found — its id could not be checked against ClinVar's ${reconciled.clinvarAllele}`);
+                }
+                return { gVariant: reconciled.record._id, annotation: reconciled.record };
+            };
 
             // If query is already in genomic HGVS format (chrN:g.posRef>Alt), try fetching directly.
             if (isGenomicVariant(query)) {
                 console.log('[DEBUG] Detected genomic HGVS input, attempting direct fetch:', query);
                 LookupProgress.step('myvariant', 'running');
                 try {
-                    annotation = await fetchMyVariant(query);
+                    annotation = await fetchRecordForAllele(query);
                     gVariant = query;
                     LookupProgress.step('myvariant', 'ok', 'annotation found');
                     console.log('[DEBUG] Direct genomic fetch succeeded for', query);
@@ -6973,8 +7171,11 @@ const initVariantSearchUi = () => {
                     }
                     if (hit && hit._id) {
                         console.log('[DEBUG] Direct MyVariant search hit', hit._id);
-                        gVariant = hit._id;
-                        annotation = await fetchMyVariant(hit._id);
+                        const adopted = await adoptNamedHit(hit);
+                        if (adopted) {
+                            gVariant = adopted.gVariant;
+                            annotation = adopted.annotation;
+                        }
                     }
                 } catch (directErr) {
                     console.log('[DEBUG] Direct MyVariant search error:', directErr);
@@ -7101,7 +7302,7 @@ const initVariantSearchUi = () => {
                     // serial MyVariant round-trips.
                     const candidateAnns = await Promise.all(uniqueCandidates.map(async (cand) => {
                         try {
-                            const fetched = await fetchMyVariant(cand);
+                            const fetched = await fetchRecordForAllele(cand);
                             console.log('[DEBUG] Fetched annotation for candidate', cand);
                             return fetched;
                         } catch {
@@ -7204,10 +7405,21 @@ const initVariantSearchUi = () => {
                                 console.log('[DEBUG] Transcript‑level MyVariant search for', altQuery, 'returned', hit);
                             }
                             if (hit && hit._id) {
-                                // Use the returned _id for a direct MyVariant fetch. This may be a g. or cDNA id.
-                                gVariant = hit._id;
-                                annotation = await fetchMyVariant(gVariant);
-                                foundViaTranscript = true;
+                                // With a genomic allele already resolved the hit had to
+                                // carry that very id, so it is taken as that allele.
+                                // Otherwise it was found by its name.
+                                if (normalizedGenomicId(gVariant)) {
+                                    annotation = await fetchRecordForAllele(hit._id);
+                                    gVariant = hit._id;
+                                    foundViaTranscript = true;
+                                } else {
+                                    const adopted = await adoptNamedHit(hit);
+                                    if (adopted) {
+                                        gVariant = adopted.gVariant;
+                                        annotation = adopted.annotation;
+                                        foundViaTranscript = true;
+                                    }
+                                }
                             }
                         }
                     } catch (transcriptSearchErr) {
@@ -7284,9 +7496,24 @@ const initVariantSearchUi = () => {
                             hit = await queryMyVariantById(altQuery);
                             console.log('[DEBUG] Free-text MyVariant search for', altQuery, 'returned', hit);
                         }
+                        // A hit for a genomic query carries that very id and is taken as
+                        // that allele; any other hit was found by its name. Either way a
+                        // record that holds nothing for the allele wanted is no hit.
+                        let adopted = null;
                         if (hit && hit._id) {
-                            gVariant = hit._id;
-                            annotation = await fetchMyVariant(gVariant);
+                            if (normalizedGenomicId(query)) {
+                                try {
+                                    adopted = { gVariant: hit._id, annotation: await fetchRecordForAllele(hit._id) };
+                                } catch (errRecord) {
+                                    if (!errRecord || !errRecord.notFound) throw errRecord;
+                                }
+                            } else {
+                                adopted = await adoptNamedHit(hit);
+                            }
+                        }
+                        if (adopted) {
+                            gVariant = adopted.gVariant;
+                            annotation = adopted.annotation;
                         } else {
                             // If free-text search fails, attempt to use alternate g. notations derived from Ensembl
                             // Some complex delins variants are indexed by MyVariant using a delins range rather than a simple ref>alt substitution.
@@ -7294,7 +7521,7 @@ const initVariantSearchUi = () => {
                             if (typeof candidateVariants !== 'undefined' && candidateVariants.length > 0) {
                                 for (const cv of candidateVariants) {
                                     try {
-                                        const ann = await fetchMyVariant(cv);
+                                        const ann = await fetchRecordForAllele(cv);
                                         if (ann && ann._id) {
                                             gVariant = ann._id;
                                             annotation = ann;
@@ -7478,14 +7705,28 @@ const initVariantSearchUi = () => {
                     && a.transcript === t.transcript && a.cDNA === t.cDNA);
                 return paired ? { ...t, protein: paired.protein, effect: paired.effect, gene: paired.gene } : t;
             });
-            if (!codonOnlyResolutionGlobal && isGenomicVariant(gVariant) && transcriptsFromRecoder.length) {
+            // A record re-keyed to ClinVar's allele kept only what ClinVar said, so
+            // it has no transcript-specific protein rows of its own; VEP is asked
+            // for them even when the recoder contributed none (it never answers a
+            // gene-symbol BRCA1 query in time).
+            if (!codonOnlyResolutionGlobal && isGenomicVariant(gVariant)
+                && (transcriptsFromRecoder.length || clinvarRekeyed)) {
                 try {
                     const vep = await fetchLookupVep(gVariant);
                     if (!isCurrentSearch()) return;
                     assertResolvedVariantIdentity(gVariant, vep.gVariant || gVariant, null);
                     const paired = transcriptsFromVep(vep.consequences);
                     const intentGene = parseMyVariantQueryIntent(query).gene;
-                    const gene = geneHintGlobal || (/^(?:N[MRP]_|ENS|LRG_|CHR)/i.test(intentGene) ? '' : intentGene)
+                    // A query that names a transcript has named its gene: VEP's row
+                    // for that accession says which. That outranks a gene label on
+                    // the annotation, which for overlapping genes can be the other
+                    // one (ClinVar-derived EGFR exon 20 records say EGFR-AS1).
+                    const namedAccession = /^(?:N[MR]_|ENST|LRG_)/i.test(intentGene) ? intentGene.replace(/\.\d+$/, '') : '';
+                    const namedRow = namedAccession
+                        ? paired.find(t => String(t.transcript).toUpperCase().replace(/\.\d+$/, '') === namedAccession)
+                        : null;
+                    const gene = geneHintGlobal || (namedRow && namedRow.gene)
+                        || (/^(?:N[MRP]_|ENS|LRG_|CHR)/i.test(intentGene) ? '' : intentGene)
                         || Array.from(getHitGenesUpper(annotation))[0] || '';
                     const relevant = gene ? paired.filter(t => t.gene.toUpperCase() === gene.toUpperCase()) : paired;
                     if (relevant.length) transcriptsFromRecoder = relevant;
@@ -10196,6 +10437,8 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         convertSpdiToMyVariant,
         // allele identity across spellings
         applyGenomicHgvsToReference, sameGenomicAllele, compareGenomicAlleles,
+        // MyVariant ids versus ClinVar's own HGVS; which hit a name means
+        clinvarGenomicAllele, recordFoundThroughClinvar, reconcileClinvarAllele, variantNameRank,
         // coordinate-row parsing
         isDnaAllele, isChromToken, splitCoordinateRow, looksLikeCoordinateRow,
         parseCoordinateRow, coordinateRowToGenomicHgvs,
