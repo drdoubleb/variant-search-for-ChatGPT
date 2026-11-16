@@ -5406,8 +5406,12 @@ function parseMyVariantQueryIntent(identifier) {
     const s = String(identifier).trim();
     const m = s.match(/^([A-Za-z0-9_.-]+)\s*[:\s]\s*(.+)$/);
     if (!m) return out;
-    out.gene = m[1].toUpperCase();
     const variantPart = m[2].trim();
+    // What precedes "g." is a sequence name — a chromosome or an accession —
+    // never a gene. Reporting "CHR16" (or "7") as the gene made the transcript
+    // pairing filter on it and discard every transcript.
+    if (/^g\./i.test(variantPart)) return out;
+    out.gene = m[1].toUpperCase();
     if (/^p\./i.test(variantPart)) {
         out.proteinTarget = parseProteinTargetFromQueryVariant(variantPart);
     } else if (/^c\./i.test(variantPart)) {
@@ -7218,7 +7222,12 @@ const initVariantSearchUi = () => {
                         // Attempt to determine the gene symbol for the minimal annotation.  First
                         // extract a leading token from the normalised query (before any colon or space).
                         let geneName = null;
-                        {
+                        // A genomic query names a sequence, not a gene: what sits in
+                        // front of ":g." is "chr16", "7" or an accession, and reading it
+                        // as a symbol put "CHR16" on the Variant card and sent it to
+                        // every gene-level source. Only a transcript-level query
+                        // ("TSC2:c.…") leads with something that can be a gene.
+                        if (!isGenomicVariant(query)) {
                             const m = query.match(/^(\w+)[:\s]/);
                             if (m) {
                                 geneName = m[1].toUpperCase();
@@ -7247,6 +7256,16 @@ const initVariantSearchUi = () => {
                             }
                             if (!isGenomicVariant(gVariant) && vepRes && vepRes.gVariant) {
                                 gVariant = vepRes.gVariant;
+                            }
+                            // Neither the query nor a pasted gene column named the
+                            // gene. VEP has just said which gene this variant sits in,
+                            // which is what the Variant card, the transcript pairing
+                            // below and every gene-level card need.
+                            if (!annotation.dbnsfp && vepRes) {
+                                const vepGene = await resolveGeneSymbolFromVep(vepRes.consequences, recoderData);
+                                if (vepGene && !isChromosomeLikeGeneSymbol(vepGene)) {
+                                    annotation.dbnsfp = { genename: vepGene };
+                                }
                             }
                         } catch (vepEffectErr) {
                             console.log('[DEBUG] VEP consequence lookup for minimal annotation failed:', vepEffectErr);

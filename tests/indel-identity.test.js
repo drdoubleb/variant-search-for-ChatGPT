@@ -192,7 +192,7 @@ async function lookup(input, fx, { myvariant = {}, recoder = fx.recoder, referen
     const fetch = async address => {
         const url = new URL(address);
         const path = decodeURIComponent(url.pathname);
-        requests.push(`${url.hostname}${path}`);
+        requests.push(`${url.hostname}${path}${decodeURIComponent(url.search)}`);
         if (url.hostname === 'myvariant.info') {
             if (!path.startsWith('/v1/variant/')) return response({ hits: [] });
             const id = path.slice('/v1/variant/'.length);
@@ -273,7 +273,19 @@ const resolved = (page, label) => {
     assert.match(page.variant, /c\.: c\.34_63dup/);
     assert.match(page.panel, /not confirmed — reference sequence unavailable/);
     assert.doesNotMatch(page.panel, /same allele as the input/);
-    console.log('ok indel lookup: reference unavailable');
+    // HGVS g. input carries no gene. What precedes ":g." is a chromosome, not a
+    // symbol: this used to render "Gene: CHRX", lose the protein change and
+    // effect (the transcript pairing filtered on "CHRX"), and send "CHRX" to
+    // every gene-level source. VEP names the gene.
+    assert.match(page.variant, /Gene: EIF1AX/);
+    assert.match(page.variant, /Transcript: NM_001412\.4 \(MANE Select\)/);
+    assert.match(page.variant, /p\.: p\.Arg12_Ser21dup/);
+    assert.match(page.variant, /inframe_insertion/);
+    assert.doesNotMatch(page.variant, /Gene: CHR/i);
+    assert.match(page.panel, /GeneEIF1AX/, 'and the panel names it too');
+    assert(page.requests.some(r => /[?&]gene=EIF1AX\b/.test(r)), 'gene-level cards ask about EIF1AX');
+    assert(!page.requests.some(r => /[?&](?:gene|term)=CHR/i.test(r)), 'never about "CHRX"');
+    console.log('ok indel lookup: reference unavailable, gene named by VEP');
 }
 
 // 3. The README's documented example. Was: "Variant identity mismatch".
