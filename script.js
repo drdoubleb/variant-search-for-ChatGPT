@@ -288,6 +288,7 @@ const LookupProgress = (() => {
         parse: 'Parse input',
         liftover: 'Map GRCh38 → GRCh37 · Ensembl',
         recoder: 'Resolve nomenclature · Ensembl',
+        identity: 'Confirm allele · GRCh37 reference',
         myvariant: 'Annotations · MyVariant.info',
         vep: 'Consequences · Ensembl VEP',
         evidence: 'Clinical evidence sources'
@@ -1052,6 +1053,122 @@ async function resolveVcfAlleles(rawInput, gVariant, annotation) {
     }
 }
 
+/*
+ * ── Allele identity for indels ──────────────────────────────────────────────
+ *
+ * A substitution has exactly one spelling. Everything else has several: HGVS
+ * shifts an indel to the 3'-most position it can occupy and renames an
+ * insertion that repeats its neighbour a duplication; VCF left-aligns; and the
+ * recoder answers in whichever of those it was not asked in. So
+ *
+ *   chrX:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT   pasted row
+ *   chrX:g.20156694_20156723dup                                  Ensembl
+ *
+ * are one allele, and comparing the two STRINGS says they are not — which is
+ * how a correctly resolved variant came to be refused as an "identity
+ * mismatch". The converse is just as real: g.32906698_32906699insCA and
+ * g.32906699_32906700insCA read like the same event and are different alleles.
+ *
+ * Only the reference settles it: apply each description to the same stretch
+ * of sequence and compare what comes out. No alignment or shifting heuristics
+ * are involved, so there is nothing to get subtly wrong in a repeat.
+ */
+
+// Apply a parsed genomic HGVS descriptor to a reference window (`seq`, whose
+// first base is 1-based `windowStart`) and return the resulting sequence.
+// Returns null when the descriptor cannot be applied inside that window, or
+// spells out reference bases the window does not contain.
+function applyGenomicHgvsToReference(desc, windowStart, seq) {
+    if (!desc || !seq || desc.type === 'region') return null;
+    const windowEnd = windowStart + seq.length - 1;
+    // A deletion is anchored on the base before it and an insertion sits
+    // against the base after it, so demand one base of margin on either side.
+    if (desc.start - 1 < windowStart || desc.end + 1 > windowEnd) return null;
+    // Notation that names its own reference bases (g.123A>T, delAAT) has to
+    // agree with the reference it is being applied to. If it does not, it
+    // describes some other sequence and no comparison made here means anything.
+    if (desc.refSeq && seq.slice(desc.start - windowStart, desc.end - windowStart + 1) !== desc.refSeq) return null;
+    const alleles = vcfAllelesFromGenomicHgvs(desc, windowStart, seq);
+    if (!alleles) return null;
+    const offset = alleles.pos - windowStart;
+    return seq.slice(0, offset) + alleles.alt + seq.slice(offset + alleles.ref.length);
+}
+
+// Do two genomic HGVS strings describe the same allele? true / false when both
+// can be applied to the window; null when either cannot — "cannot tell" must
+// never be read as "different".
+function sameGenomicAllele(a, b, windowStart, seq) {
+    const descA = parseGenomicHgvs(a);
+    const descB = parseGenomicHgvs(b);
+    if (!descA || !descB) return null;
+    if (descA.chrom !== descB.chrom) return false;
+    const resultA = applyGenomicHgvsToReference(descA, windowStart, seq);
+    const resultB = applyGenomicHgvsToReference(descB, windowStart, seq);
+    if (resultA === null || resultB === null) return null;
+    return resultA === resultB;
+}
+
+// Furthest apart two spellings of one indel are ever expected to sit, and the
+// widest stretch of reference fetched to compare them. Repeat tracts that let
+// an indel slide are tens of bases long; a "re-spelling" kilobases away is a
+// different locus, and an event wider than this is structural.
+const MAX_ALLELE_CHECK_SPAN = 10000;
+
+// Is there anything for the reference to decide? Only when the input names a
+// chromosomal GRCh37 allele and the resolved variant is spelled differently.
+// Transcript and protein queries, LRG_/NG_ coordinates and bare spans give the
+// resolved variant nothing to be held to. Returns the normalised pair, or null.
+function genomicRespelling(query, resolved) {
+    const queryId = normalizedGenomicId(query);
+    const resolvedId = normalizedGenomicId(resolved);
+    if (!queryId || !resolvedId || queryId === resolvedId) return null;
+    const entered = parseGenomicHgvs(queryId);
+    if (!entered || entered.type === 'region') return null;
+    return { queryId, resolvedId, entered };
+}
+
+/*
+ * Is `resolved` the allele the genomic `query` asked for, however each is
+ * spelled? Returns { status, detail }:
+ *
+ *   'not-needed'  same spelling, or no chromosomal allele to compare against
+ *   'same'        different spellings, proven against GRCh37 to be one allele
+ *   'different'   proven to be two alleles — the caller must not present it
+ *   'unverified'  could not be checked (reference unavailable, event too large)
+ *
+ * Never throws: an unreachable reference must not turn a resolvable variant
+ * into an error. `fetchReference` is injectable for the test suite.
+ */
+async function compareGenomicAlleles(query, resolved, fetchReference = fetchGrch37ReferenceSequence) {
+    const respelling = genomicRespelling(query, resolved);
+    if (!respelling) return { status: 'not-needed', detail: '' };
+    const { queryId, resolvedId, entered: q } = respelling;
+    const r = parseGenomicHgvs(resolvedId);
+    // The input is an allele; a resolved form this parser cannot read, or a
+    // bare span, cannot be shown to be the same one.
+    if (!r || r.type === 'region') return { status: 'unverified', detail: 'notation cannot be compared' };
+    if (q.chrom !== r.chrom) return { status: 'different', detail: `on ${r.chrom}, not ${q.chrom}` };
+    const gap = Math.max(q.start, r.start) - Math.min(q.end, r.end);
+    if (gap > MAX_ALLELE_CHECK_SPAN) {
+        return { status: 'different', detail: `${gap.toLocaleString('en-US')} bp from the input position` };
+    }
+    const windowStart = Math.max(1, Math.min(q.start, r.start) - 2);
+    const windowEnd = Math.max(q.end, r.end) + 2;
+    if (windowEnd - windowStart > MAX_ALLELE_CHECK_SPAN) {
+        return { status: 'unverified', detail: 'event too large to compare base by base' };
+    }
+    let seq = null;
+    try {
+        seq = await fetchReference(q.chrom, windowStart, windowEnd);
+    } catch (err) {
+        console.warn('Reference sequence unavailable for allele comparison', err);
+    }
+    if (!seq) return { status: 'unverified', detail: 'reference sequence unavailable' };
+    const same = sameGenomicAllele(queryId, resolvedId, windowStart, seq);
+    if (same === null) return { status: 'unverified', detail: 'notation does not fit the reference' };
+    return { status: same ? 'same' : 'different', detail: '' };
+}
+
 // Build a gnomAD variant-browser URL from either raw token input (preferred) or
 // a simple genomic substitution HGVS string.
 // vcfData: optional annotation.vcf object {ref, alt, position} from myvariant.info —
@@ -1613,13 +1730,16 @@ function convertSpdiToMyVariant(spdi) {
     const chr = accessionToChr(accession);
     if (!chr) throw new Error(`Cannot map accession ${accession} to chromosome`);
     const pos0 = parseInt(posStr, 10);
-    // Convert to 1‑based coordinates. SPDI positions are 0‑based and refer to the start of the reference sequence.
+    // An SPDI position is a 0‑based INTERBASE coordinate: "skip this many bases,
+    // then apply the change". So the first base the change touches is 1‑based
+    // pos0 + 1 — and when nothing is deleted, the change sits in the gap between
+    // 1‑based bases pos0 and pos0 + 1.
     const start = pos0 + 1;
     // The SPDI format expresses simple substitutions, insertions and deletions. See:
     // https://www.ncbi.nlm.nih.gov/variation/notation/ for specification.
     // When the reference (ref) string is non‑empty and the alternate (alt) string is non‑empty, this is a substitution/multi‑nucleotide change.
     // When the ref is non‑empty and alt is empty, this is a deletion. The deleted region spans ref.length bases starting at the 0‑based position.
-    // When ref is empty and alt is non‑empty, this is an insertion. The inserted sequence is inserted between the base at pos0 and pos0+1.
+    // When ref is empty and alt is non‑empty, this is an insertion into the gap described above.
     // Construct MyVariant.info HGVS strings accordingly:
     if (ref && alt) {
         // Substitution or multi‑nucleotide change: chrN:g.startREF>ALT
@@ -1636,9 +1756,15 @@ function convertSpdiToMyVariant(spdi) {
         return `chr${chr}:g.${start}_${end}del`;
     }
     if (!ref && alt) {
-        // Insertion: insertion of alt after base at pos0. In HGVS this is start_(start+1)insALT
-        const end = start; // end position for insertion is start position
-        return `chr${chr}:g.${start}_${start + 1}ins${alt}`;
+        // Insertion. HGVS names the two bases FLANKING the gap, which are 1‑based
+        // pos0 and pos0 + 1 — i.e. `start - 1` and `start`, not `start` and
+        // `start + 1`. Naming the latter placed every SPDI insertion one base too
+        // far 3′, which is a DIFFERENT ALLELE whenever the inserted bases are not
+        // a repeat of the base that was hopped over: Ensembl answers
+        // "chr13:g.32906698_32906699insCA" with SPDI NC_000013.10:32906698::CA,
+        // and reading that back as g.32906699_32906700insCA made the lookup
+        // adopt — and annotate — the neighbouring ClinVar variant 2505518.
+        return `chr${chr}:g.${pos0}_${pos0 + 1}ins${alt}`;
     }
     // Both ref and alt empty describes no change at all — refuse rather than
     // emit malformed HGVS ("g.123>") that downstream parsers would choke on.
@@ -1698,8 +1824,9 @@ const NCBI_VARIATION_SERVICES_BASE = 'https://api.ncbi.nlm.nih.gov/variation/v0'
 // as "TAAT→T", a duplication as "G→GG") — convertSpdiToMyVariant() would turn
 // those into non-minimal HGVS that MyVariant does not index. Trim the shared
 // bases to the minimal event. Trim order changes which flank survives in a
-// repeat region (MyVariant indexes the 3'-shifted HGVS form, which prefix-first
-// trimming matches for deletions but suffix-first matches for insertions), so
+// repeat region: prefix-first leaves the 3'-most placement (the HGVS one),
+// suffix-first the 5'-most (the left-aligned VCF one). MyVariant files the same
+// indel under either depending on which source contributed the record, so
 // return BOTH minimal forms — they collapse to one for substitutions, and the
 // existing candidate selection keeps whichever one actually resolves.
 // Input: a contextual SPDI object; output: minimal SPDI strings (0-2 entries,
@@ -5386,16 +5513,27 @@ function recoderTranscriptsForGenomic(data, genomic) {
     return [];
 }
 
+// The spelling-level half of the identity check. Synchronous and exact, so it
+// can only rule on what a string comparison is able to: the allele-level half
+// — two different spellings of an indel — is compareGenomicAlleles()'s job.
 function assertResolvedVariantIdentity(query, resolved, annotation) {
     const requested = parseGenomicHgvs(query);
     const actual = parseGenomicHgvs(resolved);
+    const queryId = normalizedGenomicId(query);
+    const resolvedId = normalizedGenomicId(resolved);
     // Substitutions have one unambiguous coordinate/REF/ALT tuple. Indels can
-    // legitimately move in repeats through authoritative HGVS normalisation.
-    if (requested?.type === 'sub' && normalizedGenomicId(query) !== normalizedGenomicId(resolved)) {
+    // legitimately move in repeats through authoritative HGVS normalisation,
+    // so for those a differing spelling proves nothing either way.
+    if (requested?.type === 'sub' && queryId !== resolvedId) {
         throw new Error('Variant identity mismatch: the resolved allele does not match the genomic input.');
     }
-    if (actual && annotation?._id && normalizedGenomicId(annotation._id)
-        && normalizedGenomicId(annotation._id) !== normalizedGenomicId(resolved)) {
+    // A MyVariant record has to be filed under the resolved allele. The
+    // placeholder built when MyVariant holds no record is filed under the
+    // QUERY instead, and the query is by definition the allele that was asked
+    // for — treating that as "a different allele" is what refused every indel
+    // Ensembl re-spelled (ins → dup, 3' shifts) and MyVariant does not index.
+    const annotationId = normalizedGenomicId(annotation?._id);
+    if (actual && annotationId && annotationId !== resolvedId && annotationId !== queryId) {
         throw new Error('Variant identity mismatch: annotation belongs to a different genomic allele.');
     }
 }
@@ -5405,7 +5543,13 @@ function normalizedGenomicId(value) {
     // MyVariant IDs are GRCh37. Never compare a GRCh38 NC_ coordinate as hg19.
     if (/^NC_/i.test(raw) && assemblyFromNcAccession(raw) !== 'GRCh37') return '';
     const hgvs = /^NC_/i.test(raw) ? ncGenomicToChr(raw) : raw;
-    return isGenomicVariant(hgvs || '') ? hgvs.toLowerCase().replace(/\s/g, '') : '';
+    if (!isGenomicVariant(hgvs || '')) return '';
+    // One chromosome, one name. "7:g." is "chr7:g.", and UCSC's chrM is the
+    // chrMT of Ensembl and MyVariant — a mitochondrial variant typed the hg19
+    // way ("M 8993 T G") resolved to chrMT:g.8993T>G and was then refused as a
+    // different allele from chrM:g.8993T>G.
+    return hgvs.toLowerCase().replace(/\s/g, '')
+        .replace(/^(?:chr)?(\d{1,2}|x|y|mt?):g\./, (match, chrom) => `chr${chrom === 'm' ? 'mt' : chrom}:g.`);
 }
 
 function hitMatchesVariantQuery(hit, identifier, expectedGenomic = '') {
@@ -6762,6 +6906,19 @@ const initVariantSearchUi = () => {
                 if (!vepByVariant.has(variant)) vepByVariant.set(variant, fetchVepHgvsHg19(variant));
                 return vepByVariant.get(variant);
             };
+            // Allele-level identity check against the reference (see
+            // compareGenomicAlleles). Memoised the same way as VEP so it can be
+            // started the moment the recoder re-spells a genomic input and simply
+            // collected once the rest of the lookup has settled, instead of adding
+            // a round trip at the end. It never rejects, so an early start that is
+            // never collected cannot surface as an unhandled rejection.
+            const alleleCheckByVariant = new Map();
+            const checkResolvedAllele = resolved => {
+                if (!alleleCheckByVariant.has(resolved)) {
+                    alleleCheckByVariant.set(resolved, compareGenomicAlleles(query, resolved));
+                }
+                return alleleCheckByVariant.get(resolved);
+            };
 
             // If query is already in genomic HGVS format (chrN:g.posRef>Alt), try fetching directly.
             if (isGenomicVariant(query)) {
@@ -6981,6 +7138,11 @@ const initVariantSearchUi = () => {
                         gVariant = uniqueCandidates[0];
                     }
                     }
+                    // The adopted candidate has to be proven the same allele as a
+                    // genomic input before it is shown. Start that now so it runs
+                    // alongside the remaining lookups (a no-op for transcript-level
+                    // queries and for a candidate spelled exactly like the input).
+                    checkResolvedAllele(gVariant);
                 }
             }
             // If no annotation yet, or recoder failed, attempt a free-text MyVariant search.
@@ -7263,6 +7425,30 @@ const initVariantSearchUi = () => {
             // the newer lookup's output.
             if (!isCurrentSearch()) return;
             assertResolvedVariantIdentity(query, gVariant, annotation);
+            // A genomic input that came back spelled differently (ins → dup, a 3'
+            // shift through a repeat) is only the same variant if it is the same
+            // SEQUENCE. Spellings cannot answer that, so ask the reference — and
+            // say so in the panel, because "I typed an insertion and got a
+            // duplication" is exactly what a user needs reassurance about.
+            if (genomicRespelling(query, gVariant)) {
+                LookupProgress.step('identity', 'running');
+                const alleleCheck = await checkResolvedAllele(gVariant);
+                if (!isCurrentSearch()) return;
+                if (alleleCheck.status === 'different') {
+                    LookupProgress.step('identity', 'fail',
+                        `${gVariant} is not the allele entered${alleleCheck.detail ? ` (${alleleCheck.detail})` : ''}`);
+                    throw new Error('Variant identity mismatch: the resolved allele does not match the genomic input.');
+                }
+                if (alleleCheck.status === 'same') {
+                    LookupProgress.step('identity', 'ok', `${gVariant} is the same allele as the input`);
+                } else {
+                    // Not proven either way. The recoder only ever offers
+                    // candidates for the allele it was asked about, so carry on
+                    // with its spelling — but do not claim a confirmation.
+                    LookupProgress.step('identity', 'warn',
+                        `not confirmed${alleleCheck.detail ? ` — ${alleleCheck.detail}` : ''}`);
+                }
+            }
             if (transcriptsFromRecoder.some(t => t.source === 'recoder')) {
                 const recoderForQuery = lastRecoderResult.query === query ? lastRecoderResult.data : null;
                 transcriptsFromRecoder = recoderTranscriptsForGenomic(recoderForQuery, gVariant);
@@ -9988,6 +10174,9 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         GRCH37_NC_VERSIONS, assemblyFromNcAccession, splitGenomicHgvsPositions, ncGenomicToChr,
         minimalSpdiForms, parseGenomicHgvs, buildVariantCoordinateTuple, buildGenomicHgvsFromVep,
         reverseComplementSeq, vcfAllelesFromGenomicHgvs, leftNormalizeVcfAlleles,
+        convertSpdiToMyVariant,
+        // allele identity across spellings
+        applyGenomicHgvsToReference, sameGenomicAllele, compareGenomicAlleles,
         // coordinate-row parsing
         isDnaAllele, isChromToken, splitCoordinateRow, looksLikeCoordinateRow,
         parseCoordinateRow, coordinateRowToGenomicHgvs,

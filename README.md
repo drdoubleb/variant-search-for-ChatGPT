@@ -7,7 +7,9 @@ MyVariant record is not evidence of a different genome assembly, and free-text
 search hits are accepted only after matching the requested HGVS change and
 gene/accession. Transcript fallback hits must also match the resolved genomic
 allele. Candidate recoder alleles are filtered against the query, and a final
-identity check rejects inconsistent substitution coordinates or annotations.
+identity check rejects inconsistent coordinates or annotations — by exact
+spelling for substitutions, and by allele for everything else (see
+[Indels: one allele, several spellings](#indels-one-allele-several-spellings)).
 
 The Variant card displays the selected transcript accession and keeps its
 cDNA, protein and effect together. Ensembl recoder and dbNSFP arrays are not
@@ -25,10 +27,67 @@ The alternative `NM_001304717.5:c.512T>G / NP_001291646.4:p.Leu171Arg` is
 shown with its own transcript. Missing annotation must never select ClinVar
 189414, 1750073, or the same-position T>C allele 631126.
 
+### Indels: one allele, several spellings
+
+A substitution has exactly one spelling. An indel has several: HGVS shifts it
+to the 3′-most position it can occupy and calls an insertion that repeats its
+neighbour a duplication, VCF left-aligns, and Ensembl answers in whichever form
+it was not asked in. A pasted row and Ensembl's answer for it routinely differ
+as text while being the same variant:
+
+```
+X 20156693 EIF1AX C CAGATTCATTCTCATTCTTACCCCTGCGTCT
+  queried as   chrX:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT
+  resolved as  chrX:g.20156694_20156723dup   NM_001412.4:c.34_63dup   p.Arg12_Ser21dup
+```
+
+So spellings cannot decide identity for indels in either direction. Comparing
+them as strings refused that lookup outright ("Variant identity mismatch:
+annotation belongs to a different genomic allele") along with every other indel
+that Ensembl re-spells and MyVariant does not index — while two insertions one
+base apart, which *are* different alleles, passed.
+
+`compareGenomicAlleles` settles it against the sequence instead: whenever a
+genomic input comes back spelled differently, both descriptions are applied to
+the same stretch of GRCh37 reference (Ensembl `/sequence/region`, one small
+request, started as soon as the recoder answers) and the results compared. No
+shifting or alignment heuristics are involved. The outcome is a row in the
+lookup progress panel, **Confirm allele · GRCh37 reference**:
+
+| Outcome | Panel | Effect |
+| --- | --- | --- |
+| same sequence | `●` "… is the same allele as the input" | lookup proceeds |
+| different sequence | `✕` "… is not the allele entered" | hard error — never rendered |
+| reference unreachable, or event wider than 10 kb | `▲` "not confirmed — …" | lookup proceeds on Ensembl's mapping, without claiming a confirmation |
+
+The recoder's SPDI output is part of the same story. An SPDI position is a
+0-based *interbase* coordinate, so an insertion at `p` lies between 1-based
+bases `p` and `p+1`. `convertSpdiToMyVariant` used to read it as `p+1`/`p+2`,
+one base too far 3′ — a different allele unless the inserted bases repeat the
+base they hop over. That candidate was then looked up, and adopted whenever
+MyVariant happened to hold it.
+
+Regression examples (live responses recorded in
+`tests/fixtures/indel-identity.json`):
+
+- The row above, and the documented `X 20148674 EIF1AX T TG` →
+  `chrX:g.20148675dup` / `NM_001412.4:c.388dup`, resolve instead of failing.
+- `13 32906698 BRCA2 T TCA` resolves to its own allele,
+  `chr13:g.32906698_32906699insCA` / `NM_000059.4:c.1083_1084insCA` /
+  `p.Asp362GlnfsTer6`. It must never again be answered with the neighbouring
+  `g.32906699_32906700insCA` (`c.1084_1085insCA`, ClinVar 2505518).
+- `chr7:g.117199645_117199647del` and `…646_…648del` are both CFTR F508del;
+  `…644_…646del`, one base 5′, is I507del.
+- `M 8993 T G` resolves to `chrMT:g.8993T>G` (ClinVar 9641). How a chromosome
+  is *named* is not part of the allele either: `7:g.` is `chr7:g.`, and UCSC's
+  `chrM` is the `chrMT` of Ensembl and MyVariant. Identity comparisons
+  normalise both, so the hg19 spelling is no longer refused as a mismatch.
+
 `npm test` includes real-response identity fixtures and full form/card regression
 checks using LinkeDOM, with external requests mocked. It covers both PTEN input
-paths, explicit transcript selection, VEP/MANE outages, and BRAF V600E while the
-recoder is unavailable. LinkeDOM is a development-only test dependency.
+paths, explicit transcript selection, VEP/MANE outages, BRAF V600E while the
+recoder is unavailable, and the indel cases above (`tests/indel-identity.test.js`).
+LinkeDOM is a development-only test dependency.
 
 Deployment for this frontend fix: upload **`script.js` and `index.html` together**
 to the Hostinger `/variant/` directory after merging. The HTML contains the

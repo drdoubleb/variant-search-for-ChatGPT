@@ -1,0 +1,508 @@
+{
+ "_recorded": "Live responses recorded 2026-11-16 from grch37.rest.ensembl.org, rest.ensembl.org and myvariant.info. Reference windows are GRCh37, inclusive, 1-based.",
+ "eif1axDup": {
+  "row": "X\t20156693\tEIF1AX\tC\tCAGATTCATTCTCATTCTTACCCCTGCGTCT",
+  "query": "chrX:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT",
+  "resolved": "chrX:g.20156694_20156723dup",
+  "recoder": [
+   {
+    "AGATTCATTCTCATTCTTACCCCTGCGTCT": {
+     "hgvsg": [
+      "NC_000023.10:g.20156694_20156723dup"
+     ],
+     "hgvsp": [
+      "ENSP00000368927.5:p.Arg12_Ser21dup",
+      "NP_001403.1:p.Arg12_Ser21dup"
+     ],
+     "input": "chrX:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT",
+     "spdi": [
+      "NC_000023.10:20156693::AGATTCATTCTCATTCTTACCCCTGCGTCT"
+     ],
+     "hgvsc": [
+      "ENST00000379593.1:c.17-2764_17-2735dup",
+      "ENST00000379607.5:c.34_63dup",
+      "NM_001412.4:c.34_63dup"
+     ]
+    }
+   }
+  ],
+  "vep": [
+   {
+    "strand": 1,
+    "most_severe_consequence": "inframe_insertion",
+    "allele_string": "-/AGATTCATTCTCATTCTTACCCCTGCGTCT",
+    "input": "X:g.20156694_20156723dup",
+    "seq_region_name": "X",
+    "start": 20156694,
+    "assembly_name": "GRCh37",
+    "id": "X:g.20156694_20156723dup",
+    "transcript_consequences": [
+     {
+      "variant_allele": "AGATTCATTCTCATTCTTACCCCTGCGTCT",
+      "transcript_id": "NM_001412.4",
+      "consequence_terms": [
+       "inframe_insertion"
+      ],
+      "amino_acids": "-/RRRGKNENES",
+      "impact": "MODERATE",
+      "codons": "-/AGACGCAGGGGTAAGAATGAGAATGAATCT",
+      "biotype": "protein_coding",
+      "given_ref": "-",
+      "strand": -1,
+      "hgvsc": "NM_001412.4:c.34_63dup",
+      "used_ref": "-",
+      "cds_start": 63,
+      "cdna_end": 262,
+      "gene_id": "1964",
+      "canonical": 1,
+      "protein_end": 22,
+      "hgvsp": "NP_001403.1:p.Arg12_Ser21dup",
+      "cds_end": 64,
+      "cdna_start": 261,
+      "gene_symbol": "EIF1AX",
+      "gene_symbol_source": "EntrezGene",
+      "protein_start": 21
+     },
+     {
+      "gene_id": "100158262",
+      "transcript_id": "NR_023358.1",
+      "variant_allele": "AGATTCATTCTCATTCTTACCCCTGCGTCT",
+      "used_ref": "-",
+      "gene_symbol": "SCARNA9L",
+      "given_ref": "-",
+      "biotype": "ncRNA",
+      "distance": 2162,
+      "gene_symbol_source": "EntrezGene",
+      "strand": -1,
+      "canonical": 1,
+      "consequence_terms": [
+       "upstream_gene_variant"
+      ],
+      "impact": "MODIFIER"
+     },
+     {
+      "variant_allele": "AGATTCATTCTCATTCTTACCCCTGCGTCT",
+      "used_ref": "-",
+      "transcript_id": "NR_046592.2",
+      "gene_id": "100874078",
+      "impact": "MODIFIER",
+      "consequence_terms": [
+       "upstream_gene_variant"
+      ],
+      "canonical": 1,
+      "gene_symbol_source": "EntrezGene",
+      "strand": 1,
+      "distance": 1392,
+      "biotype": "lncRNA",
+      "gene_symbol": "EIF1AX-AS1",
+      "given_ref": "-"
+     }
+    ],
+    "end": 20156693
+   }
+  ],
+  "mane": {
+   "display_name": "EIF1AX",
+   "Transcript": [
+    {
+     "id": "ENST00000379607",
+     "MANE": [
+      {
+       "type": "MANE_Select",
+       "refseq_match": "NM_001412.4",
+       "id": "ENST00000379607",
+       "version": 10
+      }
+     ]
+    }
+   ]
+  },
+  "reference": {
+   "chrom": "X",
+   "start": 20156600,
+   "seq": "CCCAGCTAAAAAAGAAAGGATGTTATTTTAAAAAGCGTAATTTATGAAAACACTTACCCTGACCATCCTCTTTGAATACCAGTTCTCTTTTTTCAGATTCATTCTCATTCTTACCCCTGCGTCTGTTTTTACCTCCTTTACCTGATGGTTTAAAAAAAAGAAAAGGAGGTAAATGACATTAATTATCTGTAAAACAGTATGAAATAAAATGAAATTAAGGC"
+  }
+ },
+ "eif1axReadme": {
+  "row": "X 20148674 EIF1AX T TG",
+  "query": "chrX:g.20148674_20148675insG",
+  "resolved": "chrX:g.20148675dup",
+  "recoder": [
+   {
+    "G": {
+     "hgvsc": [
+      "ENST00000379593.1:c.304dup",
+      "ENST00000379607.5:c.388dup",
+      "NM_001412.4:c.388dup"
+     ],
+     "input": "chrX:g.20148674_20148675insG",
+     "hgvsg": [
+      "NC_000023.10:g.20148675dup"
+     ],
+     "spdi": [
+      "NC_000023.10:20148674::G"
+     ],
+     "hgvsp": [
+      "ENSP00000368912.1:p.Gln102ProfsTer3",
+      "ENSP00000368927.5:p.Gln130ProfsTer3",
+      "NP_001403.1:p.Gln130ProfsTer3"
+     ]
+    }
+   }
+  ],
+  "vep": [
+   {
+    "most_severe_consequence": "frameshift_variant",
+    "input": "X:g.20148675dup",
+    "start": 20148675,
+    "id": "X:g.20148675dup",
+    "seq_region_name": "X",
+    "assembly_name": "GRCh37",
+    "allele_string": "-/G",
+    "strand": 1,
+    "end": 20148674,
+    "transcript_consequences": [
+     {
+      "amino_acids": "Q/PX",
+      "impact": "HIGH",
+      "used_ref": "-",
+      "given_ref": "-",
+      "strand": -1,
+      "codons": "cag/cCag",
+      "canonical": 1,
+      "biotype": "protein_coding",
+      "variant_allele": "G",
+      "hgvsp": "NP_001403.1:p.Gln130ProfsTer3",
+      "cdna_end": 587,
+      "protein_start": 130,
+      "cdna_start": 586,
+      "cds_start": 388,
+      "hgvsc": "NM_001412.4:c.388dup",
+      "gene_symbol": "EIF1AX",
+      "gene_id": "1964",
+      "cds_end": 389,
+      "protein_end": 130,
+      "gene_symbol_source": "EntrezGene",
+      "consequence_terms": [
+       "frameshift_variant"
+      ],
+      "transcript_id": "NM_001412.4"
+     }
+    ]
+   }
+  ],
+  "mane": {
+   "display_name": "EIF1AX",
+   "Transcript": [
+    {
+     "id": "ENST00000379607",
+     "MANE": [
+      {
+       "type": "MANE_Select",
+       "refseq_match": "NM_001412.4",
+       "id": "ENST00000379607",
+       "version": 10
+      }
+     ]
+    }
+   ]
+  },
+  "reference": {
+   "chrom": "X",
+   "start": 20148580,
+   "seq": "GGTTTCTCCATGGATAATAACAAAAATTGGAAAACACAAGGTACATCTACTTACGTCATCAATATCTTCATCATCATCTCCAATGTCATCAAACTGAATTTCATCATCATCTCCAGGACCAAATGTATCAGTTTCATTGATTTTAGCTAAGGACACAGTAAGAAATACTCATAAGTCAGCACTGTAATTTACTCAAAGTTT"
+  }
+ },
+ "brca2Ins": {
+  "row": "13 32906698 BRCA2 T TCA",
+  "query": "chr13:g.32906698_32906699insCA",
+  "resolved": "chr13:g.32906698_32906699insCA",
+  "neighbourId": "chr13:g.32906699_32906700insCA",
+  "recoder": [
+   {
+    "CA": {
+     "spdi": [
+      "NC_000013.10:32906698::CA",
+      "LRG_293:22082::CA"
+     ],
+     "hgvsp": [
+      "ENSP00000369497.3:p.Asp362GlnfsTer6",
+      "ENSP00000435699.2:p.Asp239GlnfsTer6",
+      "ENSP00000439902.1:p.Asp362GlnfsTer6",
+      "NP_000050.3:p.Asp362GlnfsTer6",
+      "NP_001393648.1:p.Asp362GlnfsTer6",
+      "NP_001393649.1:p.Asp362GlnfsTer6",
+      "NP_001393650.1:p.Asp362GlnfsTer6",
+      "NP_001419006.1:p.Asp362GlnfsTer6",
+      "LRG_293p1:p.Asp362GlnfsTer6"
+     ],
+     "hgvsc": [
+      "ENST00000380152.3:c.1083_1084insCA",
+      "ENST00000530893.2:c.714_715insCA",
+      "ENST00000544455.1:c.1083_1084insCA",
+      "NM_000059.4:c.1083_1084insCA",
+      "NM_001406719.1:c.1083_1084insCA",
+      "NM_001406720.1:c.1083_1084insCA",
+      "NM_001406721.1:c.1083_1084insCA",
+      "NM_001406722.1:c.424+1531_424+1532insCA",
+      "NM_001432077.1:c.1083_1084insCA",
+      "NR_176251.1:n.1282_1283insCA",
+      "LRG_293t1:c.1083_1084insCA"
+     ],
+     "input": "chr13:g.32906698_32906699insCA",
+     "hgvsg": [
+      "NC_000013.10:g.32906698_32906699insCA",
+      "LRG_293:g.22082_22083insCA"
+     ]
+    }
+   }
+  ],
+  "vep": [
+   {
+    "assembly_name": "GRCh37",
+    "input": "13:g.32906698_32906699insCA",
+    "start": 32906699,
+    "allele_string": "-/CA",
+    "seq_region_name": "13",
+    "most_severe_consequence": "frameshift_variant",
+    "id": "13:g.32906698_32906699insCA",
+    "end": 32906698,
+    "transcript_consequences": [
+     {
+      "impact": "HIGH",
+      "consequence_terms": [
+       "frameshift_variant"
+      ],
+      "gene_symbol": "BRCA2",
+      "codons": "-/CA",
+      "gene_symbol_source": "EntrezGene",
+      "cdna_start": 1282,
+      "biotype": "protein_coding",
+      "cds_end": 1084,
+      "gene_id": "675",
+      "hgvsc": "NM_000059.4:c.1083_1084insCA",
+      "hgvsp": "NP_000050.3:p.Asp362GlnfsTer6",
+      "cds_start": 1083,
+      "cdna_end": 1283,
+      "protein_start": 361,
+      "variant_allele": "CA",
+      "canonical": 1,
+      "amino_acids": "-/X",
+      "given_ref": "-",
+      "protein_end": 362,
+      "strand": 1,
+      "used_ref": "-",
+      "transcript_id": "NM_000059.4"
+     }
+    ],
+    "strand": 1
+   }
+  ],
+  "mane": {
+   "display_name": "BRCA2",
+   "Transcript": [
+    {
+     "id": "ENST00000380152",
+     "MANE": [
+      {
+       "type": "MANE_Select",
+       "refseq_match": "NM_000059.4",
+       "id": "ENST00000380152",
+       "version": 8
+      }
+     ]
+    }
+   ]
+  },
+  "neighbour": {
+   "_id": "chr13:g.32906699_32906700insCA",
+   "chrom": "13",
+   "hg19": {
+    "end": 32906700,
+    "start": 32906699
+   },
+   "vcf": {
+    "alt": "GCA",
+    "position": "32906699",
+    "ref": "G"
+   },
+   "clinvar": {
+    "variant_id": 2505518,
+    "allele_id": 1230042,
+    "gene": {
+     "id": "675",
+     "symbol": "BRCA2"
+    },
+    "hgvs": {
+     "coding": [
+      "NM_000059.3:c.1085_1086insCA",
+      "NM_000059.4:c.1085_1086insCA"
+     ],
+     "genomic": [
+      "LRG_293:g.22084_22085insCA",
+      "NC_000013.10:g.32906700_32906701insCA",
+      "NC_000013.11:g.32332563_32332564insCA",
+      "NG_012772.3:g.22084_22085insCA"
+     ],
+     "protein": [
+      "NP_000050.3:p.Thr363fs"
+     ]
+    },
+    "rcv": {
+     "accession": "RCV003234819",
+     "clinical_significance": "Likely pathogenic",
+     "conditions": {
+      "identifiers": {
+       "medgen": "C2675520",
+       "mondo": "MONDO:0012933",
+       "omim": "612555",
+       "orphanet": "145"
+      },
+      "name": "Breast-ovarian cancer, familial, susceptibility to, 2 (BROVCA2)",
+      "synonyms": [
+       "Breast-ovarian cancer, familial 2"
+      ]
+     },
+     "last_evaluated": "2023-06-06",
+     "number_submitters": 1,
+     "origin": "germline",
+     "preferred_name": "NM_000059.4(BRCA2):c.1085_1086insCA (p.Thr363fs)",
+     "review_status": "criteria provided, single submitter"
+    }
+   }
+  },
+  "reference": {
+   "chrom": "13",
+   "start": 32906600,
+   "seq": "AGGAAAAAAATTTTCCATGAAGCAAACGCTGATGAATGTGAAAAATCTAAAAACCAAGTGAAAGAAAAATACTCATTTGTATCTGAAGTGGAACCAAATGATACTGATCCATTAGATTCAAATGTAGCAAATCAGAAGCCCTTTGAGAGTGGAAGTGACAAAATCTCCAAGGAAGTTGTACCGTCTTTGGCCTGTGAATGG"
+  }
+ },
+ "cftr": {
+  "recoder": [
+   {
+    "-": {
+     "hgvsg": [
+      "NC_000007.13:g.117199646_117199648del"
+     ],
+     "input": "chr7:g.117199645_117199647del",
+     "hgvsp": [
+      "ENSP00000003084.6:p.Phe508del",
+      "ENSP00000389119.1:p.Phe478del",
+      "ENSP00000403677.1:p.Phe447del",
+      "NP_000483.3:p.Phe508del"
+     ],
+     "hgvsc": [
+      "ENST00000003084.6:c.1521_1523del",
+      "ENST00000426809.1:c.1431_1433del",
+      "ENST00000454343.1:c.1338_1340del",
+      "NM_000492.4:c.1521_1523del",
+      "NR_149084.1:n.221+1140_221+1142del"
+     ],
+     "spdi": [
+      "NC_000007.13:117199644:TCT:"
+     ]
+    }
+   }
+  ],
+  "reference": {
+   "chrom": "7",
+   "start": 117199550,
+   "seq": "GGAGCCTTCAGAGGGTAAAATTAAGCACAGTGGAAGAATTTCATTCTGTTCTCAGTTTTCCTGGATTATGCCTGGCACCATTAAAGAAAATATCATCTTTGGTGTTTCCTATGATGAATATAGATACAGAAGCGTCATCAAAGCATGCCAACTAGAAGAGGTAAGAAACTATGTGAAAACTTTTTGATTATGCATATGAAC"
+  }
+ },
+ "mito": {
+  "row": "M 8993 T G",
+  "query": "chrM:g.8993T>G",
+  "resolved": "chrMT:g.8993T>G",
+  "recoder": [
+   {
+    "G": {
+     "spdi": [
+      "NC_012920.1:8992:T:G"
+     ],
+     "hgvsp": [
+      "YP_003024031.1:p.Leu156Arg",
+      "ENSP00000354632.2:p.Leu156Arg"
+     ],
+     "input": "chrM:g.8993T>G",
+     "hgvsc": [
+      "ATP6.1:c.467T>G",
+      "ENST00000361899.2:c.467T>G"
+     ],
+     "hgvsg": [
+      "NC_012920.1:m.8993T>G"
+     ],
+     "id": [
+      "rs199476133"
+     ]
+    }
+   }
+  ],
+  "record": {
+   "_id": "chrMT:g.8993T>G",
+   "chrom": "MT",
+   "hg19": {
+    "end": 8993,
+    "start": 8993
+   },
+   "vcf": {
+    "alt": "G",
+    "position": "8993",
+    "ref": "T"
+   },
+   "snpeff": {
+    "ann": {
+     "effect": "intergenic_region",
+     "feature_id": "RNR2-END",
+     "feature_type": "intergenic_region",
+     "gene_id": "RNR2-END",
+     "genename": "RNR2-END",
+     "hgvs_c": "n.8993T>G",
+     "putative_impact": "MODIFIER"
+    }
+   },
+   "clinvar": {
+    "variant_id": 9641,
+    "gene": {
+     "id": "4509",
+     "symbol": "MT-ATP8"
+    },
+    "rcv": [
+     {
+      "accession": "RCV000010274",
+      "clinical_significance": "Pathogenic",
+      "conditions": {
+       "identifiers": {
+        "medgen": "C1328349",
+        "mondo": "MONDO:0010794",
+        "omim": "551500",
+        "orphanet": "644"
+       },
+       "name": "NARP syndrome",
+       "synonyms": [
+        "Neuropathy ataxia retinitis pigmentosa syndrome"
+       ]
+      },
+      "last_evaluated": "2019-10-17",
+      "number_submitters": 3,
+      "origin": "germline",
+      "preferred_name": "NC_012920.1(MT-ATP6):m.8993T>G",
+      "review_status": "criteria provided, single submitter"
+     }
+    ]
+   }
+  },
+  "vep": [
+   {
+    "input": "MT:g.8993T>G",
+    "transcript_consequences": []
+   }
+  ],
+  "mane": {},
+  "reference": {
+   "chrom": "MT",
+   "start": 8990,
+   "seq": ""
+  }
+ }
+}
