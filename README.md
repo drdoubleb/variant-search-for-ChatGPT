@@ -58,7 +58,12 @@ lookup progress panel, **Confirm allele · GRCh37 reference**:
 | --- | --- | --- |
 | same sequence | `●` "… is the same allele as the input" | lookup proceeds |
 | different sequence | `✕` "… is not the allele entered" | hard error — never rendered |
-| reference unreachable, or event wider than 10 kb | `▲` "not confirmed — …" | lookup proceeds on Ensembl's mapping, without claiming a confirmation |
+| reference unreachable, or event wider than 10 kb | `▲` "not confirmed — …" | lookup proceeds on the GRCh37 mirror's mapping, without claiming a confirmation |
+
+The identity checks read a few dozen bases and normally have them in well under
+a second. They sit in front of the result, so they run on a 5-second leash
+(`API_TIMEOUT_MS.identityReference`) and report "not checked" rather than hold
+the page behind a hung Ensembl.
 
 The recoder's SPDI output is part of the same story. An SPDI position is a
 0-based *interbase* coordinate, so an insertion at `p` lies between 1-based
@@ -82,12 +87,107 @@ Regression examples (live responses recorded in
   is *named* is not part of the allele either: `7:g.` is `chr7:g.`, and UCSC's
   `chrM` is the `chrMT` of Ensembl and MyVariant. Identity comparisons
   normalise both, so the hg19 spelling is no longer refused as a mismatch.
+  (`chrM` is read as rCRS, NC_012920 — what MyVariant and Ensembl hold. The
+  `chrM` of UCSC's *original* hg19 is the older NC_001807, numbered 1–2 bp
+  differently in places.) Ensembl writes mitochondrial answers `m.` rather
+  than `g.`; `M 16300 A C`, which MyVariant does not hold, resolves too.
+
+### Reference bases the input states
+
+A pasted row has a REF column and HGVS can spell its bases out (`delAAT`).
+Neither used to reach the lookup: the row is reduced to its minimal event, and
+Ensembl ignores spelled-out bases on anything but a substitution — it answers
+`chr7:g.117199645_117199647delAAA` as F508del although GRCh37 has `TCT` there.
+An indel entered in the wrong build therefore resolved to whatever sits at those
+numbers in GRCh37: a GRCh38 TP53 deletion pasted without the GRCh38 box
+(`17 7675087 TP53 GCGC G`) landed 97 kb away.
+
+`statedReferenceBases` / `verifyStatedReference` read those bases off GRCh37
+alongside the lookup. A mismatch is a hard error that names the position, both
+sequences and the GRCh38 box:
+
+> Reference mismatch: the input gives GCGC at chr17:7675087-7675090, but
+> GRCh37/hg19 has TGCA there. If these coordinates are GRCh38/hg38, tick the
+> GRCh38 box and look it up again; otherwise check the position and the
+> reference allele.
+
+Substitutions are left out: their REF is part of the MyVariant id, Ensembl
+rejects a wrong one itself, and checking them would put an Ensembl request on
+the commonest lookup there is. If the reference cannot be read, nothing is
+refused on this ground.
+
+### MyVariant's id is not always the allele ClinVar describes
+
+`_id` is MyVariant's own construction, and for the records it builds from
+ClinVar it is often not the allele ClinVar describes. Comparing the id with the
+GRCh37 genomic HGVS in the *same record's* ClinVar block, over 200 ClinVar
+records of each kind (BRCA1, BRCA2, TP53, MLH1, APC):
+
+| ClinVar type | id names a different allele |
+| --- | --- |
+| insertion | 49 / 200 — position from one normalisation, inserted bases from another |
+| duplication | 199 / 200 — written `g.A_Bdup` with the insertion *flanks*, which as HGVS duplicates those two bases instead |
+| deletion, delins | 0 / 200 each |
+
+The site read the id as genomic HGVS. BRCA1 c.5266dupC (5382insC, ClinVar 17677)
+is filed under `chr17:g.41209079_41209080dup` while its ClinVar block says
+`NC_000017.10:g.41209082dup`, so the page showed the right ClinVar record beside
+**VCF `17-41209078-C-CTG`** — a 2-bp insertion — and asked gnomAD and SpliceAI
+about that allele rather than `17-41209079-T-TG`.
+
+`reconcileClinvarAllele` compares the two against the reference whenever an
+insertion or duplication id is spelled differently from its ClinVar HGVS, and
+puts the record right for whatever the lookup was for:
+
+- **Found by name through its ClinVar entry** (a c., p. or gene-symbol query):
+  re-keyed to ClinVar's allele, keeping only the ClinVar block. Everything else
+  in the record — vcf, snpEff, population frequencies, dbSNP — was merged in by
+  id and describes the other allele. The progress panel says so: *"allele
+  chr17:g.41209082dup from ClinVar's own HGVS (MyVariant files it under
+  chr17:g.41209079_41209080dup)"*, and the raw-JSON panel keeps the original id
+  as `_myvariant_id`.
+- **Fetched as the id's own allele** (a genomic query, or a recoder candidate):
+  the ClinVar block belongs to another variant and is removed.
+  `13 32906699 BRCA2 G GCA` is literally the allele MyVariant files ClinVar
+  2505518 under, and is not that variant.
+- **Reference unreachable**: left as it was, and the panel says the id could not
+  be checked.
+
+A re-keyed record also takes its gene from ClinVar's preferred name. MyVariant
+keeps one of the genes ClinVar lists, and for EGFR exon 20 that is the antisense
+gene: `NM_005228.5:c.2300_2308dup` was labelled `EGFR-AS1` and sent to CIViC,
+PubMed and the other gene cards as that.
+
+### Which variant a gene-symbol name means
+
+A gene symbol does not choose a transcript, and c./p. numbering differs between
+transcripts. `BRCA1 c.5266dup` is c.5266dup on *some* RefSeq transcript for six
+different ClinVar variants. MyVariant's search ranks 5382insC (ClinVar 17677,
+`NM_007294.4:c.5266dup`) fourth; the first hit — ClinVar 266551, which on the
+standard transcript is `c.5389dup` — used to be presented as the answer.
+
+`selectMyVariantHit` ranks the matching hits by name (`variantNameRank`): a hit
+whose ClinVar *preferred name* carries the queried change first (ClinVar writes
+that name on the MANE Select transcript), then the lowest-numbered `NM_` the
+change matched on, then the existing ClinVar-presence tie-break. It is a
+preference rather than a filter, an explicit accession is honoured as before,
+and protein names are ranked the same way.
+
+### A genomic query names no gene
+
+What precedes `:g.` is a chromosome or an accession. Reading it as a symbol
+rendered `Gene: CHR16` for `chr16:g.2122948_2122950del`, filtered VEP's
+transcript rows on "CHR16" — losing the protein change and the effect — and sent
+"CHR16" to every gene-level source. When no gene column was pasted the gene now
+comes from VEP.
 
 `npm test` includes real-response identity fixtures and full form/card regression
 checks using LinkeDOM, with external requests mocked. It covers both PTEN input
 paths, explicit transcript selection, VEP/MANE outages, BRAF V600E while the
-recoder is unavailable, and the indel cases above (`tests/indel-identity.test.js`).
-LinkeDOM is a development-only test dependency.
+recoder is unavailable, and every case in the sections above
+(`tests/indel-identity.test.js`: thirteen end-to-end scenarios, each of which
+fails on the code before its fix). LinkeDOM is a development-only test
+dependency.
 
 Deployment for this frontend fix: upload **`script.js` and `index.html` together**
 to the Hostinger `/variant/` directory after merging. The HTML contains the
@@ -192,6 +292,16 @@ coordinate from the wrong assembly — it silently returns a position hundreds o
 kb away. A GRCh38 candidate the client-side helper cannot lift (indels; the
 helper handles substitutions only) is dropped rather than carried forward
 mislabelled as hg19.
+
+The failover is for **transcript-level queries only** (`recoderHostsFor`). A
+chromosomal coordinate means nothing without its assembly, every genomic query
+that reaches the recoder is GRCh37, and the main host reads the same numbers as
+GRCh38 — another locus — without complaint: asked for `chr9:g.21971058del` it
+returns SPDI `NC_000009.12:21971057:C:`, which the candidate conversion would
+then "lift back" to `chr9:g.21971057C>-`, the deletion of a different base. So
+a genomic query fails over to nobody, and with the mirror down the lookup
+reports an outage. The mitochondrion, whose sequence is the same in both
+assemblies, still fails over.
 
 When **both** Ensembl hosts fail, the recoder falls back to **NCBI Variation
 Services** (`api.ncbi.nlm.nih.gov/variation/v0`, CORS-open, independent

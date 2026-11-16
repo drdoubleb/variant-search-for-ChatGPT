@@ -133,6 +133,10 @@ const API_TIMEOUT_MS = {
     dgidb: 12000,
     openFda: 12000,
     ensemblSequence: 8000,
+    // The identity checks read a few dozen bases and normally get them in well
+    // under a second. They sit in front of the result, so a hung Ensembl must
+    // not hold it for long: past this they report "not checked" and step aside.
+    identityReference: 5000,
     ensemblLookup: 10000
 };
 
@@ -910,11 +914,11 @@ function reverseComplementSeq(seq) {
 }
 
 // Fetch GRCh37 reference bases for an inclusive 1-based interval.
-async function fetchGrch37ReferenceSequence(chrom, start, end) {
+async function fetchGrch37ReferenceSequence(chrom, start, end, timeoutMs = API_TIMEOUT_MS.ensemblSequence) {
     const c = String(chrom || '').replace(/^chr/i, '');
     if (!c || !Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
     const url = `https://grch37.rest.ensembl.org/sequence/region/human/${c}:${start}..${end}?content-type=text/plain`;
-    const res = await fetchWithTimeout(url, { headers: { 'Accept': 'text/plain' } }, API_TIMEOUT_MS.ensemblSequence);
+    const res = await fetchWithTimeout(url, { headers: { 'Accept': 'text/plain' } }, timeoutMs);
     if (!res.ok) throw new Error(`Ensembl sequence request failed (${res.status})`);
     const seq = (await res.text()).trim().toUpperCase();
     if (!/^[ACGTN]+$/.test(seq) || seq.length !== end - start + 1) {
@@ -1094,6 +1098,12 @@ function applyGenomicHgvsToReference(desc, windowStart, seq) {
     return seq.slice(0, offset) + alleles.alt + seq.slice(offset + alleles.ref.length);
 }
 
+// The reference as the identity checks read it: the same request, on the
+// shorter leash described at API_TIMEOUT_MS.identityReference.
+function fetchIdentityReference(chrom, start, end) {
+    return fetchGrch37ReferenceSequence(chrom, start, end, API_TIMEOUT_MS.identityReference);
+}
+
 // Do two genomic HGVS strings describe the same allele? true / false when both
 // can be applied to the window; null when either cannot — "cannot tell" must
 // never be read as "different".
@@ -1139,7 +1149,7 @@ function genomicRespelling(query, resolved) {
  * Never throws: an unreachable reference must not turn a resolvable variant
  * into an error. `fetchReference` is injectable for the test suite.
  */
-async function compareGenomicAlleles(query, resolved, fetchReference = fetchGrch37ReferenceSequence) {
+async function compareGenomicAlleles(query, resolved, fetchReference = fetchIdentityReference) {
     const respelling = genomicRespelling(query, resolved);
     if (!respelling) return { status: 'not-needed', detail: '' };
     const { queryId, resolvedId, entered: q } = respelling;
@@ -1201,7 +1211,7 @@ function statedReferenceBases(rawInput, query) {
 // Does GRCh37 hold those bases there? Returns { status, actual } with status
 // 'matches', 'mismatch', or 'unverified' when the reference cannot be read.
 // Never throws; `fetchReference` is injectable for the test suite.
-async function verifyStatedReference(stated, fetchReference = fetchGrch37ReferenceSequence) {
+async function verifyStatedReference(stated, fetchReference = fetchIdentityReference) {
     const unverified = { status: 'unverified', actual: '' };
     if (!stated || !/^[ACGT]+$/.test(stated.bases) || stated.bases.length > MAX_VCF_ALLELE_SPAN) return unverified;
     let seq = null;
