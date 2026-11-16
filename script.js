@@ -2530,13 +2530,18 @@ function parseProteinPos(text) {
 // Accepts three-letter (Gly34Arg / p.(Gly34Arg)) and single-letter (G34R) forms.
 // Returns null for anything that is not a simple amino-acid substitution
 // (frameshifts, indels, synonymous, etc.) — those are not "same protein change".
+//
+// The new residue has to END the change. A frameshift is written with the same
+// opening — p.Gln1756ProfsTer74 — and reading only that far made it the
+// missense Q1756P: a different variant, whose ClinVar records and papers were
+// then shown as this one's.
 function parseProteinChange(text) {
     const s = String(text || '');
     // Three-letter form, optionally wrapped in p.( ) — e.g. "p.(Gly34Arg)".
-    let m = s.match(/p\.\(?([A-Za-z]{3})(\d+)([A-Za-z]{3})\)?/);
+    let m = s.match(/p\.\(?([A-Za-z]{3})(\d+)([A-Za-z]{3}|\*)(?![A-Za-z*])/);
     if (m) {
         const ref = aaThreeToSingle(m[1]);
-        const alt = aaThreeToSingle(m[3]);
+        const alt = m[3] === '*' ? '*' : aaThreeToSingle(m[3]);
         if (ref && alt) return { ref, pos: Number(m[2]), alt };
     }
     // Bare three-letter form without the "p." prefix — e.g. "Gly34Arg".
@@ -2546,10 +2551,67 @@ function parseProteinChange(text) {
         const alt = aaThreeToSingle(m[3]);
         if (ref && alt) return { ref, pos: Number(m[2]), alt };
     }
-    // Single-letter form — e.g. "G34R" or "p.G34R".
-    m = s.match(/\bp?\.?([A-Z])(\d+)([A-Z*])\b/);
-    if (m) return { ref: m[1].toUpperCase(), pos: Number(m[2]), alt: m[3].toUpperCase() };
+    // Single-letter form — e.g. "G34R" or "p.G34R"; a stop is "R213*".
+    m = s.match(/\bp?\.?([A-Z])(\d+)(?:([A-Z])\b|(\*)(?![\w*]))/);
+    if (m) return { ref: m[1].toUpperCase(), pos: Number(m[2]), alt: (m[3] || m[4]).toUpperCase() };
     return null;
+}
+
+/*
+ * The short name of a protein change that ClinVar's search and the literature
+ * search (LitVar) both understand, or '' when the change has none.
+ *
+ *   p.Val600Glu          ->  V600E
+ *   p.Arg213Ter, p.R213* ->  R213X
+ *   p.Gln1756ProfsTer74  ->  Q1756fs
+ *   p.Pro153fs           ->  P153fs
+ *
+ * A frameshift is indexed by the residue where the frame shifts: "Q1756fs" is
+ * ClinVar's own protein-change name for it and the form LitVar resolves. The
+ * new residue and the distance to the stop are detail neither search can use
+ * ("BRCA1 Q1756Pfs*74" finds nothing in LitVar and, the asterisk being a
+ * wildcard, 85,659 records in ClinVar).
+ *
+ * A stop is searched under its old one-letter name. Measured against the live
+ * services: "TP53 R213X" is one ClinVar record, the LitVar entity with the
+ * papers, and a term PubMed knows; "p.Arg213*" (snpEff's spelling) is 6,089
+ * ClinVar records and nothing in LitVar; "p.Arg213Ter" is unknown to PubMed.
+ *
+ * Everything else — in-frame indels, extensions, stop-loss, synonymous —
+ * returns '' and the caller searches by the full p. string instead, which is
+ * what those already did.
+ */
+function proteinSearchTerm(proteinText) {
+    const text = String(proteinText || '');
+    const at = text.toLowerCase().lastIndexOf('p.');
+    const body = (at === -1 ? text : text.slice(at + 2)).replace(/[()\s]/g, '');
+    const fs = body.match(/^([A-Za-z]{3}|[A-Za-z])(\d+)(?:[A-Za-z]{3}|[A-Za-z])?fs(?:(?:Ter|\*|X)(?:\d+|\?)?)?$/i);
+    if (fs) {
+        const ref = fs[1].length === 3 ? aaThreeToSingle(fs[1]) : (aaSingleToThree(fs[1]) && fs[1].toUpperCase());
+        return ref && ref !== '*' ? `${ref}${fs[2]}fs` : '';
+    }
+    const sub = parseProteinChange(at === -1 ? body : `p.${body}`);
+    if (!sub || sub.ref === '*') return '';
+    return `${sub.ref}${sub.pos}${sub.alt === '*' ? 'X' : sub.alt}`;
+}
+
+// One spelling for a protein substitution typed by hand, in the three-letter
+// codes MyVariant and Ensembl index: "V600E" / "val600glu" -> "Val600Glu", and
+// a stop however it was written — "R213*", "R213X", "Arg213*", "R213Ter" ->
+// "Arg213Ter" ("p.R213*" used to be sent on as typed and matched nothing).
+// Anything else (frameshifts, in-frame indels, ...) is returned unchanged.
+function normalizeProteinSubstitution(body) {
+    const m = String(body || '').match(/^([A-Za-z]{3}|[A-Za-z])(\d+)([A-Za-z]{3}|[A-Za-z]|\*)$/);
+    if (!m) return body;
+    const three = (aa) => {
+        if (aa === '*' || /^(?:x|ter|stop)$/i.test(aa)) return 'Ter';
+        if (aa.length === 1) return aaSingleToThree(aa);
+        const single = aaThreeToSingle(aa);
+        return single ? aaSingleToThree(single) : null;
+    };
+    const ref = three(m[1]);
+    const alt = three(m[3]);
+    return ref && alt ? `${ref}${m[2]}${alt}` : body;
 }
 
 // True when two parsed protein changes describe the same amino-acid substitution.
@@ -3614,7 +3676,11 @@ async function fetchPubmedArticles(searchTerm, limit = 5, variantQuery = null) {
     if (!res.ok) throw new Error(`PubMed proxy error: ${res.status}`);
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
-    return { total: data.total || 0, articles: data.articles || [], litvar: data.litvar || null, backend: data.backend || 'term' };
+    return {
+        total: data.total || 0, articles: data.articles || [], litvar: data.litvar || null, backend: data.backend || 'term',
+        // Phrases PubMed has never indexed, when that is why there is nothing to show.
+        notFound: Array.isArray(data.notFound) ? data.notFound.map(String) : []
+    };
 }
 
 async function fetchClinicalTrials(gene, tumorType) {
@@ -3685,7 +3751,7 @@ function createPubmedCard({ container, tabs, extras }) {
         }
         panel.appendChild(resultsDiv);
         if (searchTerm || variantQuery) {
-            fetchPubmedArticles(searchTerm, PUBMED_LIMIT, variantQuery).then(({ total, articles, litvar, backend }) => {
+            fetchPubmedArticles(searchTerm, PUBMED_LIMIT, variantQuery).then(({ total, articles, litvar, backend, notFound = [] }) => {
                 extras[extraKey] = { query: searchTerm, total, articles, backend, litvar };
                 resultsDiv.innerHTML = '';
                 // Provenance line: which spelling-normalized entity matched. A
@@ -3700,7 +3766,11 @@ function createPubmedCard({ container, tabs, extras }) {
                 if (total === 0 || articles.length === 0) {
                     const noRes = document.createElement('div');
                     noRes.style.cssText = 'font-size:0.85rem;color:#6b7280;';
-                    noRes.textContent = 'No PubMed results found.';
+                    // A term PubMed has never indexed is why — say which, so a
+                    // different spelling can be tried through the link above.
+                    noRes.textContent = notFound.length
+                        ? `No PubMed results found — no article in PubMed uses "${notFound.join('", "')}".`
+                        : 'No PubMed results found.';
                     resultsDiv.appendChild(noRes);
                     return;
                 }
@@ -6533,33 +6603,9 @@ const initVariantSearchUi = () => {
                 if (/^[pPcC]\./.test(variantPart)) {
                     variantPart = variantPart.charAt(0).toLowerCase() + variantPart.slice(1);
                 }
-                // Normalize case for three-letter amino acid codes if p. variant
+                // One spelling for a substitution: three-letter codes, "Ter" for a stop.
                 if (/^p\./i.test(variantPart)) {
-                    // remove leading 'p.' for processing then add back later
-                    let vp = variantPart.replace(/^p\./i, '');
-                    // If triple-letter format (Val600Glu etc.)
-                    const tripleMatch = vp.match(/^([A-Za-z]{3})(\d+)([A-Za-z]{3})$/);
-                    if (tripleMatch) {
-                        const cap = (str) => str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
-                        vp = `${cap(tripleMatch[1])}${tripleMatch[2]}${cap(tripleMatch[3])}`;
-                    } else {
-                        // If single-letter format (V600E)
-                        const singleMatch = vp.match(/^([A-Za-z])(\d+)([A-Za-z])$/);
-                        if (singleMatch) {
-                            const aaMap = {
-                                A: 'Ala', R: 'Arg', N: 'Asn', D: 'Asp', C: 'Cys', Q: 'Gln', E: 'Glu', G: 'Gly',
-                                H: 'His', I: 'Ile', L: 'Leu', K: 'Lys', M: 'Met', F: 'Phe', P: 'Pro', S: 'Ser',
-                                T: 'Thr', W: 'Trp', Y: 'Tyr', V: 'Val'
-                            };
-                            const ref = aaMap[singleMatch[1].toUpperCase()];
-                            const pos = singleMatch[2];
-                            const alt = aaMap[singleMatch[3].toUpperCase()];
-                            if (ref && alt) {
-                                vp = `${ref}${pos}${alt}`;
-                            }
-                        }
-                    }
-                    variantPart = 'p.' + vp;
+                    variantPart = 'p.' + normalizeProteinSubstitution(variantPart.replace(/^p\./i, ''));
                 }
                 // For c. variant, just ensure lower-case c and uppercase gene part
                 if (/^c\./i.test(variantPart)) {
@@ -6595,38 +6641,10 @@ const initVariantSearchUi = () => {
                 if (!/^p\./i.test(variantPart) && !/^c\./i.test(variantPart) && !/^g\./i.test(variantPart)) {
                     variantPart = 'p.' + variantPart;
                 }
-                // Normalize case for three-letter amino acid codes. If the variant is already
-                // in a triple-coded format (e.g. p.val600glu), capitalise the first letter of
-                // each amino acid and lowercase the remaining letters.
-                {
-                    const m = variantPart.match(/^p\.([A-Za-z]{3})(\d+)([A-Za-z]{3})$/);
-                    if (m) {
-                        const ref3 = m[1];
-                        const pos = m[2];
-                        const alt3 = m[3];
-                        const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
-                        variantPart = `p.${cap(ref3)}${pos}${cap(alt3)}`;
-                    }
+                // One spelling for a substitution: three-letter codes, "Ter" for a stop.
+                if (/^p\./.test(variantPart)) {
+                    variantPart = 'p.' + normalizeProteinSubstitution(variantPart.slice(2));
                 }
-                // Convert single-letter amino acid codes to three-letter codes for better HGVS recognition.
-                const aaMap = {
-                    A: 'Ala', R: 'Arg', N: 'Asn', D: 'Asp', C: 'Cys', Q: 'Gln', E: 'Glu', G: 'Gly',
-                    H: 'His', I: 'Ile', L: 'Leu', K: 'Lys', M: 'Met', F: 'Phe', P: 'Pro', S: 'Ser',
-                    T: 'Thr', W: 'Trp', Y: 'Tyr', V: 'Val'
-                };
-                const convertSingleToTriple = (v) => {
-                    const m = v.match(/^p\.([A-Za-z])([0-9]+)([A-Za-z])$/);
-                    if (m) {
-                        const ref = aaMap[m[1].toUpperCase()];
-                        const pos = m[2];
-                        const alt = aaMap[m[3].toUpperCase()];
-                        if (ref && alt) {
-                            return `p.${ref}${pos}${alt}`;
-                        }
-                    }
-                    return v;
-                };
-                variantPart = convertSingleToTriple(variantPart);
                 return `${gene}:${variantPart}`;
             }
             return s;
@@ -7074,7 +7092,9 @@ const initVariantSearchUi = () => {
         targetProtGlobal = null;
         {
             // Look for p. notation with three‑letter amino acid codes
-            const mTriple = query.match(/p\.([A-Za-z]{3})(\d+)([A-Za-z]{3})/);
+            // The new residue has to end the change: p.Gln1756ProfsTer74 is a
+            // frameshift, not the substitution Gln1756Pro.
+            const mTriple = query.match(/p\.([A-Za-z]{3})(\d+)([A-Za-z]{3})(?![A-Za-z])/);
             if (mTriple) {
                 // Combine uppercase triple letters and position
                 targetProtGlobal = (mTriple[1] + mTriple[2] + mTriple[3]).toUpperCase();
@@ -8184,22 +8204,7 @@ const initVariantSearchUi = () => {
                     // Build a search term using gene and protein when variant_id is unavailable
                     let searchTerm = '';
                     const firstGene = geneNames ? geneNames.split(',')[0].trim() : '';
-                    let protSingle = '';
-                    if (targetProtGlobal) {
-                        const tmp = tripleToSingle(targetProtGlobal);
-                        if (tmp) protSingle = tmp;
-                    }
-                    if (!protSingle && protein) {
-                        const tripleMatch = String(protein).match(/([A-Za-z]{3})(\d+)([A-Za-z]{3})/);
-                        if (tripleMatch) {
-                            const triple = (tripleMatch[1] + tripleMatch[2] + tripleMatch[3]).toUpperCase();
-                            const tmp = tripleToSingle(triple);
-                            if (tmp) protSingle = tmp;
-                        } else {
-                            const m2 = String(protein).match(/([A-Za-z])(\d+)([A-Za-z])/);
-                            if (m2) protSingle = m2[1].toUpperCase() + m2[2] + m2[3].toUpperCase();
-                        }
-                    }
+                    const protSingle = proteinSearchTerm(targetProtGlobal) || proteinSearchTerm(protein);
                     if (firstGene) {
                         searchTerm = firstGene;
                         if (protSingle) searchTerm += ` ${protSingle}`;
@@ -10128,27 +10133,11 @@ const initVariantSearchUi = () => {
 
             // Card: Search
             {
-                // Derive a single-letter protein code for search queries. Prefer the protein change
-                // extracted from the user's query (targetProtGlobal), falling back to the canonical
-                // protein string if available. targetProtGlobal contains uppercase triple-coded letters
-                // plus position (e.g. VAL600GLU).
-                let protSingle = '';
-                if (targetProtGlobal) {
-                    const tmp = tripleToSingle(targetProtGlobal);
-                    if (tmp) protSingle = tmp;
-                }
-                if (!protSingle && protein) {
-                    // Attempt to parse from the canonical protein string
-                    const m = String(protein).match(/([A-Za-z]{3})(\d+)([A-Za-z]{3})/);
-                    if (m) {
-                        const triple = (m[1] + m[2] + m[3]).toUpperCase();
-                        const tmp = tripleToSingle(triple);
-                        if (tmp) protSingle = tmp;
-                    } else {
-                        const m2 = String(protein).match(/([A-Za-z])(\d+)([A-Za-z])/);
-                        if (m2) protSingle = m2[1].toUpperCase() + m2[2] + m2[3].toUpperCase();
-                    }
-                }
+                // The short protein name to search by ("V600E"; "Q1756fs" for a frameshift).
+                // Prefer the protein change extracted from the user's query (targetProtGlobal,
+                // uppercase triple codes plus position, e.g. VAL600GLU), falling back to the
+                // selected transcript's protein string.
+                const protSingle = proteinSearchTerm(targetProtGlobal) || proteinSearchTerm(protein);
                 // If protein notation is unavailable, fall back to canonical cDNA for search queries.
                 const normalizeCdnaSearchTerm = (value) => {
                     if (!value) return '';
@@ -10563,7 +10552,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         formatProteinDisplayWithSingleLetter, parseProteinResidueRange,
         // ClinVar matching + display
         complementBase, normalizeCdnaForMatch, findExactClinvarRegionMatch,
-        parseProteinChange, sameProteinChange, clinvarReviewStars,
+        parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,

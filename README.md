@@ -494,6 +494,49 @@ Rate limiting uses [`@upstash/ratelimit`](https://github.com/upstash/ratelimit-j
 The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV/nearby-variant results, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
 
 
+## What a protein change is searched as
+
+The ClinVar search link, the PubMed/LitVar card, the Google links and the AI
+review all look the variant up under a short name for its protein change.
+`proteinSearchTerm()` is the one place that name is made:
+
+| Protein change | Searched as | |
+| --- | --- | --- |
+| `p.Val600Glu` | `V600E` | |
+| `p.Gln1756ProfsTer74`, `p.Pro153fs` | `Q1756fs`, `P153fs` | ClinVar's own protein-change name for a frameshift, and the form LitVar resolves |
+| `p.Arg213Ter`, `p.Arg213*` | `R213X` | one ClinVar record, the LitVar entity that holds the literature, and a term PubMed knows |
+| in-frame indels, extensions, synonymous | the full `p.` string | |
+
+A frameshift opens the way a substitution does, and the old shortening read only
+that far: `p.Gln1756ProfsTer74` (BRCA1 c.5266dup, 5382insC) was searched as the
+missense **Q1756P** — a different variant with its own ClinVar records and its
+own paper — and a frameshift written without the new residue, `p.Pro153fs`,
+came out as "TP53 **O153F**". The spellings in the table were chosen by asking
+the services: `BRCA1 Q1756Pfs*74` finds nothing in LitVar and, the asterisk
+being a wildcard, 85,659 records in ClinVar; `TP53 p.Arg213*` (snpEff's
+spelling of a stop) is 6,089 ClinVar records and no LitVar entity.
+
+Only a substitution — missense or nonsense — gets the ClinVar card's "Same
+protein change" list. Two frameshifts at one residue are different proteins
+unless they shift the frame the same way, and ClinVar's titles (`p.Gln1756fs`)
+do not say which way.
+
+**PubMed drops what it does not know.** Asked for `BRCA2 D362fs`, PubMed finds
+no article using "D362fs", silently discards the phrase and answers with the
+17,385 papers on BRCA2 — which were listed under "Gene + Variant" and handed to
+the AI review as literature on the variant. `esearch` names what it discarded
+(`errorlist.phrasesnotfound`); when that is the whole variant, `api/pubmed.js`
+returns no articles and the phrase, and the card says
+`no article in PubMed uses "D362fs"`. Part of a variant surviving
+(`p.Glu746_Ala750del` loses `p.Glu746` and still matches on `Ala750del`) is left
+alone, as is any search that names no variant.
+
+**A stop typed by hand.** `TP53 R213*`, `R213X` and `p.Arg213*` are all read as
+`TP53:p.Arg213Ter`; the first two used to be passed on as typed and came back
+"could not resolve".
+
+See `tests/protein-search-term.test.js`.
+
 ## Variant-normalized literature (LitVar2)
 
 A free-text PubMed search for "BRAF V600E" misses papers that write the same
@@ -720,6 +763,17 @@ They now import the real implementations:
   Vercel runtime ignores. `api/tp53.js` gained `extractDatasetUrls` — the pure
   parsing core of `discoverDatasetUrls` — as a real seam instead of a test-only
   re-implementation.
+
+**Whole lookups are replayed, not mocked by hand.** `tests/support/lookup-harness.js`
+runs the real form handler (LinkeDOM + `vm`, no browser) against a *cassette*:
+every answer MyVariant and Ensembl gave when the scenario was run live, keyed by
+request URL, plus the stretch of GRCh37 reference it read
+(`tests/fixtures/lookup-cassettes.json`). A request the recording does not hold
+gets what that service says when it has nothing (404, an empty hit list, 503),
+and a test can take a service away from a complete recording
+(`without: [/ensembl\.org/]`) or answer one of the site's own `/api` proxies
+(`backend: { pubmed: () => … }`). Each scenario was confirmed to fail on the
+commit before its fix.
 
 The one remaining intentional re-composition is `buildChangeForms` in
 `tests/clinvar-match.test.js`, which mirrors logic composed inline in the
