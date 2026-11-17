@@ -219,6 +219,51 @@ const recordOf = (cassette, id) => {
     assert.equal(h.tupleVcfAlleles(hgvs, null), null);
     assert.equal(h.tupleVcfAlleles(hgvs, { position: '1', ref: '-', alt: 'G' }), null);
 }
+
+// ── ...and the alleles belong in the spelling the resources file them under ──
+{
+    // MyVariant writes a record's vcf block for the id it sits under. Under an
+    // indel's 3'-most id that is not the left-aligned spelling gnomAD uses.
+    const cftr = windowOf(cassettes.cftrF508del);
+    const realign = (vcf, genomic, win = cftr) => h.leftAlignedVcfBlock(vcf, genomic, win.start, win.seq);
+    const filed = recordOf(cassettes.cftrF508del, 'chr7:g.117199646_117199648del').vcf;
+    assert.deepEqual([filed.position, filed.ref, filed.alt], ['117199645', 'TCTT', 'T'], 'as MyVariant has it');
+    assert.deepEqual(realign(filed, 'chr7:g.117199646_117199648del'), { ...filed, position: '117199644', ref: 'ATCT', alt: 'A' });
+    // Whichever spelling the allele itself is given in.
+    assert.deepEqual(realign(filed, 'chr7:g.117199645_117199647del'), { ...filed, position: '117199644', ref: 'ATCT', alt: 'A' });
+    // Already left-aligned, not an indel, or another allele's block: left alone.
+    assert.equal(realign({ position: '117199644', ref: 'ATCT', alt: 'A' }, 'chr7:g.117199646_117199648del'), null);
+    assert.equal(realign({ position: '117199645', ref: 'T', alt: 'C' }, 'chr7:g.117199646_117199648del'), null);
+    assert.equal(realign({ position: '117199645', ref: 'TCT', alt: 'T' }, 'chr7:g.117199646_117199648del'), null, 'a 2-bp deletion is not F508del');
+    assert.equal(realign({ position: '117199650', ref: 'TGG', alt: 'T' }, 'chr7:g.117199646_117199648del'), null);
+    assert.equal(realign(null, 'chr7:g.117199646_117199648del'), null);
+    assert.equal(realign(filed, 'chr7:g.117199646_117199648'), null, 'a bare span names no allele');
+    // An insertion: 5382insC under its 3'-most id would read 17-41209081-G-GG.
+    const brca1 = windowOf(cassettes.rs80357906);
+    assert.deepEqual(realign({ position: '41209081', ref: 'G', alt: 'GG' }, 'chr17:g.41209082dup', brca1),
+        { position: '41209079', ref: 'T', alt: 'TG' });
+    assert.equal(realign({ position: '41209079', ref: 'T', alt: 'TG' }, 'chr17:g.41209082dup', brca1), null);
+
+    // gatherAlleleRecords hands the record back with the block re-anchored —
+    // also when the other ids had nothing to add — and says what it was.
+    const reference = async (chrom, start, end) => cftr.seq.slice(start - cftr.start, end - cftr.start + 1);
+    const primary = recordOf(cassettes.cftrF508del, 'chr7:g.117199646_117199648del');
+    const none = await h.gatherAlleleRecords(primary, 'chr7:g.117199646_117199648del', reference, async () => []);
+    assert.equal(none.status, 'none');
+    assert.equal(none.vcfRespelled, true);
+    assert.deepEqual([none.record.vcf.position, none.record.vcf.ref, none.record.vcf.alt], ['117199644', 'ATCT', 'A']);
+    assert.deepEqual(none.record._vcf_as_filed, filed, 'what MyVariant has stays in the raw JSON');
+    assert.deepEqual(primary.vcf, filed, 'the record passed in is not changed');
+    const sibling = recordOf(cassettes.cftrF508del, 'chr7:g.117199645_117199647del');
+    const merged = await h.gatherAlleleRecords(primary, 'chr7:g.117199646_117199648del', reference, async () => [sibling]);
+    assert.equal(merged.status, 'merged');
+    assert.equal(merged.record.vcf.position, '117199644');
+    assert.equal(merged.record.clinvar.variant_id, 7105);
+    // Nothing to re-anchor: no flag, and the very same record.
+    const left = await h.gatherAlleleRecords(sibling, 'chr7:g.117199645_117199647del', reference, async () => []);
+    assert.equal(left.vcfRespelled, undefined);
+    assert.equal(left.record, sibling);
+}
 console.log('Sibling-record unit checks passed');
 
 const batchIds = page => page.requests.filter(r => r.includes('[POST ids=')).map(r => r.match(/ids=([^\]]+)/)[1].split(','));
@@ -409,6 +454,31 @@ const rawJson = page => JSON.parse(page.document.getElementById('rawOutput').tex
     assertResolved(assert, dbsnpOnly, 'rs80357906, RefSeq VEP down');
     assert.doesNotMatch(dbsnpOnly.panel, /the record's own are shown/);
     console.log('ok sibling records: an Ensembl-only VEP answer does not displace the record\'s RefSeq row');
+}
+
+// 13. The lookup lands on the record under the 3'-most id (through the HGVS g.
+//     name, or rs113993960) and its vcf block is anchored there. gnomAD v4.1
+//     holds F508del as 7-117199644-ATCT-A and answered "Not found" when asked
+//     for 7-117199645-TCTT-T; the v2 link opened a "variant not found" page.
+{
+    const page = await runLookup(cassettes.cftrF508del, { input: 'chr7:g.117199646_117199648del' });
+    assertResolved(assert, page, 'F508del by its HGVS g. name');
+    assert.match(page.variant, /g\.: chr7:g\.117199646_117199648delVCF \(hg19\): 7-117199644-ATCT-A/);
+    assert.deepEqual(page.api('gnomad-v4'), ['gnomad-v4?chrom=7&pos37=117199644&ref=ATCT&alt=A']);
+    assert.deepEqual(page.api('spliceai').map(r => r.match(/variant=([^&]+)/)[1]), ['chr7-117199644-ATCT-A']);
+    assert(page.links.some(l => /gnomad\.broadinstitute\.org\/variant\/7-117199644-ATCT-A\?dataset=gnomad_r2_1$/.test(l.href)));
+    assert(!page.links.some(l => /117199645-TCTT-T/.test(l.href)), 'no link under the other spelling');
+    assert.deepEqual(rawJson(page)._vcf_as_filed, { alt: 'T', position: '117199645', ref: 'TCTT' });
+    // 185delAG, by its legacy name: 17-41276044-ACT-A, not 17-41276046-TCT-T.
+    const legacy = await runLookup(cassettes.brca1Legacy185delAG);
+    assertResolved(assert, legacy, 'BRCA1 185delAG');
+    assert.match(legacy.variant, /VCF \(hg19\): 17-41276044-ACT-A/);
+    assert.deepEqual(legacy.api('gnomad-v4'), ['gnomad-v4?chrom=17&pos37=41276044&ref=ACT&alt=A']);
+    // A row pasted with its own alleles keeps them.
+    const row = await runLookup(cassettes.cftrF508del);
+    assert.deepEqual(row.api('gnomad-v4'), ['gnomad-v4?chrom=7&pos37=117199644&ref=ATCT&alt=A']);
+    assert.equal(rawJson(row)._vcf_as_filed, undefined);
+    console.log('ok sibling records: the VCF alleles are left-aligned whichever record the lookup landed on');
 }
 
 console.log('Sibling-record tests passed');

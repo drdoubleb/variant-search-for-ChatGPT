@@ -229,6 +229,23 @@ block paired them with the first base of the HGVS event rather than the position
 that block is anchored at — F508del typed as HGVS went to gnomAD as
 `7-117199645-ATCT-A` (it is at 117199644).
 
+**The VCF alleles are left-aligned whichever record the lookup landed on.**
+MyVariant writes a record's `vcf` block for the id it sits under, so the record
+under the 3′-most id is anchored there, and that is not the spelling
+VCF-derived resources use:
+
+| Reached through | VCF alleles were | gnomAD v4.1 said | now |
+| --- | --- | --- | --- |
+| `chr7:g.117199646_117199648del`, `rs113993960` (F508del) | `7-117199645-TCTT-T` | Not found | `7-117199644-ATCT-A` — 18,037 / 1,460,114 |
+| `BRCA1 185delAG`, `NM_007294.4:c.68_69del` | `17-41276046-TCT-T` | Not found | `17-41276044-ACT-A` — 169 / 1,459,934 |
+
+(The gnomAD v2 link opened a "variant not found" page for the same reason.) The
+reference is already in hand when the records are gathered, so the block is
+re-anchored there (`leftAlignedVcfBlock`) — only if, left-aligned, it is the
+allele being looked up — and every consumer sees the one spelling: the VCF line,
+both gnomAD halves, SpliceAI and the AI review. What MyVariant has is kept in the
+raw JSON as `_vcf_as_filed`.
+
 See `tests/sibling-records.test.js`.
 
 ### Which variant a gene-symbol name means

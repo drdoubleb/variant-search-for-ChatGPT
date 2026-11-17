@@ -1674,6 +1674,32 @@ async function fetchMyVariantRecords(ids) {
     return (Array.isArray(data) ? data : []).filter(r => r && r._id && !r.notfound).map(withoutUnusableBlocks);
 }
 
+// The record's vcf block in the spelling VCF-derived resources file an indel
+// under. MyVariant writes the block for the id it sits under, so the record
+// under an indel's 3'-most id is anchored there: F508del reached through
+// rs113993960 or its HGVS g. name carried 7-117199645-TCTT-T, and 185delAG
+// 17-41276046-TCT-T. gnomAD v4.1 holds both left-aligned (7-117199644-ATCT-A,
+// 17-41276044-ACT-A) and answered "Not found" for each; the gnomAD v2 link
+// opened a "variant not found" page. Returns the re-anchored block, or null
+// when the block is left-aligned already, is not an indel, or is not `genomic`.
+function leftAlignedVcfBlock(vcf, genomic, windowStart, seq) {
+    const desc = parseGenomicHgvs(genomic);
+    const ref = String(vcf?.ref || '').toUpperCase();
+    const alt = String(vcf?.alt || '').toUpperCase();
+    const pos = Number(vcf?.position ?? vcf?.pos);
+    if (!desc || !seq || !Number.isInteger(pos) || ref.length === alt.length
+        || !/^[ACGT]+$/.test(ref) || !/^[ACGT]+$/.test(alt)) return null;
+    const anchored = vcfAllelesFromGenomicHgvs(desc, windowStart, seq);
+    if (!anchored) return null;
+    const wanted = leftNormalizeVcfAlleles(anchored.pos, anchored.ref, anchored.alt, windowStart, seq);
+    const filed = leftNormalizeVcfAlleles(pos, ref, alt, windowStart, seq);
+    const same = (a, b) => Number(a.pos) === Number(b.pos) && a.ref === b.ref && a.alt === b.alt;
+    // The block must be this allele's, and the window must not have run out.
+    if (!same(wanted, filed) || Number(wanted.pos) <= windowStart) return null;
+    if (same(wanted, { pos, ref, alt })) return null;
+    return { ...vcf, position: String(wanted.pos), ref: wanted.ref, alt: wanted.alt };
+}
+
 /*
  * `primary` — the record the lookup has (null when MyVariant holds none under
  * the id asked for) — with every block MyVariant files for the same allele
@@ -1686,6 +1712,11 @@ async function fetchMyVariantRecords(ids) {
  *
  * A block the primary already has is never replaced. Never throws.
  * `fetchReference` and `fetchRecords` are injectable for the test suite.
+ *
+ * With the reference in hand, the record's vcf block is also re-anchored to the
+ * left-aligned spelling when it is filed under another (leftAlignedVcfBlock):
+ * `vcfRespelled` is then true and the block as MyVariant has it is kept in
+ * `_vcf_as_filed`. That happens whatever the status, short of 'unverified'.
  */
 async function gatherAlleleRecords(primary, genomic, fetchReference = fetchIdentityReference, fetchRecords = fetchMyVariantRecords) {
     const result = { record: primary, status: 'not-needed', added: {}, asked: [], detail: '' };
@@ -1699,18 +1730,26 @@ async function gatherAlleleRecords(primary, genomic, fetchReference = fetchIdent
         console.warn('Reference sequence unavailable for sibling ids', err);
     }
     if (!seq) return { ...result, status: 'unverified', detail: 'reference sequence unavailable' };
+    // Whatever comes of the other ids, the vcf block is put in the left-aligned
+    // spelling before the record is handed back.
+    const leftAligned = (out) => {
+        const vcf = leftAlignedVcfBlock(out.record?.vcf, genomic, windowStart, seq);
+        return vcf
+            ? { ...out, record: { ...out.record, vcf, _vcf_as_filed: out.record.vcf }, vcfRespelled: true }
+            : out;
+    };
     // The id the primary was actually fetched under is not asked for again. A
     // record re-keyed to ClinVar's allele was fetched under MyVariant's id for
     // it, not under the allele's own — which may well hold a record too.
     const fetched = normalizedGenomicId(primary?._myvariant_id || primary?._id);
     const asked = siblingIdCandidates(genomic, windowStart, seq).filter(id => normalizedGenomicId(id) !== fetched);
-    if (!asked.length) return { ...result, status: 'none' };
+    if (!asked.length) return leftAligned({ ...result, status: 'none' });
     let records;
     try {
         records = await fetchRecords(asked);
     } catch (err) {
         console.warn('MyVariant sibling records unavailable', err);
-        return { ...result, status: 'unverified', asked, detail: describeUpstreamFailure(err) };
+        return leftAligned({ ...result, status: 'unverified', asked, detail: describeUpstreamFailure(err) });
     }
     const record = { ...(primary || { _id: genomic }) };
     const added = {};
@@ -1724,19 +1763,20 @@ async function gatherAlleleRecords(primary, genomic, fetchReference = fetchIdent
         for (const key of keys) record[key] = blocks[key];
         if (keys.length) added[sibling._id] = keys;
     }
-    if (!Object.keys(added).length) return { ...result, status: 'none', asked };
+    if (!Object.keys(added).length) return leftAligned({ ...result, status: 'none', asked });
     // Left in the raw JSON: which id each borrowed block is filed under.
     record._also_filed_under = added;
-    return { record, status: 'merged', added, asked, detail: '' };
+    return leftAligned({ record, status: 'merged', added, asked, detail: '' });
 }
 
 // POS/REF/ALT for the variant: the tuple's own when it carries alleles (a pasted
 // row, a substitution), else the record's vcf block — with the position THAT
-// block is anchored at. MyVariant left-aligns an indel and anchors it on the
-// base before, so its REF/ALT do not belong to the first base of the HGVS
-// event, which is what they used to be paired with: 5382insC, filed as
+// block is anchored at. MyVariant anchors an indel on the base before the
+// placement its id names, so its REF/ALT do not belong to the first base of the
+// HGVS event, which is what they used to be paired with: 5382insC, filed as
 // 17-41209079-T-TG, was linked to SpliceAI as "chr17 41209082 T TG", and
 // F508del typed as HGVS went to gnomAD as 7-117199645-ATCT-A (it is at 644).
+// (A block filed under the 3'-most id is re-anchored: see leftAlignedVcfBlock.)
 function tupleVcfAlleles(tuple, vcfData) {
     if (!tuple) return null;
     if (tuple.ref && tuple.alt) return { pos: String(tuple.pos), ref: tuple.ref, alt: tuple.alt };
@@ -8957,8 +8997,9 @@ const initVariantSearchUi = () => {
                     gathered = { status: 'unverified', detail: siblingErr.message };
                 }
                 if (!isCurrentSearch()) return;
+                // (Also when nothing was added but the vcf block was re-anchored.)
+                if (gathered.status === 'merged' || gathered.vcfRespelled) annotation = gathered.record;
                 if (gathered.status === 'merged') {
-                    annotation = gathered.record;
                     LookupProgress.note('myvariant', `also filed under ${describeSiblingBlocks(gathered.added)}`);
                 } else if (gathered.status === 'unverified') {
                     LookupProgress.note('myvariant', `its other ids for this allele were not checked — ${gathered.detail}`);
@@ -11855,7 +11896,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         // the mitochondrial genome
         isMitochondrialAccession, mitochondrialToChr, withoutUnusableBlocks, normalizedGenomicId,
         isMitochondrialChromosome, gnomadMitochondrialId, gnomadMitochondrialUrl, fetchGnomadMitochondrial,
-        resolveGeneSymbolFromVep, provablyDifferentAlleles, netLengthChange,
+        resolveGeneSymbolFromVep, provablyDifferentAlleles, netLengthChange, leftAlignedVcfBlock,
         getHitGenesUpper, buildSummary,
         // reference bases the input states; allele identity across spellings
         statedReferenceBases, verifyStatedReference,
