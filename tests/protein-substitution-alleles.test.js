@@ -33,7 +33,12 @@ const h = globalThis.__variantSearchHelpers;
 const cassettes = JSON.parse(readFileSync(new URL('./fixtures/lookup-cassettes.json', import.meta.url)));
 
 // ── The pieces ─────────────────────────────────────────────────────────────
-const hit = (id, genename, aa) => ({ _id: id, dbnsfp: { genename, aa } });
+const hit = (id, genename, aa, transcriptid) => ({ _id: id, dbnsfp: { genename, aa, ...(transcriptid ? { ensembl: { transcriptid } } : {}) } });
+// (What is listed and whether the residue is known; the codon has its own checks below.)
+const listed = (hits, gene, change) => {
+    const { alleles, residueKnown } = h.proteinSubstitutionAlleles(hits, gene, change);
+    return { alleles, residueKnown };
+};
 {
     // KRAS Tyr64 (TAC): the two changes of the third base make a stop.
     const tyr64 = [
@@ -42,21 +47,21 @@ const hit = (id, genename, aa) => ({ _id: id, dbnsfp: { genename, aa } });
         hit('chr12:g.25380267T>C', ['KRAS', 'KRAS'], { alt: 'C', pos: [64, 64], ref: 'Y' }),
         hit('chr12:g.25380268A>G', ['KRAS', 'KRAS'], { alt: 'H', pos: [64, 64], ref: 'Y' })
     ];
-    assert.deepEqual(h.proteinSubstitutionAlleles(tyr64, 'KRAS', { ref: 'Y', pos: 64, alt: '*' }),
+    assert.deepEqual(listed(tyr64, 'KRAS', { ref: 'Y', pos: 64, alt: '*' }),
         { alleles: ['chr12:g.25380266G>C', 'chr12:g.25380266G>T'], residueKnown: true });
     assert.deepEqual(h.proteinSubstitutionAlleles([...tyr64].reverse(), 'kras', { ref: 'Y', pos: 64, alt: '*' }).alleles,
         ['chr12:g.25380266G>C', 'chr12:g.25380266G>T'], 'in one order, whatever MyVariant\'s');
-    assert.deepEqual(h.proteinSubstitutionAlleles(tyr64, 'KRAS', { ref: 'Y', pos: 64, alt: 'H' }),
+    assert.deepEqual(listed(tyr64, 'KRAS', { ref: 'Y', pos: 64, alt: 'H' }),
         { alleles: ['chr12:g.25380268A>G'], residueKnown: true });
     // No single base makes Tyr64 a tryptophan: the residue is known, the list empty.
-    assert.deepEqual(h.proteinSubstitutionAlleles(tyr64, 'KRAS', { ref: 'Y', pos: 64, alt: 'W' }), { alleles: [], residueKnown: true });
+    assert.deepEqual(listed(tyr64, 'KRAS', { ref: 'Y', pos: 64, alt: 'W' }), { alleles: [], residueKnown: true });
     // Another residue, another reference amino acid, another gene: not known — nothing is concluded.
     for (const [gene, change] of [['KRAS', { ref: 'Y', pos: 65, alt: '*' }], ['KRAS', { ref: 'F', pos: 64, alt: '*' }],
         ['NRAS', { ref: 'Y', pos: 64, alt: '*' }]]) {
-        assert.deepEqual(h.proteinSubstitutionAlleles(tyr64, gene, change), { alleles: [], residueKnown: false }, JSON.stringify([gene, change]));
+        assert.deepEqual(listed(tyr64, gene, change), { alleles: [], residueKnown: false }, JSON.stringify([gene, change]));
     }
-    assert.deepEqual(h.proteinSubstitutionAlleles([], 'KRAS', { ref: 'Y', pos: 64, alt: '*' }), { alleles: [], residueKnown: false });
-    assert.deepEqual(h.proteinSubstitutionAlleles(null, 'KRAS', { ref: 'Y', pos: 64, alt: '*' }), { alleles: [], residueKnown: false });
+    assert.deepEqual(listed([], 'KRAS', { ref: 'Y', pos: 64, alt: '*' }), { alleles: [], residueKnown: false });
+    assert.deepEqual(listed(null, 'KRAS', { ref: 'Y', pos: 64, alt: '*' }), { alleles: [], residueKnown: false });
 
     // A variant in two reading frames comes as two amino-acid changes (as
     // MyVariant gives MECP2's records). R306C is chrX:g.153296363G>A, which is
@@ -75,9 +80,9 @@ const hit = (id, genename, aa) => ({ _id: id, dbnsfp: { genename, aa } });
     assert.deepEqual(h.proteinSubstitutionAlleles(mecp2, 'MECP2', { ref: 'R', pos: 294, alt: '*' }).alleles, ['chrX:g.153296399G>A']);
     // "R301C" and "A306V" are in no frame, though MyVariant's search, which
     // matches across frames, would return the record for either.
-    assert.deepEqual(h.proteinSubstitutionAlleles(mecp2, 'MECP2', { ref: 'R', pos: 301, alt: 'C' }), { alleles: [], residueKnown: false });
-    assert.deepEqual(h.proteinSubstitutionAlleles(mecp2, 'MECP2', { ref: 'A', pos: 306, alt: 'V' }), { alleles: [], residueKnown: false });
-    assert.deepEqual(h.proteinSubstitutionAlleles(mecp2, 'MECP2', { ref: 'A', pos: 301, alt: 'C' }), { alleles: [], residueKnown: true },
+    assert.deepEqual(listed(mecp2, 'MECP2', { ref: 'R', pos: 301, alt: 'C' }), { alleles: [], residueKnown: false });
+    assert.deepEqual(listed(mecp2, 'MECP2', { ref: 'A', pos: 306, alt: 'V' }), { alleles: [], residueKnown: false });
+    assert.deepEqual(listed(mecp2, 'MECP2', { ref: 'A', pos: 301, alt: 'C' }), { alleles: [], residueKnown: true },
         'the residue is there; that change of it is not');
 
     // A stop that is lost: dbNSFP writes the stop as X on either side.
@@ -91,6 +96,58 @@ const hit = (id, genename, aa) => ({ _id: id, dbnsfp: { genename, aa } });
         hit('chr1:g.100A>G', 'GENE', { alt: 'D', pos: 5, ref: 'G' }), hit('chr1:g.100A>G', 'GENE', { alt: 'D', pos: 5, ref: 'G' }),
         hit('chr1:g.100_101delinsGG', 'GENE', { alt: 'D', pos: 5, ref: 'G' }), hit(undefined, 'GENE', { alt: 'D', pos: 5, ref: 'G' })
     ], 'GENE', { ref: 'G', pos: 5, alt: 'D' }).alleles, ['chr1:g.100A>G']);
+
+    // Where the residue's codon lies, from which base of it each record changes
+    // (as MyVariant gives them). KRAS Gly12 is read backwards: base 1 at
+    // 25398285, base 2 at 25398284 — and no record at base 3, where every
+    // change of GGT is still a glycine.
+    const both = ['ENST00000311936', 'ENST00000256078'];
+    const gly12 = [
+        hit('chr12:g.25398285C>A', ['KRAS', 'KRAS'], { alt: 'C', codonpos: [1, 1], pos: [12, 12], ref: 'G' }, both),
+        hit('chr12:g.25398284C>T', ['KRAS', 'KRAS'], { alt: 'D', codonpos: [2, 2], pos: [12, 12], ref: 'G' }, both)
+    ];
+    assert.deepEqual(h.proteinSubstitutionAlleles(gly12, 'KRAS', { ref: 'G', pos: 12, alt: '*' }),
+        { alleles: [], residueKnown: true, codon: { chrom: 'chr12', start: 25398283, end: 25398285, transcript: 'ENST00000256078' } });
+    // EGFR Thr790, read forwards — and numbered 745 on two other transcripts.
+    const three = ['ENST00000455089', 'ENST00000454757', 'ENST00000275493'];
+    const thr790 = [
+        hit('chr7:g.55249070A>G', ['EGFR', 'EGFR', 'EGFR'], { alt: 'A', codonpos: [1, 1, 1], pos: [745, 745, 790], ref: 'T' }, three),
+        hit('chr7:g.55249071C>T', ['EGFR', 'EGFR', 'EGFR'], { alt: 'M', codonpos: [2, 2, 2], pos: [745, 745, 790], ref: 'T' }, three)
+    ];
+    assert.deepEqual(h.proteinSubstitutionAlleles(thr790, 'EGFR', { ref: 'T', pos: 790, alt: 'M' }).codon,
+        { chrom: 'chr7', start: 55249070, end: 55249072, transcript: 'ENST00000275493' });
+    assert.deepEqual(h.proteinSubstitutionAlleles(thr790, 'EGFR', { ref: 'T', pos: 745, alt: 'M' }).codon,
+        { chrom: 'chr7', start: 55249070, end: 55249072, transcript: 'ENST00000454757' }, 'the transcripts that number it so');
+    // One base of the codon alone fits either strand: not enough.
+    assert.equal(h.proteinSubstitutionAlleles(thr790.slice(0, 1), 'EGFR', { ref: 'T', pos: 790, alt: 'A' }).codon, null);
+    // One number, two codons — MECP2's residue 306 on its two transcripts: not guessed at.
+    const twoCodons = [
+        hit('chrX:g.153296363G>A', 'MECP2', [{ alt: 'V', codonpos: 2, pos: 301, ref: 'A' }, { alt: 'C', codonpos: [1, 1], pos: [306, 318], ref: 'R' }]),
+        hit('chrX:g.153296362C>T', ['MECP2', 'MECP2'], { alt: 'H', codonpos: [2, 2], pos: [306, 318], ref: 'R' }),
+        hit('chrX:g.153296399G>A', 'MECP2', [{ alt: 'L', codonpos: 2, pos: 289, ref: 'P' }, { alt: 'X', codonpos: [1, 1], pos: [294, 306], ref: 'R' }]),
+        hit('chrX:g.153296398C>T', ['MECP2', 'MECP2'], { alt: 'Q', codonpos: [2, 2], pos: [294, 306], ref: 'R' })
+    ];
+    assert.equal(h.proteinSubstitutionAlleles(twoCodons, 'MECP2', { ref: 'R', pos: 306, alt: 'C' }).codon, null);
+    // ...while 318 and 294 are one codon each (the other frame's base is not counted in).
+    assert.deepEqual(h.proteinSubstitutionAlleles(twoCodons, 'MECP2', { ref: 'R', pos: 318, alt: 'C' }).codon,
+        { chrom: 'chrX', start: 153296361, end: 153296363, transcript: '' });
+    assert.deepEqual(h.proteinSubstitutionAlleles(twoCodons, 'MECP2', { ref: 'R', pos: 294, alt: '*' }).codon,
+        { chrom: 'chrX', start: 153296397, end: 153296399, transcript: '' });
+    // Two reading frames that happen to give a residue the same number: only
+    // the frame with the residue asked for says where the codon is.
+    const sameNumber = [
+        hit('chr1:g.1001C>T', 'GENE', [{ alt: 'V', codonpos: 2, pos: 306, ref: 'A' }, { alt: 'C', codonpos: 1, pos: 306, ref: 'R' }]),
+        hit('chr1:g.1000G>A', 'GENE', { alt: 'T', codonpos: 1, pos: 306, ref: 'A' })
+    ];
+    assert.deepEqual(h.proteinSubstitutionAlleles(sameNumber, 'GENE', { ref: 'A', pos: 306, alt: 'V' }).codon,
+        { chrom: 'chr1', start: 1000, end: 1002, transcript: '' });
+    // A codon split by an intron (its bases are not next to one another): not guessed at either.
+    const split = [
+        hit('chr1:g.1000A>G', 'GENE', { alt: 'A', codonpos: 1, pos: 7, ref: 'T' }),
+        hit('chr1:g.2500C>T', 'GENE', { alt: 'M', codonpos: 2, pos: 7, ref: 'T' })
+    ];
+    assert.equal(h.proteinSubstitutionAlleles(split, 'GENE', { ref: 'T', pos: 7, alt: 'M' }).codon, null);
+    assert.equal(h.proteinSubstitutionAlleles([], 'GENE', { ref: 'T', pos: 7, alt: 'M' }).codon, null);
 
     // What MyVariant is asked: the residue, any new amino acid.
     assert.equal(h.proteinResidueQuery('KRAS', { ref: 'Y', pos: 64, alt: '*' }), 'dbnsfp.genename:KRAS AND dbnsfp.aa.ref:Y AND dbnsfp.aa.pos:64');
@@ -130,7 +187,7 @@ const unwaited = (label, lookup) => Promise.race([lookup, new Promise((resolve, 
     assert.match(page.variant, /c\.: c\.192C>Gp\.: p\.Tyr64Ter/);
     assert.deepEqual(allelesNote(page), ['p.Tyr64Ter is 2 alleles on record. This is the best documented one; the other is chr12:g.25380266G>T.']);
     assert.deepEqual(residueQueries(page), ['myvariant.info/v1/query?q=dbnsfp.genename:KRAS AND dbnsfp.aa.ref:Y AND dbnsfp.aa.pos:64'
-        + '&fields=dbnsfp.genename,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos&size=60']);
+        + '&fields=dbnsfp.genename,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos,dbnsfp.aa.codonpos,dbnsfp.ensembl.transcriptid&size=60']);
     assert.match(page.panel, /Resolve nomenclature · Ensembl\s*not waited for — MyVariant lists the 2 single-base changes that give this protein change/);
     assert.doesNotMatch(page.variant, /Codon region/);
     // With Ensembl answering, the alleles are still MyVariant's — the same two,
@@ -222,6 +279,31 @@ const unwaited = (label, lookup) => Promise.race([lookup, new Promise((resolve, 
     assert.match(neither.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
     assert.deepEqual(note(neither), [], 'nothing is known about single-base changes, so nothing is said of them');
     console.log('ok protein substitution: without MyVariant\'s list it is Ensembl, as before');
+}
+
+// 5b. With Ensembl not answering anything at all — neither the alleles nor
+//     where the codon is — the residue's own records place the codon. "KRAS
+//     G12K", a change of two bases, ended in "Could not resolve … to a genomic
+//     position" on such a day.
+{
+    const noEnsembl = [/grch37\.rest\.ensembl\.org/, /\/\/rest\.ensembl\.org|^rest\.ensembl\.org/];
+    for (const [typed, protein, said] of [
+        ['KRAS G12*', 'p.Gly12Ter', 'No single-base change gives p.Gly12Ter, and which larger changes do could not be looked up, so only the codon is shown.'],
+        ['KRAS G12X', 'p.Gly12Xaa', '"X" was read as any amino acid (p.Gly12Xaa), not as a stop: no single-base change turns Gly12 into a stop codon.']]) {
+        const page = await runLookup(cassettes.krasG12Stop, { input: typed, without: noEnsembl });
+        assertResolved(assert, page, `${typed}, Ensembl down altogether`);
+        assert.match(page.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/, typed);
+        assert.match(page.variant, new RegExp(`p\\.: ${protein.replace('.', '\\.')}`), typed);
+        assert.deepEqual(note(page), [said], typed);
+        assert.match(page.variant, /Resolved to residue 12 on ENST00000256078 only\./, typed);
+        assert.match(page.panel, /codon placed from MyVariant's records of the residue — Ensembl did not answer/, typed);
+        assert(!page.requests.some(r => /map\/translation/.test(r)), `${typed}: nothing was left to ask Ensembl's translation map`);
+    }
+    // Where Ensembl does place the codon, it is Ensembl's: the same span.
+    const answered = await runLookup(cassettes.krasG12Stop, { input: 'KRAS G12X', route: recoderSilent });
+    assert.match(answered.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
+    assert.doesNotMatch(answered.panel, /codon placed from MyVariant/);
+    console.log('ok protein substitution: with Ensembl down altogether, the residue\'s records place the codon');
 }
 
 // 6. Nothing is asked that is not needed: a name the name search finds, a name

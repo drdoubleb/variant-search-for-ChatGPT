@@ -1275,9 +1275,24 @@ that claimed when Ensembl did not answer at all: `KRAS Q61X` with the recoder
 down used to read *"No variant is on record for the stop (p.Gln61Ter)"*, a
 variant MyVariant holds (its name search just does not find it).
 
-This applies to a name on a gene symbol; on a protein accession
-(`NP_004976.2:p.Gly12Ter`) there is no gene to find the codon through and the
-first allele stands. See `tests/protein-name-reading.test.js`.
+**On a protein accession.** All of this went through the gene symbol, which is
+how the codon is found, so `NP_004976.2:p.Gly12Ter` still took the first of
+Ensembl's three alleles (and showed "Gene: N/A"); and of two alleles on record,
+`NP_004976.2:p.Tyr64Ter` showed whichever Ensembl listed first, because no
+record "fitted" the name — outside ClinVar, MyVariant's protein notations
+carry no accession to match one against. Both now follow the rules above:
+
+- Ensembl's answer names the change on every protein it is the same change on,
+  its own among them (`ENSP00000256078.4:p.Gly12Ter`), and that protein's
+  residues map straight onto the genome. So the codon is found on the protein
+  that was named (`translationForProteinName`), not on the gene's canonical one;
+  the gene comes from NCBI for a RefSeq accession, and from Ensembl for one of
+  its own. The card reads *Resolved to residue 12 on NP_004976.2 only*.
+- It is likewise Ensembl's answer that says each allele *is* that change on
+  that protein, so a record of the allele is a record of the variant named
+  (`recoderAlleleNamesProtein`) and the best documented one is shown.
+
+See `tests/protein-name-reading.test.js`.
 
 **Which bases, without waiting for Ensembl.** Only Ensembl's recoder turned a
 protein substitution into alleles, and it is the slowest thing this page asks.
@@ -1310,7 +1325,18 @@ is put to MyVariant first:
 A variant that lies in two reading frames comes from MyVariant as two
 amino-acid changes — MECP2's R306C is A301V in the other — and the residue has
 to be right within one of them: MyVariant's search matches across frames, and
-would return that record for "R301C" as well. See
+would return that record for "R301C" as well.
+
+The same records place the codon when Ensembl cannot. Each says which base of
+the codon it changes, so two of them at different bases give the codon's span
+and its strand (`codonFromResidueRecords`): KRAS Gly12 has base 1 at 25398285
+and base 2 at 25398284, hence 25398283–25398285, read backwards — the span
+Ensembl's translation map gives. `KRAS G12K`, a change of two bases, ended in
+*"Could not resolve … to a genomic position"* on a day Ensembl answered
+neither for the alleles nor for the codon; it is now the codon view, with no
+request to Ensembl needed. Only where the records agree on one codon: a number
+that is two codons (TP53's residue 125 on two of its transcripts, MECP2's 306)
+or a codon split by an intron is not guessed at. See
 `tests/protein-substitution-alleles.test.js`.
 
 What *is* determined by protein notation is the codon. Rather than failing the

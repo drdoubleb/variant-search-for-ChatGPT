@@ -2105,8 +2105,22 @@ async function resolveProteinCodonRegion(gene, startAa, endAa) {
         // this transcript; mapping it would silently point at the wrong locus.
         const proteinLength = Number(canonical.Translation.length);
         if (Number.isFinite(proteinLength) && endAa > proteinLength) return null;
+        const region = await resolveTranslationRegion(translationId, startAa, endAa);
+        return region && { ...region, transcript: canonical.id };
+    } catch (err) {
+        console.warn('Protein codon-region resolution failed', err);
+        return null;
+    }
+}
 
-        const mapUrl = `https://grch37.rest.ensembl.org/map/translation/${encodeURIComponent(translationId)}/${startAa}..${endAa}?content-type=application/json`;
+// Where residues startAa..endAa of one Ensembl protein lie on GRCh37:
+// { chrom, start, end, protein }, or null. Never throws.
+async function resolveTranslationRegion(translationId, startAa, endAa) {
+    const id = String(translationId || '').replace(/\.\d+$/, '');
+    if (!/^ENSP\d+$/i.test(id)) return null;
+    if (!Number.isFinite(startAa) || !Number.isFinite(endAa) || startAa < 1 || endAa < startAa) return null;
+    try {
+        const mapUrl = `https://grch37.rest.ensembl.org/map/translation/${encodeURIComponent(id)}/${startAa}..${endAa}?content-type=application/json`;
         const mapRes = await fetchWithTimeout(mapUrl, { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.ensemblLookup);
         if (!mapRes.ok) return null;
         const mapData = await mapRes.json();
@@ -2117,17 +2131,92 @@ async function resolveProteinCodonRegion(gene, startAa, endAa) {
         const starts = mappings.map((m) => Number(m.start)).filter(Number.isFinite);
         const ends = mappings.map((m) => Number(m.end)).filter(Number.isFinite);
         if (!/^[0-9XYMT]+$/.test(chrom) || starts.length === 0 || ends.length === 0) return null;
-        return {
-            chrom: `chr${chrom}`,
-            start: Math.min(...starts),
-            end: Math.max(...ends),
-            transcript: canonical.id,
-            protein: translationId
-        };
+        return { chrom: `chr${chrom}`, start: Math.min(...starts), end: Math.max(...ends), protein: id };
     } catch (err) {
-        console.warn('Protein codon-region resolution failed', err);
+        console.warn('Translation-region resolution failed', err);
         return null;
     }
+}
+
+/*
+ * A protein change named on a protein accession — "NP_004976.2:p.Gly12Ter".
+ *
+ * Everything that keeps a protein NAME from being shown as an allele nobody
+ * chose (proteinNameReading) went through the gene symbol: that is how the
+ * codon is found. An accession has none, so such a name still took the first
+ * allele Ensembl listed — for p.Gly12Ter one of three, in an order that
+ * changes from call to call.
+ *
+ * The codon can be found without the gene, and more exactly: Ensembl's answer
+ * names the change on each protein it is the same change on, its own among
+ * them ("ENSP00000256078.4:p.Gly12Ter"), and that protein's residues map to
+ * the genome directly. This picks it: the Ensembl protein id in `alleles`
+ * (the recoder's answer for `query`) that carries the very change asked for —
+ * or the query's own accession where that is an Ensembl one. '' if none.
+ */
+function translationForProteinName(alleles, query) {
+    const asked = splitTranscriptHgvs(String(query || ''));
+    if (/^ENSP\d+/i.test(asked.transcript)) return asked.transcript.replace(/\.\d+$/, '').toUpperCase();
+    const wanted = parseProteinChange(asked.change);
+    const body = change => String(change || '').replace(/^p\.\(?|\)$/g, '').toLowerCase();
+    for (const allele of alleles || []) {
+        for (const value of [].concat((allele && allele.hgvsp) || [])) {
+            const row = splitTranscriptHgvs(String(value));
+            if (!/^ENSP\d+/i.test(row.transcript)) continue;
+            const same = wanted
+                ? sameProteinChange(parseProteinChange(row.change), wanted)
+                : body(row.change) === body(asked.change);
+            if (same) return row.transcript.replace(/\.\d+$/, '').toUpperCase();
+        }
+    }
+    return '';
+}
+
+// Ensembl's answer says of this allele that it is the change `query` names, on
+// the protein accession `query` names it on ("NP_004976.2:p.Tyr64Ter" among
+// its hgvsp). A record of the allele need not say so itself: outside ClinVar,
+// MyVariant's protein notations carry no accession to match one against.
+function recoderAlleleNamesProtein(allele, query) {
+    const asked = splitTranscriptHgvs(String(query || ''));
+    if (!/^(?:[NXY]P_|ENSP)\d/i.test(asked.transcript)) return false;
+    const wanted = parseProteinChange(asked.change);
+    const body = change => String(change || '').replace(/^p\.\(?|\)$/g, '').toLowerCase();
+    return [].concat((allele && allele.hgvsp) || []).some((value) => {
+        const row = splitTranscriptHgvs(String(value));
+        return sameTranscript(asked.transcript, row.transcript)
+            && (wanted ? sameProteinChange(parseProteinChange(row.change), wanted) : body(row.change) === body(asked.change));
+    });
+}
+
+// The symbol of the gene a protein accession belongs to, or ''. NCBI says for
+// a RefSeq accession (one request); Ensembl for one of its own (the protein's
+// transcript is named after the gene: "KRAS-004"). Never throws.
+async function fetchGeneOfProteinAccession(accession) {
+    const acc = String(accession || '').trim();
+    try {
+        if (/^[NXY]P_\d+(?:\.\d+)?$/i.test(acc)) {
+            const res = await fetchWithTimeout(`https://api.ncbi.nlm.nih.gov/datasets/v2/gene/accession/${encodeURIComponent(acc)}`,
+                { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.clinicalTranscripts);
+            if (!res.ok) return '';
+            const data = await res.json();
+            const symbol = String(data?.reports?.[0]?.gene?.symbol || '');
+            return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(symbol) ? symbol : '';
+        }
+        if (/^ENSP\d+(?:\.\d+)?$/i.test(acc)) {
+            const lookup = async (id) => {
+                const res = await fetchWithTimeout(`https://grch37.rest.ensembl.org/lookup/id/${encodeURIComponent(id)}?content-type=application/json`,
+                    { headers: { 'Accept': 'application/json' } }, API_TIMEOUT_MS.ensemblLookup);
+                return res.ok ? res.json() : null;
+            };
+            const protein = await lookup(acc.replace(/\.\d+$/, ''));
+            const transcript = protein && protein.Parent ? await lookup(protein.Parent) : null;
+            const symbol = String((transcript && transcript.display_name) || '').replace(/-\d+$/, '');
+            return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(symbol) ? symbol : '';
+        }
+    } catch (err) {
+        console.warn('Gene of protein accession could not be learned', err);
+    }
+    return '';
 }
 
 function findBestCivicEntryForProtein(entries, proteinChange) {
@@ -7586,13 +7675,16 @@ function rankAllelesOnRecord(entries) {
  * two-base change on the one where residue 158 is another threonine).
  *
  * `hits` is MyVariant's answer for the residue: gene, reference amino acid,
- * position — any new amino acid. Returns { alleles, residueKnown }:
+ * position — any new amino acid. Returns { alleles, residueKnown, codon }:
  *   alleles       the ids that give this change, each a single-base change
  *   residueKnown  dbNSFP has this residue of this gene under this number.
  *                 Only then does an empty list mean that no single base
  *                 change gives the protein change (p.Gly12Ter takes two);
  *                 otherwise the name is not in dbNSFP's numbering, and
  *                 nothing is concluded from it.
+ *   codon         where the residue's codon lies, { chrom, start, end,
+ *                 transcript }, when the records agree on one (see
+ *                 codonFromResidueRecords); null otherwise.
  */
 function proteinSubstitutionAlleles(hits, gene, change) {
     const symbol = String(gene || '').toUpperCase();
@@ -7612,7 +7704,56 @@ function proteinSubstitutionAlleles(hits, gene, change) {
         .filter(hit => frames(hit).some(aa => atResidue(aa) && [].concat(aa.alt === undefined ? [] : aa.alt).map(code).includes(alt)))
         .map(hit => String(hit._id || ''))
         .filter(id => /^chr(?:[0-9]{1,2}|X|Y|MT):g\.\d+[ACGT]>[ACGT]$/.test(id));
-    return { alleles: Array.from(new Set(alleles)).sort(), residueKnown: residue.length > 0 };
+    return { alleles: Array.from(new Set(alleles)).sort(), residueKnown: residue.length > 0,
+        codon: codonFromResidueRecords(residue, atResidue, pos) };
+}
+
+/*
+ * The codon of a residue, from the single-base changes recorded at it.
+ *
+ * Each record says which base of the codon it changes (codonpos 1 to 3), so two
+ * records at different bases give the codon's place and its strand — KRAS
+ * Gly12: base 1 at 25398285 and base 2 at 25398284 make it 25398283-25398285,
+ * read backwards. That is the same span Ensembl's translation map gives, and
+ * it needs no Ensembl: "KRAS G12K", a change of two bases, ended in an error
+ * when Ensembl could neither name the alleles nor place the codon.
+ *
+ * Only where the records agree on one codon. A number that is two codons —
+ * TP53's residue 125 on two of its transcripts, MECP2's 306 — or a codon
+ * split by an intron is not guessed at: null.
+ */
+function codonFromResidueRecords(records, atResidue, residuePos) {
+    const points = [];
+    const transcripts = [];
+    for (const hit of records || []) {
+        const id = String((hit && hit._id) || '').match(/^(chr(?:[0-9]{1,2}|X|Y|MT)):g\.(\d+)[ACGT]>[ACGT]$/);
+        if (!id) continue;
+        for (const aa of [].concat((hit.dbnsfp && hit.dbnsfp.aa) || [])) {
+            if (!aa || typeof aa !== 'object' || !atResidue(aa)) continue;
+            const positions = [].concat(aa.pos === undefined ? [] : aa.pos).map(Number);
+            const codonPositions = [].concat(aa.codonpos === undefined ? [] : aa.codonpos).map(Number);
+            const ids = [].concat((hit.dbnsfp.ensembl && hit.dbnsfp.ensembl.transcriptid) || []);
+            positions.forEach((position, i) => {
+                if (position !== residuePos) return;
+                // (codonpos is listed per transcript, like pos; or once for all.)
+                const codonpos = codonPositions.length === positions.length ? codonPositions[i] : codonPositions[0];
+                if (![1, 2, 3].includes(codonpos)) return;
+                points.push({ chrom: id[1], pos: Number(id[2]), codonpos });
+                if (ids.length === positions.length && /^ENST\d+$/.test(String(ids[i]))) transcripts.push(String(ids[i]));
+            });
+        }
+    }
+    if (!points.length || new Set(points.map(pt => pt.chrom)).size !== 1) return null;
+    // One record fits either strand; two bases of the codon say which.
+    if (new Set(points.map(pt => pt.codonpos)).size < 2) return null;
+    for (const strand of [1, -1]) {
+        const firstBases = new Set(points.map(pt => pt.pos - strand * (pt.codonpos - 1)));
+        if (firstBases.size !== 1) continue;
+        const first = [...firstBases][0];
+        return { chrom: points[0].chrom, start: strand === 1 ? first : first - 2, end: strand === 1 ? first + 2 : first,
+            transcript: Array.from(new Set(transcripts)).sort()[0] || '' };
+    }
+    return null;
 }
 
 // What to ask MyVariant for that: every non-synonymous single-base change at
@@ -7631,7 +7772,7 @@ async function fetchProteinSubstitutionAlleles(gene, change) {
     const q = proteinResidueQuery(gene, change);
     if (!q) return null;
     const url = `https://myvariant.info/v1/query?q=${encodeURIComponent(q)}`
-        + '&fields=dbnsfp.genename,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos&size=60';
+        + '&fields=dbnsfp.genename,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos,dbnsfp.aa.codonpos,dbnsfp.ensembl.transcriptid&size=60';
     const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.proteinAlleles);
     if (!response.ok) return null;
     const data = await response.json();
@@ -9023,6 +9164,9 @@ const initVariantSearchUi = () => {
         // has shown that no single-base change gives it.
         let allelesFromRecords = null;
         let noSingleBaseChange = false;
+        // ...and where that residue's codon lies, as its records have it: what
+        // the codon is found by when Ensembl does not answer for that either.
+        let residueCodon = null;
         // An rsID or a name comes back from the recoder as several alleles, and
         // the rows getTranscriptsList returns are the FIRST one's. That is put
         // right once, further down, for the allele the lookup settled on — but
@@ -9205,6 +9349,11 @@ const initVariantSearchUi = () => {
             // (Only for a name on a gene symbol: the codon is found through the gene.)
             const typedX = !rerun && Boolean(typedName) && typedResidueX(rawInput, query);
             let proteinNameOpen = null;
+            // A protein change named on a protein accession: the codon is then
+            // found on that protein (see translationForProteinName), once
+            // Ensembl's answer has said which of its own it is.
+            const proteinAccession = (query.match(/^((?:[NXY]P_|ENSP)\d+(?:\.\d+)?):p\./i) || [])[1] || '';
+            let accessionTranslation = '';
             // How a gene-symbol coding name was read ({ typed, accession, basis }),
             // and everything MyVariant returned for the name as typed.
             let nameReadOn = rerun && rerun.readOn ? { ...rerun.readOn } : null;
@@ -9468,6 +9617,7 @@ const initVariantSearchUi = () => {
                     }
                     if (!isCurrentSearch()) return;
                     const recoderInHand = () => lastRecoderResult.query === query && Boolean(lastRecoderResult.data);
+                    if (listed && listed.residueKnown && listed.codon) residueCodon = { ...listed.codon, residue: substitution.pos };
                     if (listed && listed.alleles.length) {
                         allelesFromRecords = recoderShapedFromAlleles(query, listed.alleles);
                         // (Where Ensembl has answered already, its transcript rows
@@ -9658,7 +9808,14 @@ const initVariantSearchUi = () => {
                             selectedVar = cand;
                         }
                         const needsTranscriptMatch = Boolean(targetCdnaGlobal || targetProtGlobal);
-                        if (!needsTranscriptMatch || hitMatchesVariantQuery(ann, query)) fitting.push({ id: cand, record: ann });
+                        // (For a name on a protein accession it is Ensembl that says
+                        // the allele is that change on that protein; a record of the
+                        // allele is then a record of the variant named. Without this
+                        // no record ever "fitted" such a name, and of two alleles on
+                        // record the first one Ensembl listed was shown.)
+                        const namedByEnsembl = () => Boolean(proteinAccession)
+                            && recoderAlleleNamesProtein(selectRecoderAlleles(recoderData, query)[candidateAlleleIndex.get(cand)], query);
+                        if (!needsTranscriptMatch || hitMatchesVariantQuery(ann, query) || namedByEnsembl()) fitting.push({ id: cand, record: ann });
                     }
                     if (fitting.length) {
                         // ...unless a protein-level name has records for more than
@@ -9688,8 +9845,11 @@ const initVariantSearchUi = () => {
                     }
                     // A protein-level name with nothing on record for any allele it
                     // could be: is one of them the variant, or only the codon known?
-                    // (On a gene symbol only: the codon is found through the gene.)
-                    const proteinOnly = isProteinVariant && !/c\./i.test(query) && Boolean(typedName) && !rerun;
+                    // (On a gene symbol the codon is found through the gene; on a
+                    // protein accession, on the protein itself.)
+                    if (proteinAccession) accessionTranslation = translationForProteinName(selectRecoderAlleles(recoderData, query), query);
+                    const proteinOnly = isProteinVariant && !/c\./i.test(query) && !rerun
+                        && (Boolean(typedName) || Boolean(accessionTranslation));
                     // First, though: the allele(s) are Ensembl's way of producing
                     // the protein change, and the variant people mean by the name
                     // can be another. "CFTR F508del" comes back as c.1522_1524del
@@ -9701,7 +9861,7 @@ const initVariantSearchUi = () => {
                     // they are asked when MyVariant holds no record for what
                     // Ensembl gave: an allele on record is what a substitution's
                     // name means, and that is most lookups.
-                    if (proteinOnly && (namesAhead || (!otherNameAsked && !firstAnn))) {
+                    if (proteinOnly && typedName && (namesAhead || (!otherNameAsked && !firstAnn))) {
                         const { known, told } = await (namesAhead || consultOtherNames());
                         namesAhead = null;
                         if (!isCurrentSearch()) return;
@@ -10154,13 +10314,32 @@ const initVariantSearchUi = () => {
                     }
                     const proteinBody = (query.match(/p\.[^\s:]+/i) || [])[0] || '';
                     const residues = parseProteinResidueRange(proteinBody);
-                    const geneForCodon = geneHintGlobal
+                    let geneForCodon = geneHintGlobal
                         || (query.match(/^([A-Za-z][A-Za-z0-9-]*)\s*:/) || [])[1]
                         || '';
                     let codonRegion = null;
-                    if (residues && geneForCodon) {
+                    if (residues && accessionTranslation) {
+                        // On the accession's own protein, and its gene from whoever
+                        // issued the accession. (Shown as the accession typed.)
+                        statusEl.textContent = 'Resolving codon position…';
+                        const [region, symbol] = await Promise.all([
+                            resolveTranslationRegion(accessionTranslation, residues.start, residues.end),
+                            geneForCodon ? Promise.resolve(geneForCodon) : fetchGeneOfProteinAccession(proteinAccession)
+                        ]);
+                        if (!isCurrentSearch()) return;
+                        codonRegion = region && { ...region, transcript: proteinAccession };
+                        geneForCodon = symbol || '';
+                    } else if (residues && geneForCodon) {
                         statusEl.textContent = 'Resolving codon position…';
                         codonRegion = await resolveProteinCodonRegion(geneForCodon, residues.start, residues.end);
+                        if (!isCurrentSearch()) return;
+                        // Ensembl not placing it either: the residue's own records
+                        // say where its codon is (see codonFromResidueRecords).
+                        if (!codonRegion && residueCodon && residues.start === residueCodon.residue && residues.end === residueCodon.residue) {
+                            codonRegion = { chrom: residueCodon.chrom, start: residueCodon.start, end: residueCodon.end,
+                                transcript: residueCodon.transcript, protein: '' };
+                            LookupProgress.note('parse', 'codon placed from MyVariant\'s records of the residue — Ensembl did not answer');
+                        }
                     }
                     if (!codonRegion) {
                         throw new Error(
@@ -10745,7 +10924,7 @@ const initVariantSearchUi = () => {
                     codonNote.textContent = `Resolved to residue ${codonOnlyResolutionGlobal.residueStart}`
                         + (codonOnlyResolutionGlobal.residueEnd !== codonOnlyResolutionGlobal.residueStart
                             ? `–${codonOnlyResolutionGlobal.residueEnd}` : '')
-                        + ` on ${codonOnlyResolutionGlobal.transcript} only. Protein notation does not determine the`
+                        + `${codonOnlyResolutionGlobal.transcript ? ` on ${codonOnlyResolutionGlobal.transcript}` : ''} only. Protein notation does not determine the`
                         + ' nucleotide change, so allele-based results (gnomAD, SpliceAI, an exact ClinVar record)'
                         + ' are unavailable — enter the c. or g. notation for those.';
                     content.appendChild(codonNote);
@@ -13352,7 +13531,8 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars,
         isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
-        proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles,
+        proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, codonFromResidueRecords,
+        recoderAlleleNamesProtein,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,
