@@ -278,6 +278,100 @@ assert.throws(() => h.assertResolvedVariantIdentity(mito.query, 'chr1:g.8993T>G'
         assert.equal(unverified.record, brca1Dup.record);
     }
 }
+// ── Told apart without the reference ───────────────────────────────────────
+// (For when Ensembl's sequence endpoint is down: see provablyDifferentAlleles.)
+{
+    const { brca1Dup } = fixture;
+    const parse = h.parseGenomicHgvs;
+    const differ = (a, b) => h.provablyDifferentAlleles(parse(a), parse(b));
+    // A different change in length. MyVariant's id for 5382insC duplicates two bases.
+    assert.equal(differ('chr17:g.41209079_41209080dup', 'chr17:g.41209082dup'), true);
+    assert.equal(differ('chr7:g.117199645_117199647del', 'chr7:g.117199646_117199647del'), true, '3 bases against 2');
+    assert.equal(differ('chr7:g.140453136A>T', 'chr7:g.140453137del'), true);
+    assert.equal(differ('chr7:g.140453136A>T', 'chr17:g.140453136A>T'), true, 'another chromosome');
+    // An insertion slid along a repeat has its bases rotated by as much.
+    assert.equal(differ('chr13:g.32906699_32906700insCA', 'chr13:g.32906700_32906701insCA'), true, 'ClinVar 2505518 and its MyVariant id');
+    assert.equal(differ('chr13:g.32906700_32906701insCA', 'chr13:g.32906699_32906700insCA'), true, 'either way round');
+    assert.equal(differ('chr1:g.100_101insACG', 'chr1:g.101_102insACG'), true);
+    // The rotated spelling may be the same allele — the reference has to say.
+    assert.equal(differ('chr13:g.32906699_32906700insCA', 'chr13:g.32906700_32906701insAC'), false);
+    assert.equal(differ('chr13:g.32906699_32906700insCA', 'chr13:g.32906701_32906702insCA'), false, 'a whole repeat unit along');
+    assert.equal(differ('chr13:g.32906699_32906700insCA', 'chr13:g.32906697_32906698insCA'), false, 'or back');
+    assert.equal(differ('chr1:g.100_101insACG', 'chr1:g.101_102insCGA'), false);
+    assert.equal(differ('chr1:g.100_101insACG', 'chr1:g.102_103insGAC'), false);
+    assert.equal(differ('chr1:g.100_101insACG', 'chr1:g.98_99insCGA'), false, 'two back is one forward, in a unit of three');
+    // The same change in length says nothing by itself.
+    assert.equal(differ('chrX:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT', 'chrX:g.20156694_20156723dup'), false);
+    assert.equal(differ('chr17:g.41209079_41209080insG', 'chr17:g.41209082dup'), false);
+    assert.equal(differ('chr7:g.117199645_117199647del', 'chr7:g.117199646_117199648del'), false);
+    assert.equal(differ('chr7:g.140453136A>T', 'chr7:g.140453136_140453137delinsTT'), false);
+    // Bases spelled out that do not fill the stated span are not reasoned from.
+    assert.equal(h.netLengthChange(parse('chr7:g.117199645delTCT')), null);
+    assert.equal(differ('chr7:g.117199645delTCT', 'chr7:g.117199646_117199648del'), false);
+    assert.equal(differ(null, 'chr7:g.117199646_117199648del'), false);
+    assert.deepEqual(['chr1:g.5A>T', 'chr1:g.5_6insAC', 'chr1:g.5_7dup', 'chr1:g.5dup', 'chr1:g.5_7del', 'chr1:g.5_7delinsA', 'chr1:g.5_7inv', 'chr1:g.5_7']
+        .map(v => h.netLengthChange(parse(v))), [0, 2, 3, 1, -3, -2, 0, null]);
+
+    // The proof must never fire for two spellings of one allele: that would
+    // refuse a correctly resolved variant. Every pair of events on a repetitive
+    // random reference that the reference itself calls the same allele is checked.
+    {
+        let state = 20261117;
+        const random = n => { state = (Math.imul(state, 1103515245) + 12345) >>> 0; return (state >>> 8) % n; };
+        const bases = (n, alphabet = 'AC') => Array.from({ length: n }, () => alphabet[random(alphabet.length)]).join('');
+        let samePairs = 0, provenPairs = 0;
+        for (let round = 0; round < 40; round++) {
+            const seq = bases(36);
+            const events = [];
+            for (let i = 0; i < 28; i++) {
+                const at = 6 + random(22);
+                const len = 1 + random(4);
+                const kind = random(5);
+                if (kind === 0) events.push(`chr1:g.${at}_${at + 1}ins${bases(len)}`);
+                else if (kind === 1) events.push(len === 1 ? `chr1:g.${at}dup` : `chr1:g.${at}_${at + len - 1}dup`);
+                else if (kind === 2) events.push(len === 1 ? `chr1:g.${at}del` : `chr1:g.${at}_${at + len - 1}del`);
+                else if (kind === 3) events.push(`chr1:g.${at}_${at + len - 1}delins${bases(1 + random(3))}`);
+                // The spelling an insertion takes one position along, if the reference lets it slide.
+                else events.push(`chr1:g.${at}_${at + 1}ins${seq.slice(at - len, at)}`);
+            }
+            for (const a of events) for (const b of events) {
+                if (a === b) continue;
+                const same = h.sameGenomicAllele(a, b, 1, seq);
+                const proven = differ(a, b);
+                if (same === true) {
+                    samePairs += 1;
+                    assert.equal(proven, false, `${a} and ${b} are one allele on ${seq}`);
+                }
+                if (proven) provenPairs += 1;
+            }
+        }
+        // (Pairs spelled differently that are one allele, and pairs told apart.)
+        assert(samePairs > 200 && provenPairs > 5000, `the check saw both kinds (${samePairs} same, ${provenPairs} proven different)`);
+    }
+
+    // Through the comparison, with the reference out of reach.
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+        const down = async () => { throw new Error('Ensembl sequence request failed (500)'); };
+        assert.deepEqual(await h.compareGenomicAlleles('chr17:g.41209079_41209080dup', 'chr17:g.41209082dup', down), { status: 'different', detail: '' });
+        assert.deepEqual(await h.compareGenomicAlleles('chr13:g.32906699_32906700insCA', 'chr13:g.32906700_32906701insCA', down), { status: 'different', detail: '' });
+        assert.equal((await h.compareGenomicAlleles('chr13:g.32906699_32906700insCA', 'chr13:g.32906700_32906701insAC', down)).status, 'unverified');
+        assert.equal((await h.compareGenomicAlleles(eif1axDup.query, eif1axDup.resolved, down)).status, 'unverified',
+            'a correct re-spelling is never refused for want of the reference');
+        // So the two records MyVariant mis-files are handled as they are with it.
+        const compareDown = (a, b) => h.compareGenomicAlleles(a, b, down);
+        const named = await h.reconcileClinvarAllele(brca1Dup.record, true, compareDown);
+        assert.equal(named.status, 'rekeyed');
+        assert.equal(named.record._id, 'chr17:g.41209082dup');
+        const literal = await h.reconcileClinvarAllele(brca2Ins.neighbour, false, compareDown);
+        assert.equal(literal.status, 'clinvar-dropped');
+        assert.equal(literal.record.clinvar, undefined);
+        assert.deepEqual(literal.record.vcf, brca2Ins.neighbour.vcf);
+    } finally {
+        console.warn = warn;
+    }
+}
 // ── Reference bases the input states ───────────────────────────────────────
 {
     const stated = h.statedReferenceBases;
@@ -359,7 +453,9 @@ async function lookup(input, fx, {
         }
         if (path.includes('/variant_recoder/')) {
             if (!recoder) return response({ error: 'Service Unavailable' }, 503);
-            return path.endsWith(`/${fx.query}`) ? response(recoder) : response({ error: 'unexpected recoder query' }, 400);
+            // Ensembl is asked about the mitochondrial chromosome as "MT:".
+            const asked = fx.query.replace(/^chrMT?:g\./i, 'MT:g.');
+            return path.endsWith(`/${asked}`) ? response(recoder) : response({ error: 'unexpected recoder query' }, 400);
         }
         if (path.includes('/vep/human/hgvs/')) {
             return path.endsWith(`/${fx.vep[0].input}`) ? response(fx.vep) : response({ error: 'unexpected VEP query' }, 400);
@@ -368,9 +464,21 @@ async function lookup(input, fx, {
             if (referenceDown) return response('Service Unavailable', 503);
             const [, chrom, start, end] = path.match(/human\/([^:]+):(\d+)\.\.(\d+)$/);
             assert.equal(chrom, fx.reference.chrom);
+            // The wide window read to find an allele's other MyVariant ids is
+            // not in these fixtures; that step then reports "not checked".
+            if (Number(end) - Number(start) > 250) return response('Service Unavailable', 503);
             return response(referenceSlice(fx.reference, Number(start), Number(end)));
         }
-        if (path.includes('/lookup/symbol/')) return response(fx.mane);
+        // The MANE lookup is two requests: the gene (for its canonical
+        // transcript), then that transcript with its MANE record. Both are
+        // answered from the one gene record these fixtures hold.
+        const maneTranscript = (fx.mane.Transcript || []).find(t => [].concat(t.MANE || []).some(m => m.type === 'MANE_Select'));
+        if (path.includes('/lookup/symbol/')) {
+            return maneTranscript ? response({ canonical_transcript: `${maneTranscript.id}.1` }) : response({}, 404);
+        }
+        if (path.includes('/lookup/id/')) {
+            return maneTranscript && path.endsWith(`/${maneTranscript.id}`) ? response(maneTranscript) : response({}, 404);
+        }
         // Evidence cards fail soft; they have no say in which variant this is.
         return response({}, 404);
     };
@@ -420,10 +528,11 @@ const resolved = (page, label) => {
     assert.match(page.panel, /Confirm allele · GRCh37 reference/);
     assert.match(page.panel, /chrX:g\.20156694_20156723dup is the same allele as the input/);
     assert(!page.requests.some(r => r.includes('20156694_20156695ins')), 'the one-base-off candidate is never formed');
-    // Two small reference requests, both started early: the row's REF base, and
-    // the stretch both spellings are applied to.
+    // Three reference reads: the row's REF base and the stretch both spellings
+    // are applied to (both started early), and the wider one that shows which
+    // other ids MyVariant may file this allele under.
     assert.deepEqual(page.requests.filter(r => r.includes('/sequence/region/')).map(r => r.match(/human\/([^?]+)/)[1]).sort(),
-        ['X:20156691..20156725', 'X:20156693..20156693']);
+        ['X:20156544..20156873', 'X:20156691..20156725', 'X:20156693..20156693']);
     console.log('ok indel lookup: reported EIF1AX 30-bp duplication');
 }
 

@@ -150,13 +150,103 @@ puts the record right for whatever the lookup was for:
   the ClinVar block belongs to another variant and is removed.
   `13 32906699 BRCA2 G GCA` is literally the allele MyVariant files ClinVar
   2505518 under, and is not that variant.
-- **Reference unreachable**: left as it was, and the panel says the id could not
-  be checked.
+- **Reference unreachable**: Ensembl's sequence endpoint is the one this
+  comparison depends on, and it does go down (it returned HTTP 500 for part of a
+  live run of these very cases). "Cannot tell" used to be the answer for every
+  pair, so `13 32906699 BRCA2 G GCA` was shown ClinVar 2505518 — *Likely
+  pathogenic* — after all, and `BRCA1 c.5266dup` came out as
+  `g.41209079_41209080dup`. Two things need no reference
+  (`provablyDifferentAlleles`), and between them they cover both ways MyVariant
+  mis-files a record:
+  - alleles that change the sequence length by different amounts differ — a
+    2-bp duplication is not a 1-bp one;
+  - an insertion slid *k* positions along a repeat has its bases rotated by *k*,
+    so `insCA` one position on is `insAC` if it is anything, never `insCA`.
+
+  Anything else — an insertion against the duplication it may be, two deletions
+  of one length — is still left as it was, and the panel says the id could not be
+  checked. The proof only ever says "different": on random repetitive sequence it
+  is checked never to fire for two spellings the reference calls one allele.
 
 A re-keyed record also takes its gene from ClinVar's preferred name. MyVariant
 keeps one of the genes ClinVar lists, and for EGFR exon 20 that is the antisense
 gene: `NM_005228.5:c.2300_2308dup` was labelled `EGFR-AS1` and sent to CIViC,
 PubMed and the other gene cards as that.
+
+### One allele, several MyVariant records
+
+MyVariant keys a record by the spelling its source used, and its sources spell
+an indel in a repeat differently. One allele is therefore several records, each
+holding only what one family of sources knew:
+
+| | id | holds |
+| --- | --- | --- |
+| BRCA1 c.5266dup (5382insC) | `chr17:g.41209082dup` — 3′-most, HGVS | dbSNP: rs80357906 |
+| | `chr17:g.41209079_41209080insG` — left-aligned, VCF | gnomAD, ExAC, snpEff, vcf |
+| | `chr17:g.41209079_41209080dup` — MyVariant's own | ClinVar: 17677 |
+| CFTR F508del | `chr7:g.117199645_117199647del` — left-aligned | ClinVar, gnomAD, ExAC, snpEff |
+| | `chr7:g.117199646_117199648del` — 3′-most | dbSNP: rs113993960 |
+
+A lookup showed whichever record it landed on:
+
+| Input | was missing | now |
+| --- | --- | --- |
+| `rs80357906` | ClinVar ("Clinical significance: N/A"), gnomAD | ClinVar 17677 · Pathogenic (14) · gnomAD exome AF 0.0183% |
+| `BRCA1 c.5266dup` | gnomAD, rsID | both |
+| `17 7578474 TP53 C CG` | ClinVar, rsID | ClinVar 182958 · rs730882019 |
+| `7 117199644 CFTR ATCT A` (F508del) | rsID | rs113993960 |
+| `chr13:g.32906700_32906701insCA` | everything — no record under either real spelling | ClinVar 2505518 |
+
+`gatherAlleleRecords` collects the rest. The other ids are **derived, not
+guessed**: the reference says how far the indel slides, and the two ends of
+that stretch are the left-aligned and the 3′-most placement
+(`indelPlacements`). On top of those come the two ids MyVariant makes up for
+ClinVar records, both measured — over ClinVar records in BRCA1, BRCA2, TP53,
+MLH1 and APC, 80 of 80 duplications are filed as `g.<left>_<left+1>dup` and 49
+of 49 mis-filed insertions as `g.<left>_<left+1>ins<3′-most bases>`. All the
+candidates go to MyVariant in one batch request.
+
+**Nothing is merged on the strength of a spelling.** Each record that comes back
+is applied to the reference and must come out as the allele being looked up
+(`blocksForAllele`). The ids MyVariant makes up read, literally, as *other*
+alleles, so from those only the ClinVar block is taken, and only when ClinVar's
+own HGVS inside it is this allele — the dbSNP block beside ClinVar 17677 is
+rs2051500205, the 2-bp duplication its id spells, and is left where it is.
+The same rule keeps `13 32906699 BRCA2 G GCA` from inheriting ClinVar 2505518,
+which MyVariant files under exactly that id. A block the lookup already has is
+never replaced; what was borrowed, and from where, is listed in the progress
+panel (`also filed under chr17:g.41209079_41209080insG (gnomAD, ExAC, snpEff,
+vcf), chr17:g.41209079_41209080dup (ClinVar)`) and in the raw JSON under
+`_also_filed_under`.
+
+Without the reference nothing can be derived or proven, so nothing is merged and
+the panel says `its other ids for this allele were not checked`. The step runs
+alongside the wait for Ensembl and is given 6 s; a substitution has one id and
+costs nothing.
+
+A related slip, fixed with it: links that took REF/ALT from the record's `vcf`
+block paired them with the first base of the HGVS event rather than the position
+that block is anchored at — F508del typed as HGVS went to gnomAD as
+`7-117199645-ATCT-A` (it is at 117199644).
+
+**The VCF alleles are left-aligned whichever record the lookup landed on.**
+MyVariant writes a record's `vcf` block for the id it sits under, so the record
+under the 3′-most id is anchored there, and that is not the spelling
+VCF-derived resources use:
+
+| Reached through | VCF alleles were | gnomAD v4.1 said | now |
+| --- | --- | --- | --- |
+| `chr7:g.117199646_117199648del`, `rs113993960` (F508del) | `7-117199645-TCTT-T` | Not found | `7-117199644-ATCT-A` — 18,037 / 1,460,114 |
+| `BRCA1 185delAG`, `NM_007294.4:c.68_69del` | `17-41276046-TCT-T` | Not found | `17-41276044-ACT-A` — 169 / 1,459,934 |
+
+(The gnomAD v2 link opened a "variant not found" page for the same reason.) The
+reference is already in hand when the records are gathered, so the block is
+re-anchored there (`leftAlignedVcfBlock`) — only if, left-aligned, it is the
+allele being looked up — and every consumer sees the one spelling: the VCF line,
+both gnomAD halves, SpliceAI and the AI review. What MyVariant has is kept in the
+raw JSON as `_vcf_as_filed`.
+
+See `tests/sibling-records.test.js`.
 
 ### Which variant a gene-symbol name means
 
@@ -173,6 +263,217 @@ change matched on, then the existing ClinVar-presence tie-break. It is a
 preference rather than a filter, an explicit accession is honoured as before,
 and protein names are ranked the same way.
 
+**A coding name on a gene symbol is read on a transcript the gene is reported
+on: MANE Select, or — where the gene has one — MANE Plus Clinical.**
+When ClinVar itself names a hit `GENE c.X` that is the end of it, and Ensembl's
+recoder is not asked at all (it does not answer `BRCA1:c.5266dup` within a
+minute). Otherwise the ranking above was only a fallback — and with no hit at
+all the name went to Ensembl, which picks a transcript of its own:
+
+| `PTEN c.512T>G` | |
+| --- | --- |
+| before | `chr10:g.89720934T>G`, which is **c.1026+59T>G — an intron** — on every RefSeq transcript of PTEN, presented as the answer |
+| now | *PTEN c.512T>G is not a change on NM_000314.8, the MANE Select transcript of PTEN: the reference base at that position is A, not T. The name may be counted on another transcript — enter it with that transcript's accession (NM_001304717.5:c.512T>G — the base there is T).* |
+
+So the lookup first settles which transcripts the gene is reported on
+(`standardTranscriptForGene`) and from there on is for `NM_…:c.X`, which every
+later step treats exactly; the progress panel says `read as
+BRCA2:c.1083_1084insCA · on NM_000059.4, the MANE Select transcript of BRCA2`.
+Three sources answer that question:
+
+- **NCBI's list of the gene's MANE transcripts** (`fetchClinicalTranscripts`,
+  the Datasets API): MANE Select *and* MANE Plus Clinical in one request of a
+  few tenths of a second, 39 KB compressed for BRCA1.
+- **Ensembl's MANE record**, the other authority for MANE Select. It is now
+  fetched as two small requests — the gene, for its canonical transcript, then
+  that one transcript. The single "expanded" request used before is 236 KB for
+  BRCA1 and 818 KB for TTN, took 18 s and 13 s when measured, and so missed its
+  4 s deadline for exactly the large, much-studied genes: that is also why
+  "(MANE Select)" was so often missing from the Variant card.
+- **The transcript ClinVar names the gene's variants on**
+  (`fetchClinvarNamingTranscript`, a 0.3 s MyVariant query), used when neither
+  has named MANE Select in 3 s. Checked against MANE for 20 genes — BRCA1/2,
+  TP53, PTEN, EGFR, KRAS, CDKN2A, MUTYH, TTN and others — it was the MANE
+  Select, version included, in all 20.
+
+The **"(MANE Select)" label** on the Variant card — for every lookup, not only
+gene-symbol names — is taken from whichever of the first two names the
+transcript first (`maneSelectForLabel`; NCBI's list gives it under both its
+names, RefSeq's and Ensembl's). Every result is held up to 4 s for that label,
+and it used to rest on Ensembl's record alone: during the final live run for
+this change Ensembl's gene lookup was taking 29 s, so each of 52 lookups sat
+those four seconds out and then came without the label, while NCBI's list
+answered in 0.3 s.
+
+**MANE Select alone is not enough**, which this rule got wrong at first (found in
+review, before it was released). For some sixty genes clinical reports count on
+a second transcript, and for exactly those MANE names it: MANE Plus Clinical.
+MECP2 is reported on NM_004992, NF1 on NM_000267, MUTYH on NM_001128425 — and
+the names in every clinic letter are in that numbering:
+
+| Typed | read on MANE Select alone | now (`chooseNameReading`) |
+| --- | --- | --- |
+| `MECP2 c.473C>T` (T158M, ClinVar 11811) | refused — *"the reference base at that position is G"* — with a hint that led to a benign variant on a third transcript | NM_004992.4 · p.Thr158Met · ClinVar 11811 |
+| `NF1 c.6789_6792del` (ClinVar 216866, Pathogenic) | `chr17:g.29665127_29665130del` — four other bases nobody has reported — "Clinical significance: N/A", *Variant resolved* | `chr17:g.29665752_29665755del` · ClinVar 216866 |
+| `MUTYH c.536A>G` (Y179C) | refused; before that, shown as p.Glu179Gly (ClinVar 533304), the same name on the lowest-numbered transcript | NM_001128425.2 · p.Tyr179Cys · ClinVar 5293 |
+
+A deletion or duplication names no bases, so it "fits" on any transcript: only
+a record can say which one is meant. The rule is therefore:
+
+1. A record that carries the name on **MANE Select** is the variant.
+2. Failing that, a record that carries it on a **MANE Plus Clinical**
+   transcript is.
+3. With no record on either, the name is read on MANE Select — and if it turns
+   out not to be a change there (a substitution naming a base that is not
+   there), on the Plus Clinical transcript: `MECP2 c.474G>C`, which no record
+   carries, is `p.Thr158=` on NM_004992.4.
+
+Whenever that leaves something to choose, the Variant card says which
+transcript the name was read on and links the other reading:
+
+> MECP2 c.473C>T is read on NM_004992.4, a MANE Plus Clinical transcript of
+> MECP2. If the MANE Select transcript was meant, look up
+> NM_001110792.2:c.473C>T.
+
+A second review found three places where there was something to choose and the
+card said nothing:
+
+- **One name, two known variants.** `MECP2 c.916C>T` is ClinVar's name for
+  p.Arg306Ter on MANE Select, so rule 1 settles it at once — and on the Plus
+  Clinical transcript, the numbering the clinic uses, the same name is R306C
+  (ClinVar 11824). The card now adds: *Counted on the MANE Plus Clinical
+  transcript the same name is another variant, which ClinVar lists:
+  NM_004992.4:c.916C>T* (`settledNameAlternatives`).
+- **No record to decide.** Under rule 3 a deletion "fits" MANE Select whatever
+  was meant. `NF1 c.6789_6792del` with MyVariant's name search not answering
+  came out as four other bases on MANE Select, *Variant resolved* — the
+  "before" row of the table above. It is still read there, there being nothing
+  to say otherwise, but the card now reads: *NF1 c.6789_6792del is read on
+  NM_001042492.3, the MANE Select transcript of NF1. MyVariant could not be
+  searched for the name, so no record decided this. If the MANE Plus Clinical
+  transcript was meant, look up NM_000267.4:c.6789_6792del.* The same offer is
+  made, without the middle sentence, for a name no record carries.
+- **RefSeq Select is not MANE Select.** Where a gene has no MANE Select in
+  NCBI's list (CDKN2A, whose RefSeq record has moved a version on), RefSeq's own
+  pick stands in — and was introduced as "the MANE Select transcript". It is
+  called what it is, and so is ClinVar's naming transcript where that is the
+  stand-in: *If the transcript ClinVar names MECP2 variants on was meant, look
+  up …*.
+
+**Only a reading that is another variant is offered.** A gene's two clinical
+transcripts number most of it alike — every KRAS name up to exon 4, every NF1
+name before the one exon only NM_001042492 has. There the name is the same
+variant whichever transcript was meant, and the offer made for a name no record
+carries suggested a choice where there is none:
+
+> KRAS c.34_36dup is read on NM_004985.5, the MANE Select transcript of KRAS.
+> If the MANE Plus Clinical transcript was meant, look up
+> NM_033360.4:c.34_36dup.
+
+Once the variant is resolved its name on every transcript is known, and those
+rows decide (`namesakesGivenRows`): where the variant carries the same name on
+both transcripts nothing is offered, and nothing is said. Where it does not —
+`NF1 c.7846C>T` is c.7783C>T on NM_000267.4 — the other reading stands. Two
+smaller points of the same kind: *"…is another variant, which ClinVar lists"*
+is said of a record that has a ClinVar entry, not of any record that carries
+the name; and when the rows cannot say (one of the two transcripts has none)
+*"is another variant"* is kept only for two substitutions — under two ids those
+are two variants, while an indel is filed under whatever spelling its source
+used and can be two records. And a namesake on some further, minor transcript
+is mentioned only while the name is not a known variant where it was read:
+`BRCA1 c.5265_5266insC` is on no record as typed, because HGVS writes it
+c.5266dup — and once it has resolved to that (5382insC, ClinVar 17677), the
+record that carries "c.5265_5266insC" on NM_001407610.1 is no longer offered as
+what might have been meant.
+
+The same note appears when ClinVar's own name for a variant is on a transcript
+other than MANE Select — `CDKN2A c.3G>C` is ClinVar's name for a p14ARF variant
+on NM_058195.4, and on NM_000077 it is p16's start codon. The row shown on the
+card is the transcript the name was read on, in whichever version GRCh37's
+annotation carries (`NM_000267.3` for a name read on `NM_000267.4`).
+
+The lookup runs itself again to read a name on another transcript, and a lookup
+that has been overtaken must not: `MECP2 c.474G>C`, with `BRAF V600E` submitted
+while its last fallback was out, went on to its second pass and took the page —
+MECP2's result under a box that said BRAF V600E. A lookup now stops as soon as
+it is no longer the current one: before any second pass, when the answer it was
+waiting on from Ensembl arrives (it used to go on and look up the alleles in
+it), and before it writes a failure of its own onto the panel of the lookup
+that overtook it.
+
+**A name Ensembl re-spells.** HGVS places an indel in a repeat at its 3′-most
+position, and Ensembl answers in that form: asked for `NM_004985.5:c.34_36dup`
+— the duplication of KRAS codon 12 — it gives `c.36_38dup`, the same
+duplication written two bases along. Two things went wrong with that, on a
+gene-symbol name and on an accession alike:
+
+| `KRAS c.34_36dup` | |
+| --- | --- |
+| before | `chr12:g.25398285_25398286insGGT` · c.33_34insACC · **p.Ala11_Gly12insThr** — another variant |
+| now | `chr12:g.25398284_25398286dup` · c.36_38dup · p.Gly13dup, and the panel says *Ensembl gives this change as c.36_38dup — the same variant, written where HGVS places it* |
+
+- The answer was discarded for not carrying the name as typed ("no transcript
+  match"). It is now taken (`recoderRespelling`) where nothing is left to
+  chance: the answer is to this very query, the name is on an accession (a gene
+  symbol would leave Ensembl to pick the transcript), the answer names that
+  same transcript, and both are indels of the same size. A substitution is
+  never re-spelled.
+- The name then went to VEP as a last resort, and **VEP answers a name on a
+  transcript in that transcript's strand**: `-/GGT` with `strand: -1`. The
+  coordinates are the genome's; the bases are not until they are
+  reverse-complemented. They were taken as they stood (`buildGenomicHgvsFromVep`)
+  — for an insertion on a minus-strand gene that is another variant, and for a
+  substitution a reference base the genome does not hold there:
+  `NM_004333.4:c.1799T>A`, BRAF V600E on an older version of its transcript,
+  came out as `chr7:g.140453136T>A` whenever Ensembl answered before NCBI did —
+  no ClinVar record, no rsID, and gnomAD and SpliceAI asked about an allele
+  that does not exist. Whichever of Ensembl's recoder, NCBI's placement and
+  VEP now answers, the result is the same allele (`12-25398280-G-GCCA` for the
+  duplication, `7-140453136-A-T` for V600E).
+- That last route also never asked MyVariant for the allele it had arrived at:
+  the result was VEP's rows and nothing else. The record is now fetched, so
+  V600E reached this way has its ClinVar entry (13961), rsID and frequencies
+  like any other.
+
+(One thing is Ensembl's and is shown as given: its protein name for an
+insertion depends on how the insertion is spelled. The duplication above is
+p.Gly13dup when VEP is asked by `g.25398284_25398286dup`, and p.Val14dup when
+asked by `g.25398285_25398286insACC` — which is only what the page has when the
+recoder and NCBI are both down.)
+
+If NCBI's list cannot be had, whether the gene has a second clinical transcript
+is *unknown*, which is not the same as none: a record that carries the name on
+another transcript is then taken, the oldest transcript first, as before this
+rule existed — and the card says how little that rests on.
+
+When a service *rejects* the name (HTTP 400: it read it and said no) that is
+reported as what it is. A reference base that is not there used to come out as
+"Ensembl failed. Please retry in a moment."; it now names the base that is
+there, for a gene-symbol name and for an accession typed with the wrong base
+alike, and suggests transcripts on which MyVariant's other records show the
+stated base to be right — the oldest accession first, since where a gene's
+variants were long counted on one transcript it is the low-numbered one.
+
+A failed MyVariant name search no longer skips any of this: the name used to be
+handed to Ensembl as typed in that case, and came back as the intron variant
+above with no warning.
+
+One more rejection is not the name's fault at all: **a transcript version newer
+than GRCh37's annotation.** That annotation is frozen and RefSeq is not —
+`NM_000077.6:c.3G>C` (CDKN2A's current record) answers *"Could not get a
+Transcript object for 'NM_000077.6'"*, NCBI has no GRCh37 placement for it yet,
+and the page said "Lookup could not complete … Please retry in a moment."
+Ensembl reads the accession without its version as the one it has, so that is
+looked up instead, and the panel says so: *"NM_000077.6 is a newer version than
+GRCh37's annotation has — read on the version it does have"* (`NM_000077.5`).
+
+If neither source can say which transcript is standard, the old behaviour is all
+that is left — and is said: the panel warns that the name was read on whichever
+transcript matched first, and a typed substitution that is on none of the
+transcripts shown gets a note beside the `c.` line.
+
+See `tests/gene-symbol-name.test.js`.
+
 ### A genomic query names no gene
 
 What precedes `:g.` is a chromosome or an accession. Reading it as a symbol
@@ -180,6 +481,177 @@ rendered `Gene: CHR16` for `chr16:g.2122948_2122950del`, filtered VEP's
 transcript rows on "CHR16" — losing the protein change and the effect — and sent
 "CHR16" to every gene-level source. When no gene column was pasted the gene now
 comes from VEP.
+
+For a variant that lies between genes VEP lists every gene within 5 kb, in
+transcript order, and the first used to be taken: `m.16300A>C`, 277 bp upstream
+of MT-TP, was labelled **MT-ND4** — 4 kb away, and a gene it lies *downstream*
+of — beside the effect `upstream_gene_variant`. The gene named is now one the
+reported effect is about, and of several, the nearest
+(`resolveGeneSymbolFromVep`). A gene the variant is actually in still comes
+before any neighbour.
+
+### Mitochondrial variants
+
+`m.8993T>G` — MT-ATP6 p.Leu156Arg, NARP/Leigh syndrome — was shown as
+`Gene: MT-ATP6, MT-ATP8, RNR2-END · Transcript: RNR2-END · c.: n.8993T>G ·
+Effect: intergenic_region`. Each source the page read is wrong about the
+mitochondrial genome in its own way, and each needed its own answer:
+
+| Source | What it says | What the page does |
+| --- | --- | --- |
+| snpEff (in MyVariant) | No gene models beyond the two rRNAs: everything else is `intergenic_region` against a made-up feature, `RNR2-END` (nine of nine well-known variants checked) | The block is set aside for `chrMT` records (`withoutUnusableBlocks`); the reason is left in the raw JSON under `_not_used` |
+| ClinVar's gene (in MyVariant) | ClinVar's list is whatever submitters sent — 26 genes for m.8993T>G — and MyVariant keeps one: MT-ATP8 for that variant, MT-ND1 for m.1555A>G in MT-RNR1 | Used for the gene line only when CADD, which works from the position, names none |
+| VEP, RefSeq transcripts | RefSeq has no accessions for the 37 mitochondrial genes; VEP invents them — gene `ATP6`, transcript `ATP6.1` | VEP is asked for Ensembl's own set on `MT`: `MT-ATP6`, `ENST00000361899` |
+| Ensembl recoder | Answers `NC_012920.1:m.8993T>G`; cannot parse MyVariant's `chrMT:g.…` | Asked as `MT:g.…`; `m.` on NC_012920 is read as the same allele (the sequence is identical in both assemblies, so it is never lifted) |
+
+The result is `Gene: MT-ATP6 · ENST00000361899.2 · c.467T>G · p.Leu156Arg ·
+missense_variant`; m.1555A>G is `MT-RNR1 n.908A>G` and m.3243A>G `MT-TL1
+n.14A>G`. With Ensembl down nothing has computed a coding change, so none is
+shown — and CADD still names the gene.
+
+Every common spelling reads as the same query, `chrMT:g.8993T>G`:
+
+```
+M 8993 T G        NC_012920.1:m.8993T>G        m.8993T>G        MT-ATP6 m.8993T>G
+chrM:g.8993T>G    chrMT:g.8993T>G              MT:g.8993T>G
+```
+
+Only the bare `m.` form and the rows used to work. ClinVar's own name for the
+variant, `NC_012920.1:m.8993T>G`, was read as the protein change `p.M.8993T>G`,
+and `chrM` — the hg19 name — was asked of MyVariant as such, a guaranteed miss
+that was recovered only when Ensembl answered and re-spelled it.
+
+The GRCh38 box makes no difference to a mitochondrial variant — the sequence is
+the same in both assemblies — and none is asked for: it used to be sent to
+Ensembl's assembly map all the same, which failed the lookup (*"could not map
+chrMT:g.8993T>G (GRCh38) to GRCh37"*) whenever that service was down.
+
+**gnomAD.** gnomAD keeps mitochondrial variants in a call set of their own,
+counted by heteroplasmy, which neither half of the gnomAD card read. v2 has
+none, and the v4 proxy looks up nuclear variants only: asked about one on `M` it
+attempted a liftover, Ensembl rejected the chromosome name, and the card said
+
+> gnomAD v4.1 unavailable: the Ensembl liftover service is not responding, so
+> M:8993 could not be converted to GRCh38. This is usually temporary — try again
+> shortly.
+
+for every mitochondrial variant, every time (typed as `chrMT:g.…` the name was
+accepted and the answer was *"Not found in gnomAD v4.1"*, for m.1555A>G with its
+63 homoplasmic carriers) — beside a "View on gnomAD (v2.1.1)" link to a page
+reading *"Mitochondrial variants are not available in gnomAD v2"*. The card now
+reads the call set from gnomAD's own CORS-open API, the one gene constraint
+already comes from (`fetchGnomadMitochondrial`; no liftover — the sequence is the
+same in both builds):
+
+```
+Mitochondrial call set (gnomAD API)
+Homoplasmic AF: 0.1117%  AC/AN: 63/56401
+Heteroplasmic AF: 0.0195%  AC/AN: 11/56401
+Homoplasmic: in at least 95% of a carrier's mitochondrial copies; heteroplasmic: in 10–95%. Highest level seen: 100%.
+View on gnomAD (mitochondrial)
+```
+
+gnomAD not answering is reported as *could not be read*, never as *not in
+gnomAD*, and the AI review receives the same counts with what they mean.
+
+Two things found here apply to every chromosome:
+
+- **A genomic query's transcripts survive a re-spelling.** The record for
+  m.3271del is filed as `g.3271del`; Ensembl answers `g.3273del`, the same
+  deletion at the other end of a run of T's. The recoder's transcript rows were
+  matched to the allele by spelling, found no match and were discarded. A
+  genomic query has exactly one allele in the recoder's answer — its own — so
+  the rows are kept; a name (`c.`, `p.`) can still come back as several alleles
+  and is still matched by id.
+- **snpEff's protein-structure contacts are not transcripts.** TP53 R213*
+  carries 762 `structural_interaction_variant` rows
+  (`4QO1:B_169-B_213:NM_001126114.2`), each of which was listed under "Other
+  transcripts".
+
+See `tests/mitochondrial.test.js`.
+
+### rsID lookups
+
+An rsID used to be handed to Ensembl's variant recoder and waited for. Measured
+live, with this page's own timeouts:
+
+| rsID | before | now |
+| --- | --- | --- |
+| `rs80357906` (BRCA1 5382insC) | 49.5 s, then `c.: N/A · p.: N/A · Effect: delins` | 6.5 s · NM_007294.4 c.5266dup · p.Gln1756ProfsTer74 |
+| `rs113488022` (BRAF V600E) | **p.Val600Ala** | p.Val600Glu, and a note naming the other two alleles |
+| `rs28934578` (TP53 R175H) | 51.8 s, then `p.: N/A · Effect: N/A` | 8.9 s · p.Arg175His |
+| `rs1042522` (TP53 P72R) | 52.1 s, then `p.: N/A · Effect: N/A` | 6.1 s · p.Pro72Arg |
+
+Three separate things were wrong.
+
+**The wait.** Ensembl takes 5 to 50 s over an rsID. The page allows 12 s, tried
+four times, and then fell back to the MyVariant search it could have started
+with. MyVariant is now asked first: it says at once which alleles it files under
+the rsID. The recoder keeps running in the background and is no longer needed.
+
+**Which allele.** An rsID names a site, not an allele, and rs113488022 has
+three. The one shown was the first that Ensembl listed — and Ensembl lists them
+in a different order from one call to the next (`T, G, C` in one recording of
+this very query, `G, T, C` in another), so the rsID everyone uses for V600E came
+back as V600A or V600E at random. The alleles MyVariant holds are now ordered by
+how well documented each is — ClinVar submissions, then population frequency
+(`rankRsidAlleles`) — and because that is a choice made on the user's behalf,
+the Variant card says so and links the others:
+`rs113488022 names 3 alleles. This is the best documented one; the others are
+chr7:g.140453136A>C, chr7:g.140453136A>G.`
+
+**No transcript.** The record an rsID lands on can be one of MyVariant's
+dbSNP-only ones (an rsID and a gene, nothing else), and VEP was only asked when
+the recoder had supplied transcripts to pair — which, having timed out, it had
+not. VEP works from the allele alone and answers in a second or two, so it is
+now asked as soon as the allele is known, for every lookup; once it has
+answered, the recoder is not waited for. When the recoder contributed nothing,
+VEP is given 8 s from when it was asked (`API_TIMEOUT_MS.vepUnprompted`) and the
+result is shown without it after that. VEP answers from Ensembl's own transcript
+set when its RefSeq one fails; asked unprompted, such an answer does not
+displace RefSeq rows the record already has (during an Ensembl blip
+`13 32906699 BRCA2 G GCA` came out on `ENST00000544455.1` while the record's
+`NM_000059.3` row went unused), and the panel says *"RefSeq transcripts
+unavailable — the record's own are shown"*.
+
+Not waiting for the recoder means it answers later — typically a second or two
+after VEP, in the middle of what remains of the lookup. Its rows carry no protein
+change, and arriving then they replaced VEP's: in a real browser F508del by its
+g. name came out `c.1521_1523del · p.: N/A · Effect: N/A` whenever Ensembl's
+recoder took 3 s rather than 1 (and a late *failure* emptied the rows
+altogether). Once the rows a result is built from have been decided, the
+recoder's outcome is only reported: *"answered after the result was ready — not
+needed: the variant was resolved without it"*.
+
+Two more of the same kind, found in review. The recoder's rows are at first
+those of the first allele in its answer, and they were put right for the allele
+the lookup chose at one point only — before the wait for VEP. Answering *during*
+that wait, with VEP then giving up, it left V600A's row on V600E's page
+(`g.140453136A>T`, ClinVar 13961, `c.1799T>C`) and PubMed was asked about that.
+Rows are now taken for the chosen allele whenever they arrive
+(`rowsForChosenAllele`), and when VEP gives up the record's own rows, which say
+what the change does, are preferred to recoder rows that arrived meanwhile. And
+a recoder that outlives its lookup — it can take a minute — used to write its
+failure onto whichever lookup was running by then: `rs80357906`, then
+`BRCA1 c.5382insC`, ended in *"Lookup could not complete … upstream outage"* for
+a name that resolves, because the first lookup's recoder had just given up. A
+lookup's recoder now touches nothing once another lookup has begun.
+
+One more, from a second review: VEP answering after all in that window, from
+Ensembl's own transcript set because its RefSeq one failed. Such an answer is
+not allowed to displace the record's RefSeq row, and the panel says *"RefSeq
+transcripts unavailable — the record's own are shown"* — but the recoder's
+rows, arrived meanwhile, were what was shown: `p.: N/A · Effect: N/A` under
+that sentence. They are set aside there too.
+
+Without VEP the record's own rows are used, and there a bare `c.` from ClinVar's
+list no longer displaces snpEff's row for the same transcript: ClinVar lists the
+current version (NM_000546.6) beside snpEff's older one (.5), the bare row was
+selected for being the MANE version, and that is where `p.: N/A, Effect: N/A`
+came from.
+
+See `tests/rsid-lookup.test.js`. Its recordings were made with the page's real
+timeouts, so a request Ensembl did not answer in time replays as a timeout.
 
 `npm test` includes real-response identity fixtures and full form/card regression
 checks using LinkeDOM, with external requests mocked. It covers both PTEN input
@@ -207,6 +679,13 @@ HGVS is accepted in genomic, coding and protein form:
 ```
 chrX:g.20148675dup      NM_001412.4:c.388dup      EIF1AX:p.Gln130ProfsTer3
 ```
+
+So are an rsID (`rs113488022` — see [rsID lookups](#rsid-lookups) for a site
+with several alleles), mitochondrial `m.` notation (`m.8993T>G`,
+`NC_012920.1:m.8993T>G`), a stop written the short way (`TP53 R213*`,
+`R213X`), any amino acid at a residue (`KRAS G12X`, `KRAS p.Gly12Xaa` — the
+codon), and the older names ClinVar lists a variant under (`BRCA1 5382insC`,
+`BRCA1 185delAG` — see [Names that are not HGVS](#names-that-are-not-hgvs)).
 
 Pasted coordinate rows are also accepted, in the shapes people actually paste
 out of VCFs, MAFs, spreadsheets and pipeline reports:
@@ -303,9 +782,14 @@ a genomic query fails over to nobody, and with the mirror down the lookup
 reports an outage. The mitochondrion, whose sequence is the same in both
 assemblies, still fails over.
 
-When **both** Ensembl hosts fail, the recoder falls back to **NCBI Variation
-Services** (`api.ncbi.nlm.nih.gov/variation/v0`, CORS-open, independent
-infrastructure): `/hgvs/{query}/contextuals` places the variant as a SPDI, and
+When Ensembl has not answered an accessioned name within 2.5 s — or has failed
+outright — the recoder also asks **NCBI Variation Services**
+(`api.ncbi.nlm.nih.gov/variation/v0`, CORS-open, independent infrastructure), and
+the first usable answer is taken. It used to be asked only after both Ensembl
+hosts had failed, four 12 s attempts later: `NM_007294.4:c.68_69del` (BRCA1
+185delAG) waited 53 s for an answer NCBI gives in one. Ensembl still goes first
+and is preferred when it is prompt, because its answer carries transcript rows.
+`/hgvs/{query}/contextuals` places the variant as a SPDI, and
 `/spdi/{spdi}/all_equivalent_contextual` remaps it to the GRCh37 `NC_`
 chromosome placement. The scope is deliberately narrow — accessioned nucleotide
 HGVS only (`NM_/NC_/NG_/NR_` with `c./g./n.`); gene-symbol and protein queries
@@ -314,8 +798,11 @@ deletion), so they are trimmed to the minimal event in **both** trim orders
 (`minimalSpdiForms`) — in a repeat region the order decides which flank
 survives, and MyVariant indexes only its normalised form — and fed into the
 existing candidate-conversion path as a recoder-shaped response with no
-transcript nomenclature. The progress panel says "resolved via NCBI Variation
-Services" rather than pretending Ensembl answered.
+transcript nomenclature. The progress panel says "variant placed by NCBI
+Variation Services — Ensembl had not answered" rather than pretending Ensembl
+did. Once NCBI's answer has been taken, Ensembl's remaining attempts are called
+off (`shouldStop` in `fetchWithRetry`): nothing reads their answer, and a
+service slow enough to be overtaken should not be asked three more times.
 
 The app previously made a single attempt behind a 6-7 second deadline, so a
 slow or unwell upstream produced:
@@ -493,6 +980,54 @@ Rate limiting uses [`@upstash/ratelimit`](https://github.com/upstash/ratelimit-j
 
 The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV/nearby-variant results, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
 
+
+## What a protein change is searched as
+
+The ClinVar search link, the PubMed/LitVar card, the Google links and the AI
+review all look the variant up under a short name for its protein change.
+`proteinSearchTerm()` is the one place that name is made:
+
+| Protein change | Searched as | |
+| --- | --- | --- |
+| `p.Val600Glu` | `V600E` | |
+| `p.Gln1756ProfsTer74`, `p.Pro153fs` | `Q1756fs`, `P153fs` | ClinVar's own protein-change name for a frameshift, and the form LitVar resolves |
+| `p.Arg213Ter`, `p.Arg213*` | `R213X` | one ClinVar record, the LitVar entity that holds the literature, and a term PubMed knows |
+| in-frame indels, extensions, synonymous | the full `p.` string | |
+
+A frameshift opens the way a substitution does, and the old shortening read only
+that far: `p.Gln1756ProfsTer74` (BRCA1 c.5266dup, 5382insC) was searched as the
+missense **Q1756P** — a different variant with its own ClinVar records and its
+own paper — and a frameshift written without the new residue, `p.Pro153fs`,
+came out as "TP53 **O153F**". The spellings in the table were chosen by asking
+the services: `BRCA1 Q1756Pfs*74` finds nothing in LitVar and, the asterisk
+being a wildcard, 85,659 records in ClinVar; `TP53 p.Arg213*` (snpEff's
+spelling of a stop) is 6,089 ClinVar records and no LitVar entity.
+
+Only a substitution — missense or nonsense — gets the ClinVar card's "Same
+protein change" list. Two frameshifts at one residue are different proteins
+unless they shift the frame the same way, and ClinVar's titles (`p.Gln1756fs`)
+do not say which way.
+
+**PubMed drops what it does not know.** Asked for `BRCA2 D362fs`, PubMed finds
+no article using "D362fs", silently discards the phrase and answers with the
+17,385 papers on BRCA2 — which were listed under "Gene + Variant" and handed to
+the AI review as literature on the variant. `esearch` names what it discarded
+(`errorlist.phrasesnotfound`); when that is the whole variant, `api/pubmed.js`
+returns no articles and the phrase, and the card says
+`no article in PubMed uses "D362fs"`. Part of a variant surviving
+(`p.Glu746_Ala750del` loses `p.Glu746` and still matches on `Ala750del`) is left
+alone, as is any search that names no variant. What has to survive is something
+that says which variant it is, though — a position. `PTEN c.1026+59T>G` loses
+`c.1026+59T` and PubMed goes on to search PTEN and the letter "G": 1,491 papers
+(`CFTR c.489+1G>T`: CFTR and "T", 8,572). A base on its own, or a bare "del",
+counts as the variant having been dropped.
+
+**A stop typed by hand.** `TP53 R213*`, `R213X` and `p.Arg213*` are all read as
+`TP53:p.Arg213Ter`; the first two used to be passed on as typed and came back
+"could not resolve". ("X" is not always a stop — see
+[Resolving c. and p. queries](#resolving-c-and-p-queries-to-a-genomic-position).)
+
+See `tests/protein-search-term.test.js`.
 
 ## Variant-normalized literature (LitVar2)
 
@@ -682,7 +1217,62 @@ are impossible:
   change"*), in single- or three-letter form, against a gene or a protein
   accession.
 
-Simple substitutions (`p.Val600Glu`) do resolve, so those are unaffected.
+Simple substitutions (`p.Val600Glu`) do resolve, so those are unaffected — where
+the name comes to one allele. It need not. Ensembl answers a protein change with
+every nucleotide change it knows to produce it, the page took the first, and two
+things followed (`proteinNameReading`; measured live, found in review):
+
+| typed | was shown | now |
+| --- | --- | --- |
+| `KRAS G12X` | `chr12:g.25398283_25398285delinsTTA` · c.34_36delinsTAA · p.Gly12Ter · stop_gained — an allele nobody has reported | the codon, as `p.Gly12Xaa`: *"X" was read as any amino acid, not as a stop: no single-base change turns Gly12 into a stop codon, and no such variant is on record* |
+| `BRAF V600X`, `EGFR T790X` | a two-base replacement, stop_gained | the codon, the same way |
+| `KRAS Q61X`, `TP53 R213X` | the stop (c.181C>T; c.637C>T, ClinVar 43590) | the same, and *"X" was read as a stop codon (p.Gln61Ter). If it stands for any amino acid, look up KRAS p.Gln61Xaa* |
+| `KRAS G12*` | `…delinsTCA` in one run, `…delinsTTA` in the next | the codon: *p.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown*, with a link to each |
+| `KRAS G12K` | one of two replacements, likewise by the order of Ensembl's answer | the codon, with both linked |
+
+**"X".** It is the old one-letter code for a stop — `TP53 R213X` is what ClinVar
+and the literature call p.Arg213Ter — and in HGVS (`Xaa`) and in oncology
+shorthand it is *any* amino acid: "KRAS G12X" is G12C, G12D, G12V and the rest.
+It is read as a stop where that is a variant someone could mean: MyVariant
+holds a record for it, or one base makes the stop (CGA → TGA, CAA → TAA).
+Otherwise X is "any amino acid" and the codon is what the name gives — which
+also brings up ClinVar's records at that codon, the thing "G12X" is asking
+about. Either way the card says which reading was taken, since it is a choice
+made on the user's behalf — also where it is ClinVar that settled it, by
+listing several variants with the stop's protein change: the codon is then
+shown as the stop, with those variants, and is not re-read as "any amino acid"
+on the way. Literature is searched as `G12X`, the way it is written about.
+
+**Several alleles.** `p.Gly12Ter` is GGT → TAA, TAG or TGA, and Ensembl gives
+all three (for most missense names it gives one: `BRAF V600E`, `KRAS G12D`,
+`EGFR L858R`) — in a different order from one call to the next, so that the
+page showed different variants for the same input. What is shown no longer
+depends on that order:
+
+- *a record for one of them:* that one is the variant, as before;
+- *records for several* (`KRAS Y64*`, TAC → TAG or TAA, both in MyVariant, whose
+  name search finds neither): the best documented — ClinVar submissions, then
+  frequency, then whether dbSNP has seen it, then simply the id — and the card
+  names the others (`rankAllelesOnRecord`): *p.Tyr64Ter is 2 alleles on record.
+  This is the best documented one; the other is chr12:g.25380266G>T.* This case
+  was found in review: four live calls had listed the alleles as G,A / G,A /
+  A,G / A,G, and the page had shown c.192C>G or c.192C>A accordingly;
+- *records for none:* nothing distinguishes them, and none is shown; each is
+  one click away.
+
+A single allele without a record is still shown — once ClinVar's names have
+been asked, since the variant known by a name can be another allele than the
+one Ensembl gives — and so is the first allele when MyVariant could not be
+asked — a 404 says "no record", an
+outage says nothing, and *"none on record"* is not claimed after one. Nor is
+it claimed when Ensembl did not answer at all: `KRAS Q61X` with the recoder
+down used to read *"No variant is on record for the stop (p.Gln61Ter)"*, a
+variant MyVariant holds (its name search just does not find it); the note now
+says the stop could not be looked up.
+
+This applies to a name on a gene symbol; on a protein accession
+(`NP_004976.2:p.Gly12Ter`) there is no gene to find the codon through and the
+first allele stands. See `tests/protein-name-reading.test.js`.
 
 What *is* determined by protein notation is the codon. Rather than failing the
 whole lookup, `resolveProteinCodonRegion` maps the residue range to GRCh37
@@ -699,6 +1289,129 @@ protein is rejected rather than silently mapped to the wrong locus.
 Queries that cannot even be resolved to a codon fail with a message naming the
 reason and pointing at c./g. notation, instead of the previous bare
 "Variant not found via Ensembl Variant Recoder".
+
+Before settling for the codon — or for an allele of Ensembl's that is not a
+single-base change on record — the name is looked up among ClinVar's other names
+(next section; for a deletion, duplication or frameshift, while Ensembl is still
+working): `BRCA1 p.Gln1756ProfsTer74` is one ClinVar variant and nothing
+else, so it resolves to that variant, not to a region; `CFTR F508del` is
+c.1521_1523del, not the c.1522_1524del Ensembl gives for that protein change. (The region it used to
+get was wrong as well: "Ter74", the distance to the new stop, was read as a
+residue, giving "residues 74–1756" — 47 kb of BRCA1.)
+
+## Names that are not HGVS
+
+"BRCA1 5382insC", "BRCA1 185delAG", "BRCA2 6174delT", "MTHFR C677T": what these
+variants were called before HGVS, counted from a different first base, and still
+what a clinic letter says. No nomenclature service resolves them.
+
+| Input | before | now |
+| --- | --- | --- |
+| `BRCA1 5382insC` | sent on as `BRCA1:p.5382insC`; "could not resolve" | NM_007294.4:c.5266dup · ClinVar 17677 |
+| `BRCA1 c.5382insC` | "Lookup could not complete … please retry" | the same |
+| `BRCA1 185delAG` | read as a protein change, `p.185delAG` | NM_007294.4:c.68_69del · ClinVar 17662 |
+| `BRCA2 6174delT` | `p.6174delT` | NM_000059.4:c.5946del · ClinVar 9325 |
+| `MTHFR C677T` | read as p.Cys677Thr; "could not resolve" | NM_005957.5:c.665C>T (p.Ala222Val) · ClinVar 3520 |
+| `BRCA1 p.Gln1756ProfsTer74`, `BRCA1 Q1756Pfs*74` | a 47 kb "codon region" | NM_007294.4:c.5266dup · ClinVar 17677 |
+| `CFTR 621+1G>T`, `CFTR 1717-1G>A`, `CFTR 3849+10kbC>T` | "could not resolve" | c.489+1G>T · 38799; c.1585-1G>A · 7112; c.3718-2477C>T · 7166 |
+| `BRCA1 IVS5+1G>A` | read as a protein change at "residue 5": a codon | NM_007294.4:c.212+1G>A · ClinVar 37446 |
+| `CFTR F508del`, `CFTR deltaF508` | **c.1522_1524del**, another allele with the same protein change | NM_000492.3:c.1521_1523del · ClinVar 7105 |
+
+ClinVar lists them: every record carries the other names its variant goes by
+(`aliases` — "5382insC", "5385insC", "p.Gln1756ProfsX74", and OMIM-style strings
+such as "MTHFR, 677C-T, ALA222VAL (rs1801133)"). When a `GENE name` input will
+not resolve, `resolveClinvarOtherName` asks the existing `/api/clinvar-protein`
+proxy for `GENE name` (it is a plain ClinVar search; it now returns each
+record's `aliases` and `variationCount`) and accepts a record only if
+
+- it is a single variant (not a haplotype) named in that gene, and
+- one of its other names **is** the typed name, compared in one spelling
+  (`variantNameKeys`: "c." and the sequence dropped, a protein change in
+  single-letter codes with one mark for a stop, and `C677T` = `677C>T` =
+  `677C-T`), and
+- it is the only such record. Two variants under one name are not for the page
+  to choose between; they are named, with links, and neither is shown.
+
+Failing that, a record whose own title gives the name as its protein change
+(`… (p.Glu746_Ala750del)`) counts if it is the only one. A protein change is a
+description that several variants can share, though, not a name for one of
+them, so a name always wins over it — see F508del below.
+
+The lookup then runs again for that record's HGVS name, and says so in the
+progress panel and on the Variant card: *"5382insC" is another name ClinVar
+lists for NM_007294.4(BRCA1):c.5266dup (p.Gln1756fs) (Variation 17677), which
+is what is shown here.* What was typed stays in "You entered" and in the URL.
+
+**When it is asked.** Once per lookup, after the ordinary route has failed — a
+name that resolves the ordinary way never consults it — and not when the
+failure was a service being down. A token that starts with a digit, or with
+`IVS` and a digit (the old way of naming an intronic change by its intron), is
+not given a `p.`: `BRCA1 9999delT` is refused at once as *not a name this tool
+can read … ClinVar lists no BRCA1 variant under that name either*, without a
+request to Ensembl or MyVariant.
+
+It is also asked before a protein-level name is settled on an allele that is
+not a single-base change MyVariant holds. Ensembl answers `p.Phe508del` with
+c.1522_1524del — TTT removed — which is a real variant (rs121909001), so it
+was shown, record and all. The variant everyone means by F508del is
+c.1521_1523del (CTT): another allele, the same protein. ClinVar lists
+"F508del" as a name of that one only. A substitution MyVariant holds
+(`BRAF V600E`, `TP53 R213X`) is what a substitution's name means, and ClinVar
+is not asked.
+
+For a protein-level name that is not a substitution — a deletion, a
+duplication, a frameshift — ClinVar is asked **while Ensembl is still
+working**, because those are the names Ensembl takes longest over (a minute
+when it does not answer at all) and the ones where what it gives is only its
+own allele for the protein change:
+
+| ClinVar says | then | measured on a day Ensembl was slow |
+| --- | --- | --- |
+| one variant goes by the name, or alone has that protein change | that variant, at once | `CFTR F508del`: 32 s → 5.5 s |
+| several do | none of them is Ensembl's to choose either: the codon, with each variant a link, and Ensembl's answer is not waited for | `EGFR p.Glu746_Ala750del` (three variants — Ensembl gives the second most common): 55–59 s → 10–15 s |
+| none does, or it cannot say | Ensembl's answer is what there is, and is waited for as before | |
+
+The second row used to show Ensembl's allele as the variant, with nothing to
+say there were others; the card now reads *3 EGFR variants in ClinVar have the
+protein change "p.Glu746_Ala750del", and the name does not say which:
+NM_005228.5:c.2236_2250del, NM_005228.5:c.2235_2249del,
+NM_005228.5:c.2232_2249delinsAAA.*
+
+**What ClinVar is asked, and what its answer is taken to show.** Three faults
+here were found in review; each had the page say *"ClinVar lists no … variant
+under that name either"* on no ground at all.
+
+- *The name as it is written.* It used to be stripped to letters and digits, so
+  `CFTR 621+1G>T` was searched as `6211GT` — a word ClinVar has never seen.
+  ClinVar matches `621+1G>T` as it stands (2 records); `+`, `-`, `>` and `_`
+  now survive, in the page and in the proxy. A protein-level indel over a
+  range goes in three-letter codes (`E746_A750del` → `Glu746_Ala750del`), which
+  is how ClinVar's records carry it, and so does a stop (`G12*`, `G12X` →
+  `Gly12Ter`: with the asterisk merely removed, `KRAS G12*` was searched as
+  "G12", which finds other things, and the page then said no variant was listed
+  under "G12*"). Single-letter codes are read in either case, and a name
+  written as a prediction — `p.(R213X)` — is the same name.
+- *Everything it found.* ClinVar returns the newest record first, so the
+  variant a long-standing name belongs to comes **last**: of the 96 records
+  for `CFTR F508del`, Variation 7105 is the 96th. The first 25 used to be
+  asked for; now 200 are (`CLINVAR_NAME_SEARCH_SIZE`), and a list that is still
+  cut short, with the name not in the part that came, is reported as *"ClinVar
+  returned 200 of N records … and none of those goes by it — not settled"*
+  rather than as "none".
+- *A word ClinVar drops.* Asked for `BRCA1 9999delT`, ClinVar reports
+  `9999delT` as a phrase it does not know (`errorlist.phrasesnotfound`) and
+  answers for BRCA1 alone: 85,659 records. Those say nothing about the name —
+  and are not variants with the change that was asked for, so the proxy now
+  returns none of them, with the dropped word as `notFound`. That is ClinVar's
+  own statement that no record goes by the name, and the only other ground on
+  which the page says so is a complete list, names included, without it.
+
+If the proxy cannot be reached the panel says "could not be consulted". A
+backend deployed before this change sends no `aliases`: nothing resolves,
+nothing is wrongly resolved, and the panel says the names were not passed on
+rather than that ClinVar has none.
+
+See `tests/other-names.test.js`.
 
 ## Test suite imports the real code
 
@@ -720,6 +1433,17 @@ They now import the real implementations:
   Vercel runtime ignores. `api/tp53.js` gained `extractDatasetUrls` — the pure
   parsing core of `discoverDatasetUrls` — as a real seam instead of a test-only
   re-implementation.
+
+**Whole lookups are replayed, not mocked by hand.** `tests/support/lookup-harness.js`
+runs the real form handler (LinkeDOM + `vm`, no browser) against a *cassette*:
+every answer MyVariant and Ensembl gave when the scenario was run live, keyed by
+request URL, plus the stretch of GRCh37 reference it read
+(`tests/fixtures/lookup-cassettes.json`). A request the recording does not hold
+gets what that service says when it has nothing (404, an empty hit list, 503),
+and a test can take a service away from a complete recording
+(`without: [/ensembl\.org/]`) or answer one of the site's own `/api` proxies
+(`backend: { pubmed: () => … }`). Each scenario was confirmed to fail on the
+commit before its fix.
 
 The one remaining intentional re-composition is `buildChangeForms` in
 `tests/clinvar-match.test.js`, which mirrors logic composed inline in the

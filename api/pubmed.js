@@ -121,6 +121,31 @@ async function pubtatorVariantSearch({ gene, variant, extra, maxResults, apiKey 
     return { total: Number(searchData?.count) || articles.length, articles, litvar };
 }
 
+// PubMed does not fail on a phrase it has never indexed: it drops the phrase and
+// answers the rest of the query. "BRCA2 D362fs" therefore came back as the most
+// relevant BRCA2 papers in general — listed under "Gene + Variant" and handed to
+// the AI review as literature on the variant. esearch names what it dropped
+// (errorlist.phrasesnotfound); when that is the whole variant, PubMed has
+// nothing on the variant, and saying so is the answer.
+//
+// Part of a variant surviving is still a search for it ("p.Glu746_Ala750del"
+// loses "p.Glu746" and matches on "Ala750del"), so only a variant with nothing
+// left of it counts as dropped — nothing that says which variant, that is. A
+// variant is told apart by its position: "c.1026+59T>G" loses "c.1026+59T", and
+// what PubMed then searches is PTEN AND "G" — 1,491 papers; "c.489+1G>T" is
+// CFTR AND "T", 8,572. A stray base is not the variant, nor is a "del".
+export function variantPhraseDropped(variant, phrasesNotFound) {
+    const whole = String(variant || '').toLowerCase();
+    if (!/[a-z0-9]/.test(whole)) return false;
+    let rest = whole;
+    for (const phrase of Array.isArray(phrasesNotFound) ? phrasesNotFound : []) {
+        const dropped = String(phrase || '').toLowerCase();
+        if (dropped) rest = rest.split(dropped).join(' ');
+    }
+    if (rest === whole) return false; // nothing of the variant was dropped
+    return /\d/.test(whole) ? !/\d/.test(rest) : !/[a-z0-9]/.test(rest);
+}
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
@@ -172,6 +197,11 @@ export default async function handler(req, res) {
         const searchData = await ncbiFetch(searchUrl);
         const ids = searchData?.esearchresult?.idlist || [];
         const total = parseInt(searchData?.esearchresult?.count || '0', 10);
+
+        const notFound = searchData?.esearchresult?.errorlist?.phrasesnotfound;
+        if (variantPhraseDropped(variant, notFound)) {
+            return res.status(200).json({ total: 0, articles: [], backend: 'term', notFound });
+        }
 
         if (ids.length === 0) {
             return res.status(200).json({ total, articles: [], backend: 'term' });

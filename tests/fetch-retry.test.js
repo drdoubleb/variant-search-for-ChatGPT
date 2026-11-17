@@ -130,6 +130,31 @@ const networkError = () => new Error('Failed to fetch');
         check('attempts:1 returns the failure', res.status, 503);
     }
 
+    // ── shouldStop calls off the attempts still to come ────────────────────
+    // (Used when another source has already given the answer: a service that is
+    // slow enough to be overtaken should not be asked again for nothing.)
+    {
+        const { fn, calls } = stubFetch([timeoutError(), timeoutError(), 200]);
+        let answerTaken = false;
+        const pending = makeFetchWithRetry(fn)('u', {}, 100, { attempts: 3, baseDelayMs: 1, shouldStop: () => answerTaken });
+        answerTaken = true;                       // while the first attempt is in flight
+        let caught = null;
+        try { await pending; } catch (e) { caught = e; }
+        check('shouldStop: no further attempt is made', calls.count, 1);
+        check('shouldStop: the failure that escapes is still tagged retryable', caught && caught.retryable, true);
+    }
+    {
+        const { fn, calls } = stubFetch([503, 503, 200]);
+        const res = await makeFetchWithRetry(fn)('u', {}, 100, { attempts: 3, baseDelayMs: 1, shouldStop: () => false });
+        check('shouldStop false: retries as before', `${res.status} after ${calls.count}`, '200 after 3');
+    }
+    {
+        // The first attempt is always made, even if the answer is already unwanted.
+        const { fn, calls } = stubFetch([200]);
+        const res = await makeFetchWithRetry(fn)('u', {}, 100, { attempts: 3, baseDelayMs: 1, shouldStop: () => true });
+        check('shouldStop: the first attempt is not skipped', `${res.status} after ${calls.count}`, '200 after 1');
+    }
+
     // ── onAttempt reports progress for the panel ───────────────────────────
     {
         const seen = [];

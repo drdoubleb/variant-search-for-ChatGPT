@@ -14,6 +14,11 @@
 // protein-change match (the free-text search is recall-oriented); titles are
 // returned so that filtering can parse the canonical HGVS p. change.
 //
+// The same search finds a variant by one of its older names — the term is just
+// "GENE <text>" — so each variant also carries ClinVar's `aliases` for it.
+// GET /api/clinvar-protein?gene=BRCA1&change=5382insC returns, among others,
+// NM_007294.4(BRCA1):c.5266dup with aliases ["5382insC", "5385insC", ...].
+//
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
 import { ncbiFetchJson } from './_ncbi.js';
@@ -69,10 +74,13 @@ export default async function handler(req, res) {
     if (!safeChange || safeChange.split(',').length > 8) {
         return res.status(400).json({ error: 'Invalid or oversized change value' });
     }
+    // "+", "-", ">" and "_" stay: an older name is matched as it is written
+    // ("621+1G>T" finds two records; "6211GT" is a word ClinVar has never seen).
+    // None of them is search syntax, and the term is URL-encoded as a whole.
     const changeForms = safeChange
         .split(',')
-        .map((s) => s.replace(/[^A-Za-z0-9*]/g, ''))
-        .filter(Boolean);
+        .map((s) => s.replace(/[^A-Za-z0-9*+\->_]/g, ''))
+        .filter((s) => /[A-Za-z0-9]/.test(s));
     if (changeForms.length === 0) {
         return res.status(400).json({ error: 'Invalid change value' });
     }
@@ -94,9 +102,19 @@ export default async function handler(req, res) {
         const searchData = await ncbiFetchJson(searchUrl);
         const ids = searchData?.esearchresult?.idlist || [];
         const totalInClinVar = Number(searchData?.esearchresult?.count || 0);
+        // A word ClinVar has never seen is dropped from the search, which then
+        // answers for what is left — the gene alone, thousands of records. It
+        // says so here; passed on, so that a caller looking for a variant by a
+        // name can tell "no record goes by it" from a list that merely does
+        // not contain it.
+        const dropped = searchData?.esearchresult?.errorlist?.phrasesnotfound;
+        const notFound = (Array.isArray(dropped) ? dropped : []).map((phrase) => String(phrase).slice(0, 128)).slice(0, 8);
 
-        if (ids.length === 0) {
-            return res.status(200).json({ variants: [], total: 0 });
+        // What it then returns are the gene's newest records — not variants
+        // with the change that was asked for, which there are none of.
+        const asked = preferredChange.toLowerCase();
+        if (ids.length === 0 || notFound.some((phrase) => phrase.toLowerCase() === asked)) {
+            return res.status(200).json({ variants: [], total: 0, notFound });
         }
 
         const BATCH = 200;
@@ -126,12 +144,19 @@ export default async function handler(req, res) {
                 oncogenicity: rec.oncogenicity_classification?.description || '',
                 conditions: collectTraitNames(rec),
                 variationName: rec.variation_set?.[0]?.variation_name || '',
+                // Other names ClinVar lists the variant under ("5382insC",
+                // "185delAG") and how many variants the record is made of (a
+                // haplotype has several). The frontend uses these to recognise
+                // a legacy name; see resolveClinvarOtherName in script.js.
+                aliases: (Array.isArray(rec.variation_set?.[0]?.aliases) ? rec.variation_set[0].aliases : [])
+                    .map((a) => String(a)).slice(0, 40),
+                variationCount: Array.isArray(rec.variation_set) ? rec.variation_set.length : 0,
                 molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
                 pos: varPos !== null ? Number(varPos) : null
             };
         });
 
-        return res.status(200).json({ variants, total: totalInClinVar });
+        return res.status(200).json({ variants, total: totalInClinVar, notFound });
     } catch (err) {
         setNoStore(res); // transient failure — never pin it in the CDN
         console.error('ClinVar protein proxy error:', err);
