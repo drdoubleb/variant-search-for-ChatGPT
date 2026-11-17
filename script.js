@@ -8189,7 +8189,9 @@ const initVariantSearchUi = () => {
             // not overwrite the transcripts or progress panel of a newer search.
             if (!isCurrentSearch()) return list;
             if (transcriptRowsSettled) {
-                LookupProgress.stepUnlessFailed('recoder', 'warn',
+                // Not a warning: this is how most lookups end now, and nothing
+                // was lost. The grey "contributed nothing" state says that.
+                LookupProgress.stepUnlessFailed('recoder', 'empty',
                     'answered after the result was ready — not needed: the variant was resolved without it');
                 return list;
             }
@@ -9189,9 +9191,10 @@ const initVariantSearchUi = () => {
                     assembly: 'GRCh37/hg19'
                 });
                 // The recoder may still be working (it takes Ensembl up to a minute
-                // over an rsID); say that nothing was lost by not waiting.
+                // over an rsID); say that nothing was lost by not waiting. (Grey,
+                // not amber: left alone, finish() would mark it as a warning.)
                 if (LookupProgress.stateOf('recoder') === 'running') {
-                    LookupProgress.step('recoder', 'warn', 'still answering — not needed: the variant was resolved without it');
+                    LookupProgress.step('recoder', 'empty', 'still answering — not needed: the variant was resolved without it');
                 }
                 LookupProgress.finish('ok', 'Variant resolved');
                 // The panel header now carries the outcome, so the legacy status

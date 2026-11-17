@@ -197,7 +197,7 @@ console.log('rsID unit checks passed');
         assert.doesNotMatch(page.variant, /p\.: N\/A|Effect: N\/A/, outcome);
         assert.match(page.panel, /CodingNM_000492\.4:c\.1521_1523delProteinp\.Phe508delEffectinframe_deletion/, outcome);
         assert.match(page.panel, outcome === 'answers'
-            ? /Resolve nomenclature · Ensemblanswered after the result was ready — not needed: the variant was resolved without it/
+            ? /◍Resolve nomenclature · Ensemblanswered after the result was ready — not needed: the variant was resolved without it/
             : /✕Resolve nomenclature · EnsemblHTTP 400/);
     }
     // Answering in good time, it is used as before (its rows, paired with VEP's).
