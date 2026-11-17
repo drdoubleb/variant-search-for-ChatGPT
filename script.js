@@ -1122,7 +1122,11 @@ function vcfAllelesFromGenomicHgvs(desc, windowStart, seq) {
             return { pos: end, ref: anchor, alt: anchor + duplicated };
         }
         case 'ins': {
-            // g.START_ENDins uses START as the base preceding the insertion point.
+            // g.START_ENDins uses START as the base preceding the insertion point
+            // — and END is the base after it. "g.25398280_25398285insCCA" or
+            // "g.25398280insCCA" names no place to insert at: Ensembl refuses
+            // both, and reading them as "after START" made an allele up.
+            if (end !== start + 1) return null;
             const anchor = baseAt(start);
             if (!anchor || !desc.altSeq) return null;
             return { pos: start, ref: anchor, alt: anchor + desc.altSeq };
@@ -1725,7 +1729,7 @@ function siblingIdCandidates(genomic, windowStart, seq) {
 }
 
 /*
- * Which spelling of an insertion or deletion Ensembl's VEP is asked by.
+ * One protein name for an insertion or deletion, however it is spelled.
  *
  * An indel in a repeat can be written anywhere along it, and VEP's protein
  * name for it depends on where. Measured over 50 indels that can be written
@@ -1745,29 +1749,77 @@ function siblingIdCandidates(genomic, windowStart, seq) {
  *     24-base duplication has no protein name at 16 of its 50 spellings; the
  *     PHOX2B and ARX polyalanine expansions are misnamed when VEP is asked by
  *     their very names;
- *   - the left-aligned spelling — what a VCF holds — was named right every
- *     time. (On the reverse strand it is where HGVS puts the change on the
- *     transcript, so VEP has nothing to shift.)
+ *   - on the reverse strand the left-aligned spelling — what a VCF holds —
+ *     was named right every time. It is where HGVS puts the change on such a
+ *     transcript (its 3' end is the genome's left), so VEP has nothing to
+ *     shift.
  *
  * VEP's own shifting options (shift_3prime, shift_genomic) change none of it.
- * So an in-frame indel is put to VEP left-aligned, whatever spelling the
- * lookup arrived at; working that out takes the reference around it, which
- * the lookup reads anyway (gatherAlleleRecords, the same window).
+ *
+ * So the protein names VEP gives on reverse-strand transcripts are taken from
+ * its answer for the left-aligned spelling: a row that answer names replaces
+ * the row in hand (reverseStrandRowsFrom). Nothing else is. Asking about the
+ * whole allele that way, as this first did, was wrong, because VEP works out
+ * the effect and the protein name from the bases it is given:
+ *
+ *   - on the forward strand the left-aligned spelling is the 5'-most. BRCA2
+ *     c.6842_6844dup sits on the first bases of exon 12 and left-aligned falls
+ *     in the intron before it: "splice_region_variant, intron_variant", no
+ *     protein name, where the spelling the lookup has (p.Gly2281dup,
+ *     inframe_insertion) is right. (Found in review.) Forward-strand rows are
+ *     what they always were: VEP's for the spelling in hand;
+ *   - on the reverse strand it can fall on the splice donor at the end of an
+ *     exon. KRAS c.109_111dup has no protein name at any spelling and is an
+ *     "inframe_insertion" at all of them but the left-aligned one, where it is
+ *     a "splice_donor_variant". A reverse-strand row the left-aligned answer
+ *     has no protein name for is VEP's for the spelling in hand too.
+ *
+ * Working the left-aligned spelling out takes the reference around the indel,
+ * which the lookup reads anyway (gatherAlleleRecords, the same window).
  */
 
 // Can VEP's protein name for this allele depend on its spelling? An insertion,
-// duplication or deletion of a whole number of codons, bases given.
+// duplication or deletion of a whole number of codons, bases given — or a
+// replacement that changes the length by one: "g.140453142delinsGTAG" is the
+// insertion of TAG after the G it keeps (see leftAlignedSpelling).
 function inFrameIndel(genomic) {
     const desc = parseGenomicHgvs(genomic);
-    if (!desc || !['ins', 'dup', 'del'].includes(desc.type)) return false;
+    if (!desc || !['ins', 'dup', 'del', 'delins'].includes(desc.type)) return false;
     const change = netLengthChange(desc);
     return Boolean(change) && change % 3 === 0;
 }
 
 // The allele `genomic` written left-aligned: '' when that is how it is written
-// already, null when the window cannot say (not an indel it holds, or one that
-// slides off its edge).
+// already — or when it has one spelling only, a replacement in earnest — and
+// null when the window cannot say (not an indel it holds, or one that slides
+// off its edge).
 function leftAlignedSpelling(genomic, windowStart, seq) {
+    const desc = parseGenomicHgvs(genomic);
+    if (desc && desc.type === 'delins') {
+        // An insertion or a deletion written as a replacement is put in its
+        // own notation first: what is left once the bases both sides share
+        // are taken off either end.
+        if (applyGenomicHgvsToReference(desc, windowStart, seq) === null) return null;
+        const anchored = vcfAllelesFromGenomicHgvs(desc, windowStart, seq);
+        if (!anchored) return null;
+        let { pos, ref, alt } = anchored;
+        while (ref.length && alt.length && ref[ref.length - 1] === alt[alt.length - 1]) {
+            ref = ref.slice(0, -1);
+            alt = alt.slice(0, -1);
+        }
+        while (ref.length && alt.length && ref[0] === alt[0]) {
+            ref = ref.slice(1);
+            alt = alt.slice(1);
+            pos += 1;
+        }
+        if (ref.length && alt.length) return '';
+        if (!ref.length && !alt.length) return null;
+        let plain;
+        if (!ref.length) plain = `${desc.chrom}:g.${pos - 1}_${pos}ins${alt}`;
+        else plain = ref.length === 1 ? `${desc.chrom}:g.${pos}del` : `${desc.chrom}:g.${pos}_${pos + ref.length - 1}del`;
+        const left = leftAlignedSpelling(plain, windowStart, seq);
+        return left === null ? null : (left || plain);
+    }
     const placed = indelPlacements(genomic, windowStart, seq);
     if (!placed || !placed.complete) return null;
     const { chrom, left } = placed;
@@ -1780,18 +1832,27 @@ function leftAlignedSpelling(genomic, windowStart, seq) {
     return normalizedGenomicId(spelled) === normalizedGenomicId(genomic) ? '' : spelled;
 }
 
+// What is said of an allele whose left-aligned spelling could not be worked
+// out: asked as it is spelled, and — where its protein names depend on that —
+// not checked. (A replacement is only ever looked into: it is left as it was.)
+function uncheckedVepSpelling(genomic) {
+    const desc = parseGenomicHgvs(genomic);
+    return { askedBy: genomic, checked: Boolean(desc) && desc.type === 'delins' };
+}
+
 /*
- * What VEP is asked by for the allele `genomic`: { askedBy, checked }.
+ * The spelling VEP is asked by for the reverse-strand transcripts of the
+ * allele `genomic`: { askedBy, checked }.
  * `checked` is false when the allele is one whose protein name depends on its
  * spelling and the left-aligned spelling could not be worked out (reference
- * unavailable, event too wide): VEP is then asked by the spelling in hand, and
- * its protein names on reverse-strand transcripts are not to be shown as fact
- * (withoutUncheckedProteinNames). Never rejects.
+ * unavailable, event too wide): the protein names VEP gives on reverse-strand
+ * transcripts for the spelling in hand are then not shown as fact
+ * (reverseStrandRowsFrom). Never rejects.
  */
 async function vepSpellingFor(genomic, fetchReference = fetchIdentityReference) {
     if (!inFrameIndel(genomic)) return { askedBy: genomic, checked: true };
     const desc = parseGenomicHgvs(genomic);
-    if (desc.end - desc.start > MAX_SIBLING_EVENT) return { askedBy: genomic, checked: false };
+    if (desc.end - desc.start > MAX_SIBLING_EVENT) return uncheckedVepSpelling(genomic);
     // (The window gatherAlleleRecords reads, so that one request serves both.)
     const windowStart = Math.max(1, desc.start - SIBLING_REFERENCE_PAD);
     let seq = null;
@@ -1801,16 +1862,52 @@ async function vepSpellingFor(genomic, fetchReference = fetchIdentityReference) 
         console.warn('Reference sequence unavailable for the left-aligned spelling', err);
     }
     const left = seq ? leftAlignedSpelling(genomic, windowStart, seq) : null;
-    return left === null ? { askedBy: genomic, checked: false } : { askedBy: left || genomic, checked: true };
+    return left === null ? uncheckedVepSpelling(genomic) : { askedBy: left || genomic, checked: true };
 }
 
 // VEP's rows with the protein names that cannot be relied on taken out: those
-// on reverse-strand transcripts (see vepSpellingFor). The coding name stays —
-// it does not depend on the spelling.
+// on reverse-strand transcripts (see above). The coding name stays — it does
+// not depend on the spelling.
 function withoutUncheckedProteinNames(rows) {
     return (rows || []).map(row => (row.source === 'vep' && row.strand === -1 && row.protein
         ? { ...row, protein: '', proteinAccession: '', proteinWithheld: true }
         : row));
+}
+
+/*
+ * `rows` with the protein names of VEP's reverse-strand ones settled against
+ * `leftAlignedRows`, its answer for the left-aligned spelling (null: none):
+ *
+ *   - a row whose transcript has a protein name in that answer is replaced by
+ *     the row there — the name, and the effect worked out with it;
+ *   - any other row loses the protein name it has, if it has one, and keeps
+ *     the rest: the name could not be confirmed.
+ *
+ * A row is replaced only for a protein NAME, because the left-aligned spelling
+ * is not the better one to ask about the effect by. At the end of an exon it
+ * can fall on the splice donor: KRAS c.109_111dup, one more Glu37 before an
+ * untouched "gt", is "c.110_111+1dup" with no protein name at any spelling,
+ * "inframe_insertion, splice_region_variant" as the lookup spells it and
+ * "splice_donor_variant" left-aligned. Such a row stays as it was. (Six of 31
+ * exon-edge indels asked about were like it; in the other 25 the left-aligned
+ * answer had the name, and it was the right one.)
+ *
+ * Forward-strand rows and rows from other sources are returned as they are.
+ * Returns { rows, replaced, withheld }: whether a row was taken from the
+ * left-aligned answer, and whether a name was taken away.
+ */
+function reverseStrandRowsFrom(rows, leftAlignedRows) {
+    const bare = accession => String(accession || '').toUpperCase();
+    let replaced = false;
+    const out = (rows || []).map((row) => {
+        if (row.source !== 'vep' || row.strand !== -1) return row;
+        const named = (leftAlignedRows || []).find(other => other.source === 'vep' && other.strand === -1 && other.protein
+            && bare(other.transcript) === bare(row.transcript));
+        if (!named) return withoutUncheckedProteinNames([row])[0];
+        replaced = true;
+        return named;
+    });
+    return { rows: out, replaced, withheld: out.some(row => row.proteinWithheld) };
 }
 
 // Positional bookkeeping every record carries; it describes the id, not the
@@ -6361,7 +6458,8 @@ function renderGnomadMitochondrial(container, variantId, result) {
             table.style.borderCollapse = 'collapse';
             // (A size down from the other tables of this card, and closer set:
             // "25 (0.0968%)" twice over ran 24 px past the card's edge, where
-            // it is cut off. Measured in Chromium: 328 px in a 336 px card.)
+            // it is cut off. Measured in Chromium: it now needs 324 to 328 px of
+            // a 336 px card, and is stretched to the card's width.)
             table.style.fontSize = '0.82rem';
             const cell = (tag, text, tr) => {
                 const el = document.createElement(tag);
@@ -9558,29 +9656,47 @@ const initVariantSearchUi = () => {
             let allelesOnRecord = null;
             const vepByVariant = new Map();
             const vepStartedAt = new Map();
-            const fetchLookupVep = variant => {
+            const fetchLookupVep = (variant, { leftAlignedToo = true } = {}) => {
                 if (!vepByVariant.has(variant)) {
                     vepStartedAt.set(variant, Date.now());
                     vepByVariant.set(variant, fetchVepHgvsHg19(variant));
+                    // An in-frame indel is put to VEP a second time, left-aligned,
+                    // for the protein names on reverse-strand transcripts (see
+                    // reverseStrandRowsFrom). Which strand its transcripts are on
+                    // only VEP's answer says, so the second question goes out
+                    // alongside the first, wherever that is asked, rather than
+                    // after it: the result does not wait a round trip longer.
+                    if (leftAlignedToo && inFrameIndel(variant)) {
+                        lookupVepSpelling(variant).then((spelling) => {
+                            if (spelling.checked && spelling.askedBy !== variant && isCurrentSearch()) {
+                                fetchLookupVep(spelling.askedBy, { leftAlignedToo: false }).catch(() => {});
+                            }
+                        });
+                    }
                 }
                 return vepByVariant.get(variant);
             };
-            // VEP on an ALLELE is asked by the spelling it names reliably
-            // (vepSpellingFor) — for an in-frame indel that takes the reference
-            // around it, read once per lookup and shared with the step that
-            // gathers the allele's other records.
+            // The reference around an indel is read once per lookup: for the
+            // allele's other MyVariant records, for a row's alleles, and for
+            // the spelling VEP is asked by on reverse-strand transcripts
+            // (vepSpellingFor).
             const referenceByWindow = new Map();
             const lookupReference = (chrom, start, end) => {
                 const key = `${chrom}:${start}-${end}`;
                 if (!referenceByWindow.has(key)) referenceByWindow.set(key, fetchIdentityReference(chrom, start, end));
                 return referenceByWindow.get(key);
             };
+            // (With a deadline of its own: the reference request is timed, but
+            // an answer that stalls once it has begun is not, and the result
+            // would wait on it for ever. Found in review.)
             const vepSpellingByAllele = new Map();
             const lookupVepSpelling = (allele) => {
-                if (!vepSpellingByAllele.has(allele)) vepSpellingByAllele.set(allele, vepSpellingFor(allele, lookupReference));
+                if (!vepSpellingByAllele.has(allele)) {
+                    vepSpellingByAllele.set(allele, settledWithin(vepSpellingFor(allele, lookupReference),
+                        API_TIMEOUT_MS.identityReference + 1000, 'reference not read in time').catch(() => uncheckedVepSpelling(allele)));
+                }
                 return vepSpellingByAllele.get(allele);
             };
-            const fetchLookupVepForAllele = async allele => fetchLookupVep((await lookupVepSpelling(allele)).askedBy);
             // Allele-level identity check against the reference (see
             // compareGenomicAlleles). Memoised the same way as VEP so it can be
             // started the moment the recoder re-spells a genomic input and simply
@@ -10337,7 +10453,7 @@ const initVariantSearchUi = () => {
                         // rather than leaving the field blank. It also reports the genomic
                         // location, which recovers g. when the recoder gave us no candidate.
                         try {
-                            const vepRes = await (isGenomicVariant(gVariant) ? fetchLookupVepForAllele(gVariant) : fetchLookupVep(query));
+                            const vepRes = await fetchLookupVep(isGenomicVariant(gVariant) ? gVariant : query);
                             if (vepRes && vepRes.mostSevere) {
                                 annotation.cadd = Object.assign({}, annotation.cadd, { consequence: vepRes.mostSevere });
                             }
@@ -10415,7 +10531,7 @@ const initVariantSearchUi = () => {
                                 try {
                                     // Use the currently normalised gVariant if available; otherwise fall back to the original query.
                                     const hgvsForVep = gVariant || query;
-                                    const vepRes = await (isGenomicVariant(hgvsForVep) ? fetchLookupVepForAllele(hgvsForVep) : fetchLookupVep(hgvsForVep));
+                                    const vepRes = await fetchLookupVep(hgvsForVep);
                                     if (!isCurrentSearch()) return;
                                     const vepConsequences = vepRes.consequences || [];
                                     LookupProgress.step('vep', vepConsequences.length ? 'ok' : 'empty',
@@ -10708,7 +10824,7 @@ const initVariantSearchUi = () => {
             }
             const vepWanted = Boolean(annotation) && !codonOnlyResolutionGlobal && isGenomicVariant(gVariant);
             const vepAnswered = vepWanted
-                ? fetchLookupVepForAllele(gVariant).then(() => true, () => new Promise(() => {}))
+                ? fetchLookupVep(gVariant).then(() => true, () => new Promise(() => {}))
                 : new Promise(() => {});
             // MyVariant files one indel under several ids, each holding part of
             // what it knows about it (see gatherAlleleRecords). Collect the rest
@@ -10801,30 +10917,15 @@ const initVariantSearchUi = () => {
             const unprompted = !transcriptsFromRecoder.length && !clinvarRekeyed;
             if (!codonOnlyResolutionGlobal && isGenomicVariant(gVariant)) {
                 if (unprompted) LookupProgress.step('vep', 'running');
-                // (Settled long since: the reference it takes was read for the
-                // step above, and the request below was started with it.)
-                const spelling = await lookupVepSpelling(gVariant);
-                if (!isCurrentSearch()) return;
-                // What the panel is to say about how VEP was asked, once its own
-                // line there is settled. (The pairing has no line of its own
-                // unless there is something to say.)
-                const vepRemarks = [];
-                // Whether the rows shown are VEP's for the spelling it names
-                // reliably. (Always, where the spelling does not matter.)
-                let namedForCheckedSpelling = false;
                 try {
-                    const vepRequest = fetchLookupVep(spelling.askedBy);
-                    const waited = Date.now() - (vepStartedAt.get(spelling.askedBy) || Date.now());
+                    const vepRequest = fetchLookupVep(gVariant);
+                    const waited = Date.now() - (vepStartedAt.get(gVariant) || Date.now());
                     const vep = unprompted
                         ? await settledWithin(vepRequest, Math.max(1000, API_TIMEOUT_MS.vepUnprompted - waited),
                             'Ensembl VEP did not answer in time')
                         : await vepRequest;
                     if (!isCurrentSearch()) return;
                     assertResolvedVariantIdentity(gVariant, vep.gVariant || gVariant, null);
-                    if (spelling.askedBy !== gVariant) {
-                        vepRemarks.push({ text: `asked as ${spelling.askedBy} — the same allele, left-aligned: Ensembl's protein name `
-                            + 'for an in-frame insertion or deletion depends on where it is written' });
-                    }
                     const paired = transcriptsFromVep(vep.consequences);
                     const intentGene = parseMyVariantQueryIntent(query).gene;
                     // A query that names a transcript has named its gene: VEP's row
@@ -10860,10 +10961,7 @@ const initVariantSearchUi = () => {
                     // RefSeq simply has no transcript, Ensembl's rows are the answer.)
                     const displacesRefSeq = unprompted && vep.refseqFailed && relevant.length > 0
                         && pairedAnnotationRows.some(a => /^N[MR]_/i.test(a.transcript));
-                    if (relevant.length && !displacesRefSeq) {
-                        transcriptsFromRecoder = relevant;
-                        namedForCheckedSpelling = spelling.checked;
-                    }
+                    if (relevant.length && !displacesRefSeq) transcriptsFromRecoder = relevant;
                     if (unprompted) {
                         if (displacesRefSeq) {
                             // ...and they are: rows the recoder brought while VEP was
@@ -10877,6 +10975,9 @@ const initVariantSearchUi = () => {
                         }
                     }
                 } catch (err) {
+                    // A lookup that has been overtaken has nothing to say here: the
+                    // rows and the panel are the next lookup's by now.
+                    if (!isCurrentSearch()) return;
                     // Keep nucleotide-only recoder rows when pairing is unavailable.
                     // An absent protein annotation is preferable to one from another transcript.
                     console.warn('Transcript-specific VEP annotation unavailable:', err);
@@ -10889,20 +10990,56 @@ const initVariantSearchUi = () => {
                         if (pairedAnnotationRows.length) transcriptsFromRecoder = [];
                     }
                 }
-                // Protein names VEP gave for another spelling of an in-frame indel
-                // are not shown: rows it gave for the NAME (the last-resort
-                // route, where they stay if it does not answer for the allele —
-                // they carry the coding change), or for this spelling unchecked.
-                if (!namedForCheckedSpelling && inFrameIndel(gVariant)) {
-                    transcriptsFromRecoder = withoutUncheckedProteinNames(transcriptsFromRecoder);
-                    if (transcriptsFromRecoder.some(row => row.proteinWithheld)) {
-                        vepRemarks.push({ state: 'warn', text: 'protein change not shown: Ensembl names an in-frame insertion or deletion '
-                            + 'on the reverse strand reliably only when it is written left-aligned, and it could not be asked that way' });
+                /*
+                 * The protein names VEP gave on reverse-strand transcripts of an
+                 * in-frame indel are its names for the left-aligned spelling, or
+                 * are not shown (see reverseStrandRowsFrom) — whichever of its
+                 * answers the rows came from: for this spelling, or for the NAME
+                 * (the last-resort route, whose rows stay when it does not answer
+                 * for the allele). Forward-strand rows are left as they are.
+                 *
+                 * (After the check above, not before it: an overtaken lookup
+                 * whose VEP request failed went on to strip the protein names of
+                 * the lookup that had replaced it — "BRAF V600E" came out
+                 * "p.: N/A". Found in review.)
+                 */
+                if (inFrameIndel(gVariant) && transcriptsFromRecoder.some(row => row.source === 'vep' && row.strand === -1)) {
+                    const spelling = await lookupVepSpelling(gVariant);
+                    if (!isCurrentSearch()) return;
+                    let leftAlignedRows = null;
+                    if (spelling.checked) {
+                        try {
+                            // (With a deadline whoever asked: this answer only
+                            // confirms names, and the result does not wait on it
+                            // for as long as a request can stall.)
+                            const request = fetchLookupVep(spelling.askedBy, { leftAlignedToo: false });
+                            const waited = Date.now() - (vepStartedAt.get(spelling.askedBy) || Date.now());
+                            const patience = unprompted ? API_TIMEOUT_MS.vepUnprompted : API_TIMEOUT_MS.vep;
+                            const answer = await settledWithin(request, Math.max(1000, patience - waited),
+                                'Ensembl VEP did not answer in time');
+                            leftAlignedRows = transcriptsFromVep(answer.consequences);
+                        } catch (errLeftAligned) {
+                            console.warn('VEP did not answer for the left-aligned spelling:', errLeftAligned);
+                        }
+                        if (!isCurrentSearch()) return;
                     }
-                }
-                for (const remark of vepRemarks) {
-                    if (LookupProgress.stateOf('vep') === null) LookupProgress.step('vep', remark.state || 'ok', remark.text);
-                    else LookupProgress.note('vep', remark.text, remark.state);
+                    const settled = reverseStrandRowsFrom(transcriptsFromRecoder, leftAlignedRows);
+                    transcriptsFromRecoder = settled.rows;
+                    // What the panel says of it. (The pairing has no line of its
+                    // own there unless there is something to say.)
+                    const remarks = [];
+                    if (settled.replaced && spelling.askedBy !== gVariant) {
+                        remarks.push({ text: `reverse-strand transcripts asked as ${spelling.askedBy} — the same allele, left-aligned: `
+                            + 'Ensembl\'s protein name for an in-frame insertion or deletion there depends on where it is written' });
+                    }
+                    if (settled.withheld) {
+                        remarks.push({ state: 'warn', text: 'protein change not shown: Ensembl names an in-frame insertion or deletion '
+                            + 'on the reverse strand reliably only when it is written left-aligned, and no name could be had for it written that way' });
+                    }
+                    for (const remark of remarks) {
+                        if (LookupProgress.stateOf('vep') === null) LookupProgress.step('vep', remark.state || 'ok', remark.text);
+                        else LookupProgress.note('vep', remark.text, remark.state);
+                    }
                 }
             }
             if (!isCurrentSearch()) return;
@@ -13887,6 +14024,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, codonFromResidueRecords,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
+        reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,

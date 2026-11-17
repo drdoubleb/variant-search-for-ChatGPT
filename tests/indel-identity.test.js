@@ -458,7 +458,7 @@ async function lookup(input, fx, {
             return path.endsWith(`/${asked}`) ? response(recoder) : response({ error: 'unexpected recoder query' }, 400);
         }
         if (path.includes('/vep/human/hgvs/')) {
-            // (An in-frame indel is asked about left-aligned: see scenario 1.)
+            // (An in-frame indel is asked about as spelled and left-aligned: see scenario 1.)
             const answer = [fx.vep, fx.vepLeftAligned].find(vep => vep && path.endsWith(`/${vep[0].input}`));
             return answer ? response(answer) : response({ error: 'unexpected VEP query' }, 400);
         }
@@ -531,11 +531,13 @@ const resolved = (page, label) => {
     assert.match(page.variant, /c\.: c\.34_63dup/);
     assert.match(page.variant, /p\.: p\.Arg12_Ser21dup/);
     assert.match(page.variant, /inframe_insertion/);
-    // An in-frame indel is put to VEP left-aligned (see vepSpellingFor): for
-    // this one that is the row as pasted, and VEP is asked once.
+    // VEP is asked about the allele as Ensembl spells it and, EIF1AX being on
+    // the reverse strand, left-aligned for the rows of its transcripts (see
+    // reverseStrandRowsFrom): for this one that is the row as pasted.
     assert.deepEqual(page.requests.filter(r => r.includes('/vep/human/hgvs/')).map(r => r.match(/hgvs\/([^?]+)/)[1]),
-        ['X:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT']);
-    assert.match(page.panel, /asked as chrX:g\.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT — the same allele, left-aligned/);
+        ['X:g.20156694_20156723dup', 'X:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT']);
+    assert.match(page.panel, /reverse-strand transcripts asked as chrX:g\.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT — the same allele, left-aligned/);
+    assert.doesNotMatch(page.panel, /protein change not shown/);
     assert.match(page.panel, /Confirm allele · GRCh37 reference/);
     assert.match(page.panel, /chrX:g\.20156694_20156723dup is the same allele as the input/);
     assert(!page.requests.some(r => r.includes('20156694_20156695ins')), 'the one-base-off candidate is never formed');
@@ -571,7 +573,7 @@ const resolved = (page, label) => {
     // right one. The coding name does not depend on the spelling.)
     assert.match(page.variant, /c\.: c\.34_63dupp\.: N\/A/);
     assert.doesNotMatch(page.variant + page.panel, /Arg12_Ser21dup/);
-    assert.match(page.panel, /protein change not shown: Ensembl names an in-frame insertion or deletion on the reverse strand reliably only when it is written left-aligned, and it could not be asked that way/);
+    assert.match(page.panel, /protein change not shown: Ensembl names an in-frame insertion or deletion on the reverse strand reliably only when it is written left-aligned, and no name could be had for it written that way/);
     assert.deepEqual(page.requests.filter(r => r.includes('/vep/human/hgvs/')).map(r => r.match(/hgvs\/([^?]+)/)[1]),
         ['X:g.20156694_20156723dup'], 'asked by the spelling in hand');
     assert.doesNotMatch(page.variant, /Gene: CHR/i);

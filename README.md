@@ -299,44 +299,68 @@ and CEBPA `c.937_939dup`, HRAS `c.34_36dup`, KRAS `c.37_39dup`, TP53
 `c.9_32del`. The page asked VEP by whatever spelling the lookup had arrived at —
 normally the recoder's, so **`NRAS c.34_36dup` was shown as
 p.Val14delinsGlyPhe with every service answering**, and `KRAS c.34_36dup` as
-p.Val14dup whenever the recoder had not answered. (`shift_3prime` and
-`shift_genomic`, VEP's own options, change none of these.)
+p.Val14dup when neither Ensembl's recoder nor NCBI had placed the name.
+(`shift_3prime` and `shift_genomic`, VEP's own options, change none of these.)
 
-**The left-aligned spelling was named right in all 50.** On the reverse strand
-that is where HGVS itself puts the change on the transcript, so VEP has nothing
-to shift; it is also what a VCF holds, so the page now agrees with a pipeline
-that runs VEP on normalised VCFs. So:
+**On the reverse strand the left-aligned spelling was named right in all 27** —
+and in 25 exon-edge indels asked about afterwards, where another spelling was
+misnamed in six (TP53 `c.783_785dup`, p.Gly262dup, is `p.Gly262_Asn263insTrp`
+when asked by that very name). There it is where HGVS itself puts the change on
+the transcript, so VEP has nothing to shift. It is not the spelling to ask about
+everything by, though, because VEP works out the effect — and whether there is a
+protein name at all — from the bases it is given:
 
-- An in-frame insertion, duplication or deletion is put to VEP **left-aligned**,
-  whichever spelling the lookup arrived at (`vepSpellingFor`,
-  `leftAlignedSpelling`). The spelling comes from the reference window the
-  lookup reads anyway for the allele's other MyVariant records — one request
-  serves both — and VEP is asked once. The `g.` shown is unchanged; the panel
-  says `asked as chr1:g.115258741_115258742insCAC — the same allele,
-  left-aligned`.
-- A frameshift, a substitution and anything else is asked about as before, at
-  once: their names did not depend on the spelling in any measurement.
-- **Without the reference** the left-aligned spelling cannot be worked out. VEP
-  is then asked by the spelling in hand, and the protein names it gives on
-  reverse-strand transcripts are **not shown** — the card reads `p.: N/A`, the
-  coding name and effect stay, and the panel flags the line: `▲ … protein change
-  not shown: Ensembl names an in-frame insertion or deletion on the reverse
-  strand reliably only when it is written left-aligned, and it could not be
-  asked that way`. Forward-strand names are shown as they are. The same goes for
-  rows VEP gave for a *name* (the last-resort route) when it then does not
-  answer for the allele.
+| Allele | as the lookup spells it | left-aligned |
+| --- | --- | --- |
+| BRCA2 `c.6842_6844dup` — forward strand, first bases of exon 12 | p.Gly2281dup · inframe_insertion, splice_region_variant | no protein name · splice_region_variant, splice_polypyrimidine_tract_variant, intron_variant |
+| KRAS `c.109_111dup` — reverse strand, last bases of exon 2, one more Glu37 in front of an untouched `gt` (`c.110_111+1dup` to VEP, which has no protein name for it at any spelling) | inframe_insertion, splice_region_variant | splice_donor_variant |
+
+So:
+
+- VEP is asked about the allele **as the lookup spells it**, as it always was,
+  and — an in-frame insertion, duplication or deletion only — **a second time,
+  left-aligned**, alongside the first (`vepSpellingFor`, `leftAlignedSpelling`).
+  The spelling comes from the reference window the lookup reads anyway for the
+  allele's other MyVariant records: one request serves both.
+- **A reverse-strand transcript's row is replaced by the left-aligned answer's
+  row when that names the protein change** (`reverseStrandRowsFrom`). The `g.`
+  shown is unchanged; the panel says `reverse-strand transcripts asked as
+  chr1:g.115258741_115258742insCAC — the same allele, left-aligned`.
+- Forward-strand rows, and reverse-strand rows the left-aligned answer has no
+  protein name for, are VEP's for the spelling in hand — the two rows of the
+  table above.
+- **A reverse-strand protein name that could not be confirmed that way is not
+  shown**: the reference could not be read, or VEP did not answer for the
+  left-aligned spelling in time. The card reads `p.: N/A`, the coding name and
+  effect stay, and the panel flags the line: `▲ … protein change not shown:
+  Ensembl names an in-frame insertion or deletion on the reverse strand reliably
+  only when it is written left-aligned, and no name could be had for it written
+  that way`. The same goes for rows VEP gave for a *name* (the last-resort
+  route) when it then does not answer for the allele.
+- An insertion or deletion written as a replacement — `g.140453142delinsGTAG`
+  keeps the G it "deletes" and inserts TAG after it — is put in its own notation
+  first. An insertion that names no place between two neighbouring bases
+  (`g.25398280_25398285insCCA`, `g.25398280insCCA`) is not made into one:
+  Ensembl refuses it, and so does the lookup.
+- A frameshift, a substitution and anything else is asked about once, as
+  before: their names did not depend on the spelling in any measurement.
 
 | Input | was | now |
 | --- | --- | --- |
 | `NRAS c.34_36dup` | p.Val14delinsGlyPhe | p.Gly13dup |
 | `KRAS c.34_36dup`, Ensembl's recoder and NCBI silent | p.Val14dup | p.Gly13dup |
-| `chr7:g.140453142_140453143insTAG` (BRAF), recoder silent | p.Thr599_Val600insTer | p.Thr599dup |
+| `chr7:g.140453142_140453143insTAG`, `chr7:g.140453142delinsGTAG` (BRAF), recoder silent | p.Thr599_Val600insTer | p.Thr599dup |
 | `chr12:g.25398285_25398286insACC`, `12 25398285 C CACC` (KRAS) | p.Val14dup | p.Gly13dup |
 
-What this does not cover: a name VEP gets wrong at *every* spelling. HTT
-`c.52_54dup`, one more CAG in the repeat, is "p.Pro39del" however it is written,
-because RefSeq's HTT transcript carries a different number of repeats than
-GRCh37 does.
+What this does not cover:
+
+- A name VEP gets wrong at *every* spelling. HTT `c.52_54dup`, one more CAG in
+  the repeat, is "p.Pro39del" however it is written, because RefSeq's HTT
+  transcript carries a different number of repeats than GRCh37 does.
+- A forward-strand indel at the start of an exon, typed left-aligned (a VCF row)
+  while Ensembl's recoder does not answer: it is then asked about by those bases
+  only, as it always was, and `13 32918692 T TAGG` — the BRCA2 duplication of
+  the table — comes without a protein name.
 
 See `tests/indel-protein-name.test.js`.
 
@@ -674,8 +698,9 @@ alone rather than lost.
 
 Four columns are a tight fit: at the size of the card's other tables they ran
 24 px past the card's edge, which cuts off what crosses it (the AN column,
-measured in Chromium). They are set a size down — 336 px in a 336 px card — and
-sit in a box that scrolls sideways where the card is narrower still.
+measured in Chromium). They are set a size down — they then need 324 to 328 px
+of a 336 px card — and sit in a box that scrolls sideways where the card is
+narrower still.
 
 **Tables wider than their card scroll; they are no longer cut off.** The same
 measurement showed the population tables of the nuclear data sets doing what
