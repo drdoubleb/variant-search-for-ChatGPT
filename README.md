@@ -567,7 +567,8 @@ chrX:g.20148675dup      NM_001412.4:c.388dup      EIF1AX:p.Gln130ProfsTer3
 So are an rsID (`rs113488022` — see [rsID lookups](#rsid-lookups) for a site
 with several alleles), mitochondrial `m.` notation (`m.8993T>G`,
 `NC_012920.1:m.8993T>G`), a stop written the short way (`TP53 R213*`,
-`R213X`), and the older names ClinVar lists a variant under (`BRCA1 5382insC`,
+`R213X`), any amino acid at a residue (`KRAS G12X`, `KRAS p.Gly12Xaa` — the
+codon), and the older names ClinVar lists a variant under (`BRCA1 5382insC`,
 `BRCA1 185delAG` — see [Names that are not HGVS](#names-that-are-not-hgvs)).
 
 Pasted coordinate rows are also accepted, in the shapes people actually paste
@@ -903,7 +904,8 @@ alone, as is any search that names no variant.
 
 **A stop typed by hand.** `TP53 R213*`, `R213X` and `p.Arg213*` are all read as
 `TP53:p.Arg213Ter`; the first two used to be passed on as typed and came back
-"could not resolve".
+"could not resolve". ("X" is not always a stop — see
+[Resolving c. and p. queries](#resolving-c-and-p-queries-to-a-genomic-position).)
 
 See `tests/protein-search-term.test.js`.
 
@@ -1095,7 +1097,43 @@ are impossible:
   change"*), in single- or three-letter form, against a gene or a protein
   accession.
 
-Simple substitutions (`p.Val600Glu`) do resolve, so those are unaffected.
+Simple substitutions (`p.Val600Glu`) do resolve, so those are unaffected — where
+the name comes to one allele. It need not. Ensembl answers a protein change with
+every nucleotide change it knows to produce it, the page took the first, and two
+things followed (`proteinNameReading`; measured live, found in review):
+
+| typed | was shown | now |
+| --- | --- | --- |
+| `KRAS G12X` | `chr12:g.25398283_25398285delinsTTA` · c.34_36delinsTAA · p.Gly12Ter · stop_gained — an allele nobody has reported | the codon, as `p.Gly12Xaa`: *"X" was read as any amino acid, not as a stop: no single-base change turns Gly12 into a stop codon, and no such variant is on record* |
+| `BRAF V600X`, `EGFR T790X` | a two-base replacement, stop_gained | the codon, the same way |
+| `KRAS Q61X`, `TP53 R213X` | the stop (c.181C>T; c.637C>T, ClinVar 43590) | the same, and *"X" was read as a stop codon (p.Gln61Ter). If it stands for any amino acid, look up KRAS p.Gln61Xaa* |
+| `KRAS G12*` | `…delinsTCA` in one run, `…delinsTTA` in the next | the codon: *p.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown*, with a link to each |
+| `KRAS G12K` | one of two replacements, likewise by the order of Ensembl's answer | the codon, with both linked |
+
+**"X".** It is the old one-letter code for a stop — `TP53 R213X` is what ClinVar
+and the literature call p.Arg213Ter — and in HGVS (`Xaa`) and in oncology
+shorthand it is *any* amino acid: "KRAS G12X" is G12C, G12D, G12V and the rest.
+It is read as a stop where that is a variant someone could mean: MyVariant
+holds a record for it, or one base makes the stop (CGA → TGA, CAA → TAA).
+Otherwise X is "any amino acid" and the codon is what the name gives — which
+also brings up ClinVar's records at that codon, the thing "G12X" is asking
+about. Either way the card says which reading was taken, since it is a choice
+made on the user's behalf. Literature is searched as `G12X`, the way it is
+written about.
+
+**Several alleles.** `p.Gly12Ter` is GGT → TAA, TAG or TGA, and Ensembl gives
+all three (for most missense names it gives one: `BRAF V600E`, `KRAS G12D`,
+`EGFR L858R`). With a record for one of them, that one is the variant, as
+before. With none, nothing distinguishes them and Ensembl
+lists them in a different order from one call to the next, so the page showed
+different variants for the same input. None is shown now; each is one click
+away. A single allele without a record (`BRAF V600*`) is still shown, and so is
+the first allele when MyVariant could not be asked — a 404 says "no record", an
+outage says nothing, and *"none on record"* is not claimed after one.
+
+This applies to a name on a gene symbol; on a protein accession
+(`NP_004976.2:p.Gly12Ter`) there is no gene to find the codon through and the
+first allele stands. See `tests/protein-name-reading.test.js`.
 
 What *is* determined by protein notation is the codon. Rather than failing the
 whole lookup, `resolveProteinCodonRegion` maps the residue range to GRCh37

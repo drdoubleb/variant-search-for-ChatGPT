@@ -3596,6 +3596,12 @@ function proteinSearchTerm(proteinText) {
         const ref = fs[1].length === 3 ? aaThreeToSingle(fs[1]) : (aaSingleToThree(fs[1]) && fs[1].toUpperCase());
         return ref && ref !== '*' ? `${ref}${fs[2]}fs` : '';
     }
+    // "Any amino acid" (HGVS Xaa) is searched the way it is written about: "G12X".
+    const any = body.match(/^([A-Za-z]{3}|[A-Za-z])(\d+)Xaa$/i);
+    if (any) {
+        const ref = any[1].length === 3 ? aaThreeToSingle(any[1]) : (aaSingleToThree(any[1]) && any[1].toUpperCase());
+        return ref && ref !== '*' ? `${ref}${any[2]}X` : '';
+    }
     const sub = parseProteinChange(at === -1 ? body : `p.${body}`);
     if (!sub || sub.ref === '*') return '';
     return `${sub.ref}${sub.pos}${sub.alt === '*' ? 'X' : sub.alt}`;
@@ -3618,6 +3624,70 @@ function normalizeProteinSubstitution(body) {
     const ref = three(m[1]);
     const alt = three(m[3]);
     return ref && alt ? `${ref}${m[2]}${alt}` : body;
+}
+
+/*
+ * ── What a protein-level name comes to ──────────────────────────────────────
+ *
+ * A protein change does not say which bases changed, and Ensembl answers with
+ * every way it knows. Two things followed from taking the first of them.
+ *
+ * "KRAS G12X". X is the old one-letter code for a stop — "TP53 R213X" is what
+ * ClinVar and the literature call p.Arg213Ter — and in HGVS (Xaa) and in
+ * oncology shorthand it is ANY amino acid: "KRAS G12X" is G12C, G12D, G12V….
+ * Read as a stop it went to Ensembl as p.Gly12Ter and came back as a
+ * three-base replacement of the codon, shown as the variant: stop_gained,
+ * c.34_36delinsTAA, an allele nobody has reported. A stop is what was meant
+ * where one base makes one (CGA -> TGA) or the stop is on record; otherwise X
+ * is "any amino acid" and the codon is what the name gives.
+ *
+ * "KRAS G12*" — a stop, written as one — is three alleles (GGT -> TAA, TAG,
+ * TGA), none on record, and Ensembl lists them in a different order from one
+ * call to the next: the page showed TGA in one run and TAA in the next. With
+ * several alleles and nothing known about any of them, none is "the" variant.
+ */
+
+// A change of exactly one base, in MyVariant's spelling: "chr12:g.25380277G>A".
+function isSingleBaseChange(genomic) {
+    return /:g\.\d+[ACGT]>[ACGT]$/i.test(String(genomic || '').trim());
+}
+
+// One spelling per allele. Ensembl gives a replaced run of bases twice over,
+// as HGVS ("g.25398283_25398285delinsTTA") and, from SPDI, as
+// "g.25398283ACC>TTA"; the HGVS one is kept.
+function distinctAlleleSpellings(ids) {
+    const seen = new Map();
+    for (const id of ids || []) {
+        const text = String(id || '');
+        let key = text.toLowerCase();
+        const delins = text.match(/^(.+:g\.)(\d+)_(\d+)delins([ACGT]+)$/i);
+        const run = text.match(/^(.+:g\.)(\d+)([ACGT]+)>([ACGT]+)$/i);
+        if (delins) key = `${delins[1]}${delins[2]}:${Number(delins[3]) - Number(delins[2]) + 1}:${delins[4]}`.toLowerCase();
+        else if (run) key = `${run[1]}${run[2]}:${run[3].length}:${run[4]}`.toLowerCase();
+        if (!seen.has(key) || delins) seen.set(key, text);
+    }
+    return [...seen.values()];
+}
+
+// The input wrote the new residue as "X" ("G12X", "p.Gly12X") and that was
+// read as a stop. Not "G12*" or "G12Ter", which say what they mean.
+function typedResidueX(rawInput, query) {
+    // The second token is the change: "KRAS G12X", "KRAS:p.Gly12X".
+    const change = String(rawInput || '').trim().split(/[:\s]+/)[1] || '';
+    return /\dX\)?$/i.test(change) && /:p\.[A-Za-z]{3}\d+Ter$/.test(String(query || ''));
+}
+
+// `alleles`: how many distinct alleles the recoder gave for the name;
+// `candidates`: their genomic spellings; `onRecord`: MyVariant holds one;
+// `recordsKnown`: MyVariant answered for every one of them (a 404 is an
+// answer; an outage is not, and "none on record" cannot be said after one).
+//   'allele'        go on with the allele chosen
+//   'any-residue'   "X" was not a stop: only the codon is known
+//   'undetermined'  several alleles, nothing known about any: only the codon
+function proteinNameReading({ typedX = false, alleles = 1, candidates = [], onRecord = false, recordsKnown = true } = {}) {
+    if (onRecord) return 'allele';
+    if (typedX && !candidates.some(isSingleBaseChange)) return 'any-residue';
+    return alleles > 1 && recordsKnown ? 'undetermined' : 'allele';
 }
 
 // True when two parsed protein changes describe the same amino-acid substitution.
@@ -8652,6 +8722,11 @@ const initVariantSearchUi = () => {
             let rsidAlleles = [];
             // A gene-symbol coding name whose transcript could not be settled.
             let transcriptUnsettled = false;
+            // A protein-level name and what it came to (see proteinNameReading).
+            // `typedX`: the new residue was written "X" and read as a stop.
+            // (Only for a name on a gene symbol: the codon is found through the gene.)
+            const typedX = !rerun && Boolean(typedName) && typedResidueX(rawInput, query);
+            let proteinNameOpen = null;
             // How a gene-symbol coding name was read ({ typed, accession, basis }),
             // and everything MyVariant returned for the name as typed.
             let nameReadOn = rerun && rerun.readOn ? { ...rerun.readOn } : null;
@@ -8954,13 +9029,16 @@ const initVariantSearchUi = () => {
                     // the selection walk below still runs in the recoder's priority
                     // order, so the outcome matches the old sequential scan minus the
                     // serial MyVariant round-trips.
+                    let candidateRecordsKnown = true;
                     const candidateAnns = await Promise.all(uniqueCandidates.map(async (cand) => {
                         try {
                             const fetched = await fetchRecordForAllele(cand);
                             console.log('[DEBUG] Fetched annotation for candidate', cand);
                             return fetched;
-                        } catch {
+                        } catch (candErr) {
                             console.log('[DEBUG] Annotation fetch error for candidate', cand);
+                            // "No record" is an answer; anything else is not.
+                            if (!candErr || !candErr.notFound) candidateRecordsKnown = false;
                             return null;
                         }
                     }));
@@ -8985,11 +9063,32 @@ const initVariantSearchUi = () => {
                     if (!selectedAnn && firstAnn && uniqueCandidates.length === 1) {
                         selectedAnn = firstAnn;
                     }
+                    // A protein-level name with nothing on record for any allele it
+                    // could be: is one of them the variant, or only the codon known?
+                    // (On a gene symbol only: the codon is found through the gene.)
+                    const proteinOnly = isProteinVariant && !/c\./i.test(query) && Boolean(typedName) && !rerun;
+                    const reading = !proteinOnly ? 'allele' : proteinNameReading({
+                        typedX,
+                        alleles: selectRecoderAlleles(recoderData, query).length,
+                        candidates: uniqueCandidates,
+                        onRecord: Boolean(firstAnn),
+                        recordsKnown: candidateRecordsKnown
+                    });
                     if (selectedAnn) {
                         gVariant = selectedVar;
                         annotation = selectedAnn;
                         console.log('[DEBUG] Selected candidate variant after scanning:', gVariant);
-                } else {
+                    } else if (reading !== 'allele') {
+                        // Not the first of them, as it used to be: the codon, by the
+                        // route a name Ensembl cannot resolve takes (below).
+                        proteinNameOpen = { reading, alleles: distinctAlleleSpellings(uniqueCandidates), recordsKnown: candidateRecordsKnown };
+                        LookupProgress.step('recoder', 'empty', reading === 'any-residue'
+                            ? 'a stop here takes more than one base change — "X" read as any amino acid'
+                            : `${proteinNameOpen.alleles.length} different nucleotide changes give this protein change, none on record`);
+                        recoderData = null;
+                        transcriptsFromRecoder = [];
+                        candidateVariants = [];
+                    } else {
                     // Even if no annotation was found for any candidate, use the first candidate variant as the
                     // genomic representation. This ensures that g. is populated with a proper genomic HGVS
                     // notation rather than echoing the original non-genomic query.
@@ -9347,6 +9446,17 @@ const initVariantSearchUi = () => {
                             ? `no single ${typedName.gene} variant listed under "${typedName.name}"`
                             : 'could not be consulted');
                     }
+                    // "G12X" that came to no allele: X is left as what it is in
+                    // HGVS, any amino acid, rather than shown as the stop it was
+                    // provisionally read as.
+                    if (typedX) {
+                        if (!proteinNameOpen) proteinNameOpen = { reading: 'x-unsettled', alleles: [] };
+                        proteinNameOpen.stop = (query.match(/p\.[^\s:]+/i) || [])[0] || '';
+                        query = query.replace(/Ter$/, 'Xaa');
+                        // (and the stop is not what ClinVar or PubMed is asked about)
+                        targetProtGlobal = null;
+                        LookupProgress.note('parse', 'in the end as any amino acid (Xaa), not as a stop');
+                    }
                     const proteinBody = (query.match(/p\.[^\s:]+/i) || [])[0] || '';
                     const residues = parseProteinResidueRange(proteinBody);
                     const geneForCodon = geneHintGlobal
@@ -9374,7 +9484,8 @@ const initVariantSearchUi = () => {
                         residueStart: residues.start,
                         residueEnd: residues.end,
                         transcript: codonRegion.transcript,
-                        protein: codonRegion.protein
+                        protein: codonRegion.protein,
+                        open: proteinNameOpen
                     };
                     annotation = { _id: query };
                     if (geneForCodon) annotation.dbnsfp = { genename: geneForCodon.toUpperCase() };
@@ -9820,6 +9931,35 @@ const initVariantSearchUi = () => {
                 if (codonOnlyResolutionGlobal) {
                     // Not a variant coordinate — the span of the affected codon(s).
                     content.appendChild(makeLine('Codon region (hg19)', gVariant));
+                    // Why only the codon, where the name could have been an allele.
+                    const open = codonOnlyResolutionGlobal.open;
+                    if (open) {
+                        const why = document.createElement('span');
+                        why.className = 'protein-name-note';
+                        why.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                        const residue = (open.stop || codonOnlyResolutionGlobal.proteinChange).replace(/^p\./, '').replace(/(?:Ter|Xaa)$/, '');
+                        if (open.reading === 'any-residue') {
+                            why.textContent = `"X" was read as any amino acid (${codonOnlyResolutionGlobal.proteinChange}), not as a stop: `
+                                + `no single-base change turns ${residue} into a stop codon`
+                                + (open.recordsKnown ? ', and no such variant is on record.' : '.');
+                        } else if (open.reading === 'x-unsettled') {
+                            why.textContent = `"X" can mean a stop codon or any amino acid. No variant is on record for the stop `
+                                + `(${open.stop}), so it is shown as any amino acid (${codonOnlyResolutionGlobal.proteinChange}).`;
+                        } else {
+                            why.appendChild(document.createTextNode(
+                                `${codonOnlyResolutionGlobal.proteinChange} can be any of ${open.alleles.length} nucleotide changes and none of them `
+                                + 'is on record, so no single one is shown: '));
+                            open.alleles.slice(0, 4).forEach((id, i) => {
+                                if (i) why.appendChild(document.createTextNode(', '));
+                                const link = document.createElement('a');
+                                link.setAttribute('href', `?variant=${encodeURIComponent(id)}`);
+                                link.textContent = id;
+                                why.appendChild(link);
+                            });
+                            why.appendChild(document.createTextNode(open.alleles.length > 4 ? ', …' : '.'));
+                        }
+                        content.appendChild(why);
+                    }
                     const codonNote = document.createElement('span');
                     codonNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
                     codonNote.textContent = `Resolved to residue ${codonOnlyResolutionGlobal.residueStart}`
@@ -9831,6 +9971,24 @@ const initVariantSearchUi = () => {
                     content.appendChild(codonNote);
                 } else {
                     content.appendChild(makeLine('g.', gVariant));
+                    if (typedX) {
+                        // X has two meanings; the one taken is said, with the other.
+                        const stop = (query.match(/p\.[A-Za-z]{3}\d+Ter$/) || [])[0] || '';
+                        const xNote = document.createElement('span');
+                        xNote.className = 'protein-name-note';
+                        xNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                        xNote.appendChild(document.createTextNode(`"X" was read as a stop codon${stop ? ` (${stop})` : ''}.`));
+                        if (typedName && stop) {
+                            const any = `${typedName.gene} ${stop.replace(/Ter$/, 'Xaa')}`;
+                            xNote.appendChild(document.createTextNode(' If it stands for any amino acid, look up '));
+                            const link = document.createElement('a');
+                            link.setAttribute('href', `?variant=${encodeURIComponent(any)}`);
+                            link.textContent = any;
+                            xNote.appendChild(link);
+                            xNote.appendChild(document.createTextNode('.'));
+                        }
+                        content.appendChild(xNote);
+                    }
                     if (rsidAlleles.length > 1) {
                         // An rsID with several alleles does not say which one is
                         // meant. The best documented one is shown; that is a choice
@@ -12400,6 +12558,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         // ClinVar matching + display
         complementBase, normalizeCdnaForMatch, findExactClinvarRegionMatch,
         parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars,
+        isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,
