@@ -6114,25 +6114,59 @@ function gnomadMitochondrialUrl(variantId) {
     return variantId ? `https://gnomad.broadinstitute.org/variant/${variantId}?dataset=gnomad_r4` : '';
 }
 
+// gnomAD's carrier counts for one group of people (a genetic-ancestry group,
+// a mitochondrial haplogroup) with the two shares worked out, the way the
+// totals are. Groups gnomAD gives no id are left out.
+function gnomadMitochondrialGroups(list) {
+    return [].concat(list || []).filter(group => group && group.id).map((group) => {
+        const an = Number(group.an);
+        const share = count => (an > 0 && count != null && Number.isFinite(Number(count)) ? Number(count) / an : null);
+        return { id: String(group.id), an: group.an, ac_hom: group.ac_hom, ac_het: group.ac_het,
+            af_hom: share(group.ac_hom), af_het: share(group.ac_het) };
+    });
+}
+
 // Resolves to { status: 'found', variant_id, an, ac_hom, ac_het, af_hom, af_het,
-// max_heteroplasmy, … } or { status: 'not_found', variant_id, … }; null when the
-// alleles cannot be written as a gnomAD id. Throws when gnomAD could not be
-// asked, so "not in gnomAD" is never said on the strength of an outage.
+// max_heteroplasmy, populations, haplogroups, … } or { status: 'not_found',
+// variant_id, … }; null when the alleles cannot be written as a gnomAD id.
+// Throws when gnomAD could not be asked, so "not in gnomAD" is never said on
+// the strength of an outage.
 async function fetchGnomadMitochondrial(pos, ref, alt) {
     const variantId = gnomadMitochondrialId(pos, ref, alt);
     if (!variantId) return null;
-    const query = `query($id: String!) {
+    const totals = 'variant_id an ac_hom ac_het max_heteroplasmy';
+    // The same counts per genetic-ancestry group and per haplogroup: what
+    // gnomAD's own page tabulates. Only the totals used to be read, so a
+    // variant common in one haplogroup and absent elsewhere looked the same as
+    // one spread thinly over all of them.
+    const breakdown = 'populations { id an ac_hom ac_het } haplogroups { id an ac_hom ac_het }';
+    const ask = async (fields) => {
+        const query = `query($id: String!) {
         mitochondrial_variant(variant_id: $id, dataset: gnomad_r4) {
-            variant_id an ac_hom ac_het max_heteroplasmy
+            ${fields}
         }
     }`;
-    const res = await fetchWithTimeout(GNOMAD_API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ query, variables: { id: variantId } })
-    }, API_TIMEOUT_MS.gnomadV4);
-    if (!res.ok) throw new Error(`gnomAD request failed (${res.status})`);
-    const data = await res.json();
+        const res = await fetchWithTimeout(GNOMAD_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ query, variables: { id: variantId } })
+        }, API_TIMEOUT_MS.gnomadV4);
+        if (!res.ok) {
+            const err = new Error(`gnomAD request failed (${res.status})`);
+            err.status = res.status;
+            throw err;
+        }
+        return res.json();
+    };
+    let data;
+    try {
+        data = await ask(`${totals} ${breakdown}`);
+    } catch (err) {
+        // 400 is gnomAD refusing the query itself — a field it no longer has.
+        // The totals are worth more than nothing: ask for those alone.
+        if (!err || err.status !== 400) throw err;
+        data = await ask(totals);
+    }
     const hit = data && data.data && data.data.mitochondrial_variant;
     const base = { dataset: GNOMAD_MITOCHONDRIAL_DATASET, variant_id: variantId };
     if (!hit) {
@@ -6153,7 +6187,10 @@ async function fetchGnomadMitochondrial(pos, ref, alt) {
         af_hom: share(hit.ac_hom),
         af_het: share(hit.ac_het),
         max_heteroplasmy: hit.max_heteroplasmy,
-        note: 'ac_hom / af_hom count carriers with the variant in at least 95% of their mitochondrial copies (homoplasmic); ac_het / af_het those with it in 10-95% (heteroplasmic).'
+        populations: gnomadMitochondrialGroups(hit.populations),
+        haplogroups: gnomadMitochondrialGroups(hit.haplogroups),
+        note: 'ac_hom / af_hom count carriers with the variant in at least 95% of their mitochondrial copies (homoplasmic); ac_het / af_het those with it in 10-95% (heteroplasmic). '
+            + 'populations gives the same counts per gnomAD genetic-ancestry group, haplogroups per mitochondrial haplogroup; an is the number of people in the group.'
     };
 }
 
@@ -6205,6 +6242,63 @@ function renderGnomadMitochondrial(container, variantId, result) {
         link.rel = 'noopener noreferrer';
         link.textContent = 'View on gnomAD (mitochondrial)';
         container.appendChild(link);
+    }
+    if (result && result.status === 'found') {
+        // Who the carriers are: by genetic-ancestry group and by haplogroup,
+        // folded away under the link like the population tables of the
+        // nuclear data sets. (Not where nobody carries it: a table of noughts
+        // says nothing.)
+        const breakdown = (summary, heading, groups, label) => {
+            const rows = [].concat(groups || []);
+            if (!rows.some(group => Number(group.ac_hom) > 0 || Number(group.ac_het) > 0)) return;
+            const details = document.createElement('details');
+            const summaryEl = document.createElement('summary');
+            summaryEl.textContent = summary;
+            details.appendChild(summaryEl);
+            const table = document.createElement('table');
+            table.style.width = '100%';
+            table.style.borderCollapse = 'collapse';
+            // (A size down from the other tables of this card, and closer set:
+            // "25 (0.0968%)" twice over ran 24 px past the card's edge, where
+            // it is cut off. Measured in Chromium: 328 px in a 336 px card.)
+            table.style.fontSize = '0.82rem';
+            const cell = (tag, text, tr) => {
+                const el = document.createElement(tag);
+                el.textContent = text;
+                el.style.padding = '0.25rem 0.3rem';
+                if (tag === 'th') {
+                    el.style.textAlign = 'left';
+                    el.style.borderBottom = '1px solid #e0e0e0';
+                }
+                tr.appendChild(el);
+            };
+            const thead = document.createElement('thead');
+            const head = document.createElement('tr');
+            [heading, 'Homoplasmic', 'Heteroplasmic', 'AN'].forEach(text => cell('th', text, head));
+            thead.appendChild(head);
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+            // "21 (0.1465%)": carriers, and their share of the group.
+            const carriers = (count, share) => (count == null ? '—'
+                : `${count}${share != null ? ` (${(share * 100).toFixed(4)}%)` : ''}`);
+            for (const group of rows) {
+                const tr = document.createElement('tr');
+                [label(group.id), carriers(group.ac_hom, group.af_hom), carriers(group.ac_het, group.af_het),
+                    group.an != null ? String(group.an) : '—'].forEach(text => cell('td', text, tr));
+                tbody.appendChild(tr);
+            }
+            table.appendChild(tbody);
+            // Where the card is narrower still (a phone), the table scrolls
+            // sideways inside it rather than losing its last column.
+            const scroll = document.createElement('div');
+            scroll.style.overflowX = 'auto';
+            scroll.appendChild(table);
+            details.appendChild(scroll);
+            container.appendChild(details);
+        };
+        // (Ancestry groups in capitals, as the other tables of this card have them.)
+        breakdown('Population details', 'Population', result.populations, id => id.toUpperCase());
+        breakdown('Haplogroup details', 'Haplogroup', result.haplogroups, id => id);
     }
 }
 
@@ -13674,7 +13768,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, codonFromResidueRecords,
-        recoderAlleleNamesProtein, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
+        recoderAlleleNamesProtein, gnomadMitochondrialGroups, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,

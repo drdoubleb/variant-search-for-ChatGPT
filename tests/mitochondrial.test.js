@@ -206,13 +206,16 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
 //
 //    beside a "View on gnomAD (v2.1.1)" link to a page saying v2 has no
 //    mitochondrial variants. (The answers below are gnomAD's own, recorded.)
+//
+//    The call set was then read for its totals only. gnomAD also counts the
+//    carriers per genetic-ancestry group and per mitochondrial haplogroup —
+//    its own page tabulates both — and for a mitochondrial variant that is
+//    much of what the frequency means: m.1555A>G is in 0.48 % of one group
+//    and in none of 1,415 people of another. Both tables are now on the card.
 {
-    const recorded = {
-        'M-1555-A-G': { data: { mitochondrial_variant: { variant_id: 'M-1555-A-G', an: 56401, ac_hom: 63, ac_het: 11, max_heteroplasmy: 1 } } },
-        'M-3243-A-G': { data: { mitochondrial_variant: { variant_id: 'M-3243-A-G', an: 56383, ac_hom: 0, ac_het: 6, max_heteroplasmy: 0.464 } } },
-        'M-8993-T-G': { data: { mitochondrial_variant: { variant_id: 'M-8993-T-G', an: 56433, ac_hom: 0, ac_het: 0, max_heteroplasmy: 0 } } }
-    };
-    const notFound = { errors: [{ message: 'Variant not found' }], data: { mitochondrial_variant: null } };
+    const recorded = JSON.parse(readFileSync(new URL('./fixtures/gnomad-mitochondrial.json', import.meta.url)));
+    const notFound = recorded['M-3270-CT-C'];
+    assert.deepEqual(notFound, { errors: [{ message: 'Variant not found' }], data: { mitochondrial_variant: null } });
     // gnomAD's API as a route for the replay harness; `asked` collects the ids.
     const gnomad = (answer = (id, respond) => respond(recorded[id] || notFound)) => {
         const asked = [];
@@ -221,10 +224,16 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
             const body = JSON.parse(options.body);
             if (!/mitochondrial_variant/.test(body.query)) return undefined;     // (gene constraint)
             asked.push(body.variables.id);
-            return answer(body.variables.id, respond);
+            return answer(body.variables.id, respond, body);
         };
         return { route, asked };
     };
+    // The folded tables of the gnomAD card: { "Population details": [[cells of a row], …], … }
+    const gnomadTables = page => Object.fromEntries([...page.document.querySelectorAll('.card')]
+        .filter(card => card.querySelector('h3')?.textContent === 'gnomAD')
+        .flatMap(card => [...card.querySelectorAll('details')])
+        .map(details => [details.querySelector('summary').textContent,
+            [...details.querySelectorAll('tr')].map(tr => [...tr.querySelectorAll('th, td')].map(cell => cell.textContent))]));
     const gnomadLinks = page => [...page.document.querySelectorAll('.card')]
         .filter(card => card.querySelector('h3')?.textContent === 'gnomAD')
         .flatMap(card => [...card.querySelectorAll('a')])
@@ -247,6 +256,50 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
         assert.doesNotMatch(page.cards.gnomAD, never);
         assert.deepEqual(gnomadLinks(page), ['https://gnomad.broadinstitute.org/variant/M-1555-A-G?dataset=gnomad_r4'],
             'one link, to the page that exists');
+        // Who they are. Every group gnomAD counts, in its order, each with the
+        // number of people it holds.
+        const tables = gnomadTables(page);
+        assert.deepEqual(Object.keys(tables), ['Population details', 'Haplogroup details']);
+        assert.deepEqual(tables['Population details'], [
+            ['Population', 'Homoplasmic', 'Heteroplasmic', 'AN'],
+            ['AFR', '21 (0.1465%)', '1 (0.0070%)', '14339'],
+            ['AMI', '0 (0.0000%)', '0 (0.0000%)', '392'],
+            ['AMR', '3 (0.0525%)', '1 (0.0175%)', '5713'],
+            ['ASJ', '0 (0.0000%)', '0 (0.0000%)', '1415'],
+            ['EAS', '3 (0.2024%)', '1 (0.0675%)', '1482'],
+            ['FIN', '5 (0.1024%)', '1 (0.0205%)', '4884'],
+            ['MID', '0 (0.0000%)', '0 (0.0000%)', '20'],
+            ['NFE', '25 (0.0968%)', '5 (0.0194%)', '25837'],
+            ['OTH', '4 (0.4843%)', '1 (0.1211%)', '826'],
+            ['SAS', '2 (0.1340%)', '1 (0.0670%)', '1493']
+        ]);
+        const haplogroups = tables['Haplogroup details'];
+        assert.deepEqual(haplogroups[0], ['Haplogroup', 'Homoplasmic', 'Heteroplasmic', 'AN']);
+        assert.equal(haplogroups.length, 30, 'gnomAD\'s 29 haplogroups');
+        assert.deepEqual(haplogroups.slice(1, 4), [['A', '0 (0.0000%)', '0 (0.0000%)', '2676'], ['B', '1 (0.0651%)', '0 (0.0000%)', '1537'],
+            ['C', '0 (0.0000%)', '1 (0.1152%)', '868']]);
+        assert.deepEqual(haplogroups.find(row => row[0] === 'H'), ['H', '19 (0.1286%)', '1 (0.0068%)', '14773']);
+        assert.deepEqual(haplogroups.find(row => row[0] === 'L2'), ['L2', '12 (0.2542%)', '0 (0.0000%)', '4721'], 'named as gnomAD names it');
+        // The counts add up to the totals above them.
+        const sum = (rows, column) => rows.slice(1).reduce((total, row) => total + Number(row[column].split(' ')[0]), 0);
+        assert.deepEqual([sum(tables['Population details'], 1), sum(tables['Population details'], 2), sum(tables['Population details'], 3)], [63, 11, 56401]);
+        assert.deepEqual([sum(haplogroups, 1), sum(haplogroups, 2), sum(haplogroups, 3)], [63, 11, 56401]);
+        // Under the link, as the population tables of the nuclear data sets are.
+        const section = [...page.document.querySelectorAll('.card')].find(card => card.querySelector('h3')?.textContent === 'gnomAD');
+        const order = [...section.querySelectorAll('a, details')].filter(el => !/display:\s*none/.test(el.getAttribute('style') || ''))
+            .map(el => (el.tagName === 'A' ? el.textContent : el.querySelector('summary').textContent));
+        assert.deepEqual(order.slice(0, 3), ['View on gnomAD (mitochondrial)', 'Population details', 'Haplogroup details']);
+        // Four columns are a tight fit for the card: set a size down, and in a
+        // box that scrolls sideways where the card is narrower still (the card
+        // cuts off what runs past its edge — the AN column, as first written).
+        for (const table of section.querySelectorAll('details table')) {
+            assert.match(table.getAttribute('style'), /font-size:\s*0\.82rem/);
+            assert.match(table.parentElement.getAttribute('style') || '', /overflow-x:\s*auto/, 'the table scrolls inside the card');
+            assert.equal(table.parentElement.parentElement.tagName, 'DETAILS');
+            assert([...table.querySelectorAll('th, td')].every(cell => /padding:\s*0\.25rem 0\.3rem/.test(cell.getAttribute('style'))));
+        }
+        // One request, as before.
+        assert.equal(page.requests.filter(r => r === 'gnomad.broadinstitute.org/api').length - 1, 1, 'one request beside the gene-constraint one');
     }
     // m.3243A>G: heteroplasmic only, at most 46.4 % of a carrier's copies.
     {
@@ -254,6 +307,15 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
         assert.match(page.cards.gnomAD, /Homoplasmic AF: 0\.0000% AC\/AN: 0\/56383/);
         assert.match(page.cards.gnomAD, /Heteroplasmic AF: 0\.0106% AC\/AN: 6\/56383/);
         assert.match(page.cards.gnomAD, /Highest level seen: 46\.4%\./);
+        // Six carriers: three in each of two ancestry groups, over four haplogroups.
+        const tables = gnomadTables(page);
+        assert.deepEqual(tables['Population details'].filter(row => !/^0 /.test(row[2])), [
+            ['Population', 'Homoplasmic', 'Heteroplasmic', 'AN'],
+            ['AFR', '0 (0.0000%)', '3 (0.0209%)', '14332'],
+            ['NFE', '0 (0.0000%)', '3 (0.0116%)', '25831']
+        ]);
+        assert.deepEqual(tables['Haplogroup details'].filter(row => !/^0 /.test(row[2])).map(row => `${row[0]} ${row[2]} ${row[3]}`),
+            ['Haplogroup Heteroplasmic AN', 'H 3 (0.0203%) 14771', 'L1 1 (0.0336%) 2972', 'L2 1 (0.0212%) 4723', 'L3 1 (0.0177%) 5665']);
     }
     // m.8993T>G: listed, with no carrier at 10 % or more.
     {
@@ -261,6 +323,8 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
         assert.match(page.cards.gnomAD, /Homoplasmic AF: 0\.0000% AC\/AN: 0\/56433Heteroplasmic AF: 0\.0000% AC\/AN: 0\/56433/);
         assert.doesNotMatch(page.cards.gnomAD, /Highest level seen/);
         assert.doesNotMatch(page.cards.gnomAD, never);
+        // Nobody carries it: there is nothing to break down, and no table of noughts.
+        assert.deepEqual(gnomadTables(page), {});
     }
     // m.3271del: gnomAD does not hold it. Asked under VCF alleles read off the reference.
     {
@@ -269,6 +333,7 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
         assert.deepEqual(api.asked, ['M-3270-CT-C']);
         assert.match(page.cards.gnomAD, /Not in gnomAD's mitochondrial call set \(queried: M-3270-CT-C\)\./);
         assert.deepEqual(gnomadLinks(page), ['https://gnomad.broadinstitute.org/variant/M-3270-CT-C?dataset=gnomad_r4']);
+        assert.deepEqual(gnomadTables(page), {});
     }
     // gnomAD not answering is not "gnomAD does not have it".
     for (const down of [(id, respond) => respond({ error: 'unavailable' }, 503),
@@ -278,6 +343,28 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
         assert.match(page.cards.gnomAD, /gnomAD's mitochondrial call set could not be read\./);
         assert.doesNotMatch(page.cards.gnomAD, /Not in gnomAD|Homoplasmic AF/);
         assert.deepEqual(gnomadLinks(page), ['https://gnomad.broadinstitute.org/variant/M-1555-A-G?dataset=gnomad_r4']);
+        assert.deepEqual(gnomadTables(page), {});
+    }
+    // gnomAD refusing the query itself (HTTP 400: a field it no longer has, as
+    // it answers "Cannot query field …") must not cost the totals: they are
+    // asked for alone, and shown without the tables.
+    {
+        const queries = [];
+        const refusing = gnomad((id, respond, body) => {
+            queries.push(body.query);
+            if (/populations|haplogroups/.test(body.query)) {
+                return respond({ errors: [{ message: 'Cannot query field "haplogroups" on type "MitochondrialVariantDetails".' }] }, 400);
+            }
+            const { populations, haplogroups, ...totals } = recorded[id].data.mitochondrial_variant;
+            return respond({ data: { mitochondrial_variant: totals } });
+        });
+        const page = await runLookup(cassettes.mt1555, { route: refusing.route });
+        assertResolved(assert, page, 'm.1555A>G, the breakdown refused');
+        assert.equal(queries.length, 2, 'asked again, once');
+        assert.doesNotMatch(queries[1], /populations|haplogroups/);
+        assert.match(page.cards.gnomAD, /Homoplasmic AF: 0\.1117% AC\/AN: 63\/56401/);
+        assert.match(page.cards.gnomAD, /Heteroplasmic AF: 0\.0195% AC\/AN: 11\/56401/);
+        assert.deepEqual(gnomadTables(page), {});
     }
     // A nuclear variant's card is as it was: v2 link, and the proxy asked.
     {
@@ -315,14 +402,55 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
         };
         answerWith(recorded['M-1555-A-G']);
         const found = await h.fetchGnomadMitochondrial(1555, 'A', 'G');
+        assert.equal(sent.length, 1);
         assert.equal(sent[0].url, 'https://gnomad.broadinstitute.org/api');
         assert.deepEqual(sent[0].body.variables, { id: 'M-1555-A-G' });
         assert.match(sent[0].body.query, /mitochondrial_variant\(variant_id: \$id, dataset: gnomad_r4\)/);
+        assert.match(sent[0].body.query, /variant_id an ac_hom ac_het max_heteroplasmy populations \{ id an ac_hom ac_het \} haplogroups \{ id an ac_hom ac_het \}/);
         assert.equal(found.status, 'found');
         assert.deepEqual([found.variant_id, found.an, found.ac_hom, found.ac_het, found.max_heteroplasmy], ['M-1555-A-G', 56401, 63, 11, 1]);
         assert.equal(found.af_hom.toFixed(6), '0.001117');
         assert.equal(found.af_het.toFixed(6), '0.000195');
         assert.match(found.note, /95%.*homoplasmic.*10-95%.*heteroplasmic/, 'the AI review is told what the counts mean');
+        // ...and gets the two breakdowns, each group with its shares worked out.
+        assert.match(found.note, /populations gives the same counts per gnomAD genetic-ancestry group, haplogroups per mitochondrial haplogroup/);
+        assert.equal(found.populations.length, 10);
+        assert.equal(found.haplogroups.length, 29);
+        const afr = found.populations.find(group => group.id === 'afr');
+        assert.deepEqual([afr.an, afr.ac_hom, afr.ac_het, afr.af_hom.toFixed(6), afr.af_het.toFixed(6)], [14339, 21, 1, '0.001465', '0.000070']);
+        const h1 = found.haplogroups.find(group => group.id === 'H');
+        assert.deepEqual([h1.an, h1.ac_hom, h1.ac_het, h1.af_hom.toFixed(6)], [14773, 19, 1, '0.001286']);
+        assert.deepEqual(h.gnomadMitochondrialGroups([{ id: 'L5', an: 0, ac_hom: 0, ac_het: 0 }, { an: 5, ac_hom: 1 }, null,
+            { id: 'X', an: 10, ac_hom: 1, ac_het: null }]), [
+            { id: 'L5', an: 0, ac_hom: 0, ac_het: 0, af_hom: null, af_het: null },
+            { id: 'X', an: 10, ac_hom: 1, ac_het: null, af_hom: 0.1, af_het: null }
+        ], 'no share of an empty group; a group without a name is not a row');
+        assert.deepEqual(h.gnomadMitochondrialGroups(null), []);
+        // An answer without them (the totals alone) is a variant with no tables.
+        answerWith({ data: { mitochondrial_variant: { variant_id: 'M-1555-A-G', an: 56401, ac_hom: 63, ac_het: 11, max_heteroplasmy: 1 } } });
+        const bare = await h.fetchGnomadMitochondrial(1555, 'A', 'G');
+        assert.deepEqual([bare.status, bare.ac_hom, bare.populations, bare.haplogroups], ['found', 63, [], []]);
+        // gnomAD refusing the query (400) is answered by asking for the totals
+        // alone; any other failure is a failure, asked once.
+        sent.length = 0;
+        globalThis.fetch = async (url, options) => {
+            const body = JSON.parse(options.body);
+            sent.push({ url: String(url), body });
+            return /populations/.test(body.query)
+                ? new Response(JSON.stringify({ errors: [{ message: 'Cannot query field "populations"' }] }), { status: 400 })
+                : new Response(JSON.stringify({ data: { mitochondrial_variant: { variant_id: 'M-1555-A-G', an: 56401, ac_hom: 63, ac_het: 11, max_heteroplasmy: 1 } } }), { status: 200 });
+        };
+        const totalsOnly = await h.fetchGnomadMitochondrial(1555, 'A', 'G');
+        assert.deepEqual([sent.length, totalsOnly.status, totalsOnly.ac_hom, totalsOnly.populations.length], [2, 'found', 63, 0]);
+        assert.doesNotMatch(sent[1].body.query, /populations|haplogroups/);
+        sent.length = 0;
+        answerWith({ errors: [{ message: 'bad' }] }, 400);
+        await assert.rejects(h.fetchGnomadMitochondrial(1555, 'A', 'G'), /400/, 'refused twice: could not be read');
+        assert.equal(sent.length, 2);
+        sent.length = 0;
+        answerWith({}, 503);
+        await assert.rejects(h.fetchGnomadMitochondrial(1555, 'A', 'G'), /503/);
+        assert.equal(sent.length, 1, 'an outage is not asked about twice');
         answerWith(notFound);
         assert.deepEqual(await h.fetchGnomadMitochondrial(8993, 'T', 'A'),
             { status: 'not_found', dataset: 'gnomAD mitochondrial call set', variant_id: 'M-8993-T-A' });

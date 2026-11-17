@@ -621,10 +621,41 @@ Homoplasmic AF: 0.1117%  AC/AN: 63/56401
 Heteroplasmic AF: 0.0195%  AC/AN: 11/56401
 Homoplasmic: in at least 95% of a carrier's mitochondrial copies; heteroplasmic: in 10–95%. Highest level seen: 100%.
 View on gnomAD (mitochondrial)
+▸ Population details
+▸ Haplogroup details
 ```
 
 gnomAD not answering is reported as *could not be read*, never as *not in
 gnomAD*, and the AI review receives the same counts with what they mean.
+
+**Who the carriers are.** The totals were all that was read. gnomAD also counts
+the carriers per genetic-ancestry group and per mitochondrial haplogroup — its
+own page tabulates both — and for a mitochondrial variant that is much of what
+a frequency means: one that defines a haplogroup is common in it and absent
+elsewhere. The same request now asks for both (`populations`, `haplogroups`),
+and they are folded under the link the way the population tables of the nuclear
+data sets are:
+
+| Population | Homoplasmic | Heteroplasmic | AN |
+| --- | --- | --- | --- |
+| AFR | 21 (0.1465%) | 1 (0.0070%) | 14339 |
+| ASJ | 0 (0.0000%) | 0 (0.0000%) | 1415 |
+| EAS | 3 (0.2024%) | 1 (0.0675%) | 1482 |
+| NFE | 25 (0.0968%) | 5 (0.0194%) | 25837 |
+| … | | | |
+
+(m.1555A>G: ten ancestry groups, then gnomAD's 29 haplogroups — `H` 19 of
+14,773, `L2` 12 of 4,721, … — each count with its share of the group, and the
+group's size.) A variant nobody carries gets no tables; m.3243A>G's six
+heteroplasmic carriers are three in AFR and three in NFE. The AI review
+receives both lists with the shares worked out. Should gnomAD refuse the
+longer query (HTTP 400 — a field it no longer has), the totals are asked for
+alone rather than lost.
+
+Four columns are a tight fit: at the size of the card's other tables they ran
+24 px past the card's edge, which cuts off what crosses it (the AN column,
+measured in Chromium). They are set a size down — 336 px in a 336 px card — and
+sit in a box that scrolls sideways where the card is narrower still (a phone).
 
 Two things found here apply to every chromosome:
 
