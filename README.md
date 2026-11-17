@@ -228,6 +228,54 @@ Two things found here apply to every chromosome:
 
 See `tests/mitochondrial.test.js`.
 
+### rsID lookups
+
+An rsID used to be handed to Ensembl's variant recoder and waited for. Measured
+live, with this page's own timeouts:
+
+| rsID | before | now |
+| --- | --- | --- |
+| `rs80357906` (BRCA1 5382insC) | 49.5 s, then `c.: N/A · p.: N/A · Effect: delins` | 6.5 s · NM_007294.4 c.5266dup · p.Gln1756ProfsTer74 |
+| `rs113488022` (BRAF V600E) | **p.Val600Ala** | p.Val600Glu, and a note naming the other two alleles |
+| `rs28934578` (TP53 R175H) | 51.8 s, then `p.: N/A · Effect: N/A` | 8.9 s · p.Arg175His |
+| `rs1042522` (TP53 P72R) | 52.1 s, then `p.: N/A · Effect: N/A` | 6.1 s · p.Pro72Arg |
+
+Three separate things were wrong.
+
+**The wait.** Ensembl takes 5 to 50 s over an rsID. The page allows 12 s, tried
+four times, and then fell back to the MyVariant search it could have started
+with. MyVariant is now asked first: it says at once which alleles it files under
+the rsID. The recoder keeps running in the background and is no longer needed.
+
+**Which allele.** An rsID names a site, not an allele, and rs113488022 has
+three. The one shown was the first that Ensembl listed — and Ensembl lists them
+in a different order from one call to the next (`T, G, C` in one recording of
+this very query, `G, T, C` in another), so the rsID everyone uses for V600E came
+back as V600A or V600E at random. The alleles MyVariant holds are now ordered by
+how well documented each is — ClinVar submissions, then population frequency
+(`rankRsidAlleles`) — and because that is a choice made on the user's behalf,
+the Variant card says so and links the others:
+`rs113488022 names 3 alleles. This is the best documented one; the others are
+chr7:g.140453136A>C, chr7:g.140453136A>G.`
+
+**No transcript.** The record an rsID lands on can be one of MyVariant's
+dbSNP-only ones (an rsID and a gene, nothing else), and VEP was only asked when
+the recoder had supplied transcripts to pair — which, having timed out, it had
+not. VEP works from the allele alone and answers in a second or two, so it is
+now asked as soon as the allele is known, for every lookup; once it has
+answered, the recoder is not waited for. When the recoder contributed nothing,
+VEP is given 8 s from when it was asked (`API_TIMEOUT_MS.vepUnprompted`) and the
+result is shown without it after that.
+
+Without VEP the record's own rows are used, and there a bare `c.` from ClinVar's
+list no longer displaces snpEff's row for the same transcript: ClinVar lists the
+current version (NM_000546.6) beside snpEff's older one (.5), the bare row was
+selected for being the MANE version, and that is where `p.: N/A, Effect: N/A`
+came from.
+
+See `tests/rsid-lookup.test.js`. Its recordings were made with the page's real
+timeouts, so a request Ensembl did not answer in time replays as a timeout.
+
 `npm test` includes real-response identity fixtures and full form/card regression
 checks using LinkeDOM, with external requests mocked. It covers both PTEN input
 paths, explicit transcript selection, VEP/MANE outages, BRAF V600E while the

@@ -152,8 +152,27 @@ const API_TIMEOUT_MS = {
     // under a second. They sit in front of the result, so a hung Ensembl must
     // not hold it for long: past this they report "not checked" and step aside.
     identityReference: 5000,
+    // VEP asked while the rest of the result is ready to show (the recoder gave
+    // no transcripts to pair): it gets this long from when it was asked.
+    vepUnprompted: 8000,
     ensemblLookup: 10000
 };
+
+// `promise`, unless it takes longer than `ms`: then reject with `message`. The
+// request is left running — its answer may still be wanted by something that
+// can wait — and a late failure is swallowed rather than left unhandled.
+function settledWithin(promise, ms, message) {
+    let timer;
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            const err = new Error(message);
+            err.timedOut = true;
+            reject(err);
+        }, ms);
+    });
+    promise.catch(() => {});
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
     const controller = new AbortController();
@@ -1884,9 +1903,19 @@ function buildCanonicalFromAnnotation(annotation, targetProtein, query = '') {
             gene: ann.genename || ann.gene_name || '', source: 'snpeff'
         });
     }
+    // A bare c. from ClinVar's or dbNSFP's list says nothing about protein or
+    // effect, so it must not stand in for a row that does. ClinVar lists the
+    // current transcript version (NM_000546.6) beside snpEff's older one (.5);
+    // the bare row, being the MANE version, was the one selected, and TP53 R175H
+    // was shown with "p.: N/A, Effect: N/A" whenever Ensembl had not answered.
+    // (Compared without the version, and with "c.5266dupC" read as "c.5266dup".)
+    const rowKey = (transcript, change) => `${String(transcript || '').replace(/\.\d+$/, '').toUpperCase()}|${normalizeCdnaForMatch(change) || change}`;
+    const described = new Set(candidates.map(c => rowKey(c.transcript, c.cDNA)));
     for (const value of [].concat(annotation?.hgvsc || [], annotation?.clinvar?.hgvs?.coding || [], annotation?.dbnsfp?.hgvsc || [])) {
         const { transcript, change } = splitTranscriptHgvs(value);
-        if (change) candidates.push({ transcript, cDNA: change, protein: '', source: 'root' });
+        if (change && !described.has(rowKey(transcript, change))) {
+            candidates.push({ transcript, cDNA: change, protein: '', source: 'root' });
+        }
     }
     return buildTranscriptDisplay(candidates, query || (targetProtein ? `GENE:p.${targetProtein}` : ''));
 }
@@ -5730,6 +5759,7 @@ function getHitGenesUpper(hit) {
     };
     for (const cadd of [].concat(hit?.cadd?.gene || [])) addGene(cadd?.genename || cadd?.symbol);
     addGene(hit?.dbnsfp?.genename);
+    for (const gene of [].concat(hit?.dbsnp?.gene || [])) addGene(gene?.symbol);
     for (const clinvar of [].concat(hit?.clinvar || [])) {
         addGene(clinvarPreferredGene(clinvar));
         addGene(clinvar?.gene?.symbol);
@@ -5966,7 +5996,8 @@ function variantNameRank(hit, identifier) {
     return [named ? 1 : 0, Number.isFinite(lowestNm) ? 1 : 0, Number.isFinite(lowestNm) ? -lowestNm : 0];
 }
 
-function selectMyVariantHit(hits, identifier, expectedGenomic = '') {
+// Every hit that is the variant `identifier` names, strongest claim first.
+function rankMyVariantHits(hits, identifier, expectedGenomic = '') {
     const matches = (hits || []).filter(hit => hitMatchesVariantQuery(hit, identifier, expectedGenomic));
     const rank = new Map(matches.map(hit => [hit, variantNameRank(hit, identifier)]));
     matches.sort((a, b) => {
@@ -5978,11 +6009,43 @@ function selectMyVariantHit(hits, identifier, expectedGenomic = '') {
         // Richer annotations may break ties only AFTER allele identity is established.
         return Number(Boolean(b.clinvar)) - Number(Boolean(a.clinvar));
     });
-    return matches[0] || null;
+    return matches;
+}
+
+function selectMyVariantHit(hits, identifier, expectedGenomic = '') {
+    return rankMyVariantHits(hits, identifier, expectedGenomic)[0] || null;
+}
+
+/*
+ * An rsID names a site. When the site has several alternate alleles, which one
+ * a lookup showed depended on the order Ensembl listed them in — rs113488022,
+ * the rsID everyone uses for BRAF V600E, came back as V600A — and on Ensembl
+ * getting round to listing them, which takes it 5 to 50 s; MyVariant had
+ * answered at once.
+ *
+ * The alleles MyVariant files under the rsID are ordered by how well documented
+ * each is: ClinVar submissions first, then how common it is. That is a guess at
+ * which one was meant, so the caller says it is one and names the others.
+ */
+function rankRsidAlleles(hits) {
+    const documented = (hit) => {
+        const submissions = [].concat(hit?.clinvar || []).reduce((n, c) => n + [].concat(c?.rcv || []).length, 0);
+        const frequency = Math.max(0, ...[hit?.gnomad_exome?.af?.af, hit?.gnomad_genome?.af?.af]
+            .map(Number).filter(Number.isFinite));
+        return [submissions, frequency];
+    };
+    return (hits || []).map((hit, index) => ({ hit, index, rank: documented(hit) }))
+        .sort((a, b) => (b.rank[0] - a.rank[0]) || (b.rank[1] - a.rank[1]) || (a.index - b.index))
+        .map(entry => entry.hit);
 }
 
 // Query MyVariant.info by rsID or other variant identifier. Returns the best matching hit when possible.
 async function queryMyVariantById(identifier, expectedGenomic = '') {
+    return (await searchMyVariant(identifier, expectedGenomic))[0] || null;
+}
+
+// All of MyVariant's records for the variant `identifier` names, best first.
+async function searchMyVariant(identifier, expectedGenomic = '') {
     const encoded = encodeURIComponent(identifier);
     const url = `https://myvariant.info/v1/query?q=${encoded}&size=20`;
     const response = await fetchWithRetry(url, {}, API_TIMEOUT_MS.myvariant, {
@@ -5997,7 +6060,7 @@ async function queryMyVariantById(identifier, expectedGenomic = '') {
         throw err;
     }
     const data = await response.json();
-    return selectMyVariantHit(data?.hits, identifier, expectedGenomic);
+    return rankMyVariantHits(data?.hits, identifier, expectedGenomic);
 }
 
 // Build summary table rows from annotation object.
@@ -7273,8 +7336,12 @@ const initVariantSearchUi = () => {
             // free‑text MyVariant searches fail and we want to try alternate g. notations such as delins.
             let candidateVariants = [];
             const vepByVariant = new Map();
+            const vepStartedAt = new Map();
             const fetchLookupVep = variant => {
-                if (!vepByVariant.has(variant)) vepByVariant.set(variant, fetchVepHgvsHg19(variant));
+                if (!vepByVariant.has(variant)) {
+                    vepStartedAt.set(variant, Date.now());
+                    vepByVariant.set(variant, fetchVepHgvsHg19(variant));
+                }
                 return vepByVariant.get(variant);
             };
             // Allele-level identity check against the reference (see
@@ -7341,6 +7408,9 @@ const initVariantSearchUi = () => {
             // HGVS says which allele that is. Returns null when the hit turns out
             // to hold nothing for the allele the name matched.
             let clinvarRekeyed = false;
+            // The alleles MyVariant files under the rsID that was looked up, the
+            // one shown first.
+            let rsidAlleles = [];
             const adoptNamedHit = async (hit) => {
                 const record = await fetchMyVariant(hit._id);
                 const reconciled = await reconcileClinvarAllele(record, recordFoundThroughClinvar(record, query));
@@ -7417,6 +7487,33 @@ const initVariantSearchUi = () => {
                     }
                 } catch (directErr) {
                     console.log('[DEBUG] Direct MyVariant search error:', directErr);
+                }
+            }
+
+            // An rsID is looked up in MyVariant first. It says at once which alleles
+            // it files under the rsID; Ensembl's recoder, which used to be waited
+            // for, takes about 45 s over rs80357906 — four 12 s attempts here, each
+            // abandoned — after which the lookup fell back to this very search,
+            // 49 s late. The recoder keeps running and VEP supplies the
+            // transcripts. See rankRsidAlleles for a site with several alleles.
+            if (!annotation && /^rs\d+$/i.test(query)) {
+                try {
+                    const alleles = rankRsidAlleles(await searchMyVariant(query));
+                    if (!isCurrentSearch()) return;
+                    if (alleles.length) {
+                        LookupProgress.step('myvariant', 'ok', alleles.length === 1
+                            ? `${query} is one allele here: ${alleles[0]._id}`
+                            : `${query} names ${alleles.length} alleles here — showing the best documented, ${alleles[0]._id}`);
+                        const adopted = await adoptNamedHit(alleles[0]);
+                        if (!isCurrentSearch()) return;
+                        if (adopted) {
+                            gVariant = adopted.gVariant;
+                            annotation = adopted.annotation;
+                            rsidAlleles = alleles.map(hit => hit._id);
+                        }
+                    }
+                } catch (rsErr) {
+                    console.log('[DEBUG] MyVariant rsID search error:', rsErr);
                 }
             }
 
@@ -7902,8 +7999,19 @@ const initVariantSearchUi = () => {
             // Ensembl still contributes RefSeq transcript nomenclature to the
             // Variant card, but never let a sick one hold the finished result page
             // hostage — the dbNSFP fallback renders the correct canonical without it.
+            //
+            // VEP works from the allele alone and its rows are the ones shown
+            // whenever it answers, so it is asked as soon as the allele is known
+            // (the call is memoised) rather than after this wait — and once it has
+            // answered there is nothing left to wait for: the recoder's rows only
+            // ever stood in until VEP's arrived.
+            const vepWanted = Boolean(annotation) && !codonOnlyResolutionGlobal && isGenomicVariant(gVariant);
+            const vepAnswered = vepWanted
+                ? fetchLookupVep(gVariant).then(() => true, () => new Promise(() => {}))
+                : new Promise(() => {});
             await Promise.race([
                 transcriptsPromise,
+                vepAnswered,
                 new Promise((resolve) => setTimeout(resolve, 6000))
             ]);
             // A newer search may have started while this one's annotation was in
@@ -7958,10 +8066,24 @@ const initVariantSearchUi = () => {
             // it has no transcript-specific protein rows of its own; VEP is asked
             // for them even when the recoder contributed none (it never answers a
             // gene-symbol BRCA1 query in time).
-            if (!codonOnlyResolutionGlobal && isGenomicVariant(gVariant)
-                && (transcriptsFromRecoder.length || clinvarRekeyed)) {
+            //
+            // And it is asked when the recoder contributed nothing at all — an rsID
+            // takes Ensembl's recoder 5 to 50 s, longer than this page waits. The
+            // record is then all there is, and MyVariant's own rows are the weaker
+            // ones: none for a dbSNP-only record (rs80357906 came out "c.: N/A,
+            // p.: N/A, Effect: delins"), snpEff's older transcript versions
+            // otherwise. In that case the result is ready to show without VEP, so
+            // VEP gets a deadline, counted from when it was asked.
+            const unprompted = !transcriptsFromRecoder.length && !clinvarRekeyed;
+            if (!codonOnlyResolutionGlobal && isGenomicVariant(gVariant)) {
+                if (unprompted) LookupProgress.step('vep', 'running');
                 try {
-                    const vep = await fetchLookupVep(gVariant);
+                    const vepRequest = fetchLookupVep(gVariant);
+                    const waited = Date.now() - (vepStartedAt.get(gVariant) || Date.now());
+                    const vep = unprompted
+                        ? await settledWithin(vepRequest, Math.max(1000, API_TIMEOUT_MS.vepUnprompted - waited),
+                            'Ensembl VEP did not answer in time')
+                        : await vepRequest;
                     if (!isCurrentSearch()) return;
                     assertResolvedVariantIdentity(gVariant, vep.gVariant || gVariant, null);
                     const paired = transcriptsFromVep(vep.consequences);
@@ -7992,10 +8114,15 @@ const initVariantSearchUi = () => {
                         if (!relevant.length) relevant = paired;
                     }
                     if (relevant.length) transcriptsFromRecoder = relevant;
+                    if (unprompted) {
+                        LookupProgress.step('vep', relevant.length ? 'ok' : 'empty',
+                            relevant.length ? `${relevant.length} transcript${relevant.length === 1 ? '' : 's'}` : 'no transcript here');
+                    }
                 } catch (err) {
                     // Keep nucleotide-only recoder rows when pairing is unavailable.
                     // An absent protein annotation is preferable to one from another transcript.
                     console.warn('Transcript-specific VEP annotation unavailable:', err);
+                    if (unprompted) LookupProgress.step('vep', 'warn', describeUpstreamFailure(err));
                 }
             }
             if (!isCurrentSearch()) return;
@@ -8033,6 +8160,11 @@ const initVariantSearchUi = () => {
                     consequence: canonical ? transcriptEffect(canonical) : rowValue('Consequence'),
                     assembly: 'GRCh37/hg19'
                 });
+                // The recoder may still be working (it takes Ensembl up to a minute
+                // over an rsID); say that nothing was lost by not waiting.
+                if (LookupProgress.stateOf('recoder') === 'running') {
+                    LookupProgress.step('recoder', 'warn', 'still answering — not needed: the variant was resolved without it');
+                }
                 LookupProgress.finish('ok', 'Variant resolved');
                 // The panel header now carries the outcome, so the legacy status
                 // line below it would just repeat "Annotation retrieved".
@@ -8225,6 +8357,26 @@ const initVariantSearchUi = () => {
                     content.appendChild(codonNote);
                 } else {
                     content.appendChild(makeLine('g.', gVariant));
+                    if (rsidAlleles.length > 1) {
+                        // An rsID with several alleles does not say which one is
+                        // meant. The best documented one is shown; that is a choice
+                        // made for the user, so it is stated, with the others.
+                        const others = rsidAlleles.slice(1);
+                        const rsNote = document.createElement('span');
+                        rsNote.className = 'rsid-alleles-note';
+                        rsNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                        rsNote.appendChild(document.createTextNode(
+                            `${query} names ${rsidAlleles.length} alleles. This is the best documented one; the other${others.length === 1 ? ' is' : 's are'} `));
+                        others.forEach((id, i) => {
+                            if (i) rsNote.appendChild(document.createTextNode(', '));
+                            const link = document.createElement('a');
+                            link.setAttribute('href', `?variant=${encodeURIComponent(id)}`);
+                            link.textContent = id;
+                            rsNote.appendChild(link);
+                        });
+                        rsNote.appendChild(document.createTextNode('.'));
+                        content.appendChild(rsNote);
+                    }
                 }
                 // VCF-style CHROM-POS-REF-ALT (GRCh37) — the form gnomAD, SpliceAI and
                 // most VCF-derived tools index by, and the one to paste into them.
@@ -10688,7 +10840,8 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         getClinvarEffectiveClassification, getPathogenicityColor,
         mapVariantToResidueSpan,
         // Allele identity and transcript-bound annotations
-        hitMatchesVariantQuery, selectMyVariantHit, queryMyVariantById,
+        hitMatchesVariantQuery, selectMyVariantHit, rankMyVariantHits, rankRsidAlleles, queryMyVariantById,
+        settledWithin,
         selectRecoderAlleles, recoderTranscriptsForGenomic, assertResolvedVariantIdentity, fetchMyVariant,
         transcriptsFromRecoderAllele, transcriptsFromVep, buildTranscriptDisplay,
         maneSelectAccessions, markManeTranscripts,
