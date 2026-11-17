@@ -246,6 +246,26 @@ allele being looked up — and every consumer sees the one spelling: the VCF lin
 both gnomAD halves, SpliceAI and the AI review. What MyVariant has is kept in the
 raw JSON as `_vcf_as_filed`.
 
+**...and whichever way a pasted row spells them.** A row's own alleles were the
+one source that fix did not reach: they were passed on as typed, and not every
+row is left-aligned.
+
+| Row | was sent to gnomAD and SpliceAI as | now |
+| --- | --- | --- |
+| `7 117199645 CFTR TCTT T` (F508del) | `7-117199645-TCTT-T` — "Not found" in gnomAD v4.1 | `7-117199644-ATCT-A` |
+| `1 115258748 C CACC` (NRAS codon 12 duplication) | `1-115258748-C-CACC` | `1-115258741-A-ACAC` |
+
+The variant itself was resolved correctly either way (ClinVar 7105, rs113993960);
+it was the frequency lookup that came back empty for an allele gnomAD holds
+18,037 times. An insertion or deletion in a row is now left-aligned against the
+reference (`leftAlignedRowAlleles`) — only when the row's REF is what the
+reference holds there — and stripped of shared leading bases beyond the one that
+anchors it (`CATCT > CA` is `ATCT > A`). The reference is the window the lookup
+has already read around the indel, so it costs no request. The Variant card
+shows the left-aligned alleles with *(left-aligned)*, the row as entered is in
+the line's tooltip, and without the reference the row is passed on as typed, as
+before. A substitution has one spelling and is left alone.
+
 See `tests/sibling-records.test.js`.
 
 ### One allele, one protein name

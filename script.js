@@ -1175,20 +1175,86 @@ const MAX_VCF_ALLELE_SPAN = 1000;
 // Padding fetched on each side of the variant so left-alignment has room to shift.
 const VCF_NORMALIZATION_PAD = 60;
 
+/*
+ * A pasted row's insertion or deletion in the spelling VCF-derived resources
+ * hold it under: { pos, ref, alt }, or null when it is that spelling already,
+ * is not an indel, or the reference cannot say.
+ *
+ * A row's alleles were passed on as typed, and not every row is left-aligned.
+ * CFTR F508del pasted as "7 117199645 CFTR TCTT T" resolved to the right
+ * variant (ClinVar 7105, rs113993960) and was then put to gnomAD and SpliceAI
+ * as 7-117199645-TCTT-T — which gnomAD v4.1 answers "Not found": it holds the
+ * variant as 7-117199644-ATCT-A, 18,037 alleles. The same was fixed earlier
+ * for alleles taken from a MyVariant record (leftAlignedVcfBlock); this is the
+ * one source that fix did not reach.
+ *
+ * Left-aligned, and with no more shared leading bases than the one that
+ * anchors it ("CATCT > CA" is "ATCT > A", one base along).
+ *
+ * `window` — { chrom, start, end } — names a stretch of reference to read
+ * instead of the 60 bases either side: the lookup has one in hand around an
+ * indel (gatherAlleleRecords), and reading that one costs no request.
+ */
+async function leftAlignedRowAlleles(chrom, pos, ref, alt, fetchReference = fetchGrch37ReferenceSequence, window = null) {
+    const start = Number(pos);
+    const r = String(ref || '').toUpperCase();
+    const a = String(alt || '').toUpperCase();
+    if (!Number.isInteger(start) || r.length === a.length || !/^[ACGT]+$/.test(r) || !/^[ACGT]+$/.test(a)) return null;
+    if (Math.max(r.length, a.length) > MAX_VCF_ALLELE_SPAN) return null;
+    // (The window offered has to hold the row, with a base to spare either side.)
+    const holdsRow = window && window.start < start && window.end > start + r.length;
+    const windowStart = holdsRow ? window.start : Math.max(1, start - VCF_NORMALIZATION_PAD);
+    const windowEnd = holdsRow ? window.end : start + r.length + VCF_NORMALIZATION_PAD;
+    let seq = null;
+    try {
+        seq = await fetchReference(holdsRow ? window.chrom : chrom, windowStart, windowEnd);
+    } catch (err) {
+        console.warn('Reference sequence unavailable for a row\'s alleles', err);
+    }
+    // The row's REF has to be what the reference holds there: sliding other
+    // bases along it would mean nothing.
+    if (!seq || String(seq).slice(start - windowStart, start - windowStart + r.length).toUpperCase() !== r) return null;
+    const shifted = leftNormalizeVcfAlleles(start, r, a, windowStart, String(seq).toUpperCase());
+    let at = Number(shifted.pos);
+    let shiftedRef = shifted.ref;
+    let shiftedAlt = shifted.alt;
+    while (shiftedRef.length > 1 && shiftedAlt.length > 1 && shiftedRef[0] === shiftedAlt[0]) {
+        shiftedRef = shiftedRef.slice(1);
+        shiftedAlt = shiftedAlt.slice(1);
+        at += 1;
+    }
+    if (at === start && shiftedRef === r && shiftedAlt === a) return null;
+    return { pos: String(at), ref: shiftedRef, alt: shiftedAlt };
+}
+
 // Resolve GRCh37 VCF-style alleles for the queried variant.
 //
 // Order of preference:
 //   1. alleles already present in the tuple (raw token input, or a substitution)
+//      — an indel among them left-aligned (leftAlignedRowAlleles)
 //   2. MyVariant.info's `vcf` block, when the variant is indexed there
 //   3. the reference sequence, for indels that carry no alleles in their notation
 //
 // Returns { chrom, pos, ref, alt, source } or null. Never throws.
-async function resolveVcfAlleles(rawInput, gVariant, annotation) {
+// `fetchReference` — the lookup's own reader, which remembers what it has read.
+async function resolveVcfAlleles(rawInput, gVariant, annotation, fetchReference = null) {
     const tuple = buildVariantCoordinateTuple(rawInput, gVariant);
     if (!tuple || !tuple.chrom) return null;
     const chrom = tuple.chrom.replace(/^chr/i, '');
     if (tuple.ref && tuple.alt && tuple.ref !== '-' && tuple.alt !== '-') {
-        return { chrom, pos: String(tuple.pos), ref: tuple.ref, alt: tuple.alt, source: 'notation' };
+        const typed = { chrom, pos: String(tuple.pos), ref: tuple.ref, alt: tuple.alt, source: 'notation' };
+        // The window the lookup has read around this indel for its other
+        // records (gatherAlleleRecords asks for exactly this one).
+        const indel = fetchReference ? parseGenomicHgvs(gVariant) : null;
+        const inHand = indel && ['ins', 'dup', 'del'].includes(indel.type) && indel.end - indel.start <= MAX_SIBLING_EVENT
+            ? { chrom: indel.chrom, start: Math.max(1, indel.start - SIBLING_REFERENCE_PAD), end: indel.end + SIBLING_REFERENCE_PAD }
+            : null;
+        const leftAligned = await leftAlignedRowAlleles(chrom, tuple.pos, tuple.ref, tuple.alt,
+            (inHand && fetchReference) || undefined, inHand).catch(() => null);
+        // (`asTyped`: the row as it was pasted, for the line that shows the other.)
+        return leftAligned
+            ? { chrom, ...leftAligned, source: 'reference', asTyped: `${chrom}-${typed.pos}-${typed.ref}-${typed.alt}` }
+            : typed;
     }
     const vcfData = annotation && annotation.vcf;
     const vcfRef = vcfData && String(vcfData.ref || '').toUpperCase();
@@ -10922,7 +10988,7 @@ const initVariantSearchUi = () => {
             let vcfAllelesPromise = null;
             const getResolvedVcfAlleles = () => {
                 if (!vcfAllelesPromise) {
-                    vcfAllelesPromise = resolveVcfAlleles(rawInput, gVariant, annotation).catch(() => null);
+                    vcfAllelesPromise = resolveVcfAlleles(rawInput, gVariant, annotation, lookupReference).catch(() => null);
                 }
                 return vcfAllelesPromise;
             };
@@ -11022,6 +11088,15 @@ const initVariantSearchUi = () => {
                 });
                 detailsEl.appendChild(table);
                 detailsContainer.appendChild(detailsEl);
+            });
+            // (Its gnomAD link is built from the row as typed; a row that was not
+            // left-aligned gets the page gnomAD has, as the card's link does.)
+            getResolvedVcfAlleles().then((alleles) => {
+                if (!alleles || !alleles.asTyped || !isCurrentSearch()) return;
+                const upgraded = buildGnomadVariantUrl(rawInput, gVariant, annotation && annotation._id, annotation && annotation.vcf, alleles);
+                for (const link of detailsContainer.querySelectorAll('a')) {
+                    if (upgraded && /gnomad\.broadinstitute\.org\/variant\//.test(link.getAttribute('href') || '')) link.setAttribute('href', upgraded);
+                }
             });
 
             // Build and display cards summarising key annotations. Bail if a newer
@@ -11261,10 +11336,12 @@ const initVariantSearchUi = () => {
                     // Only flag the shift when the position actually moved — otherwise the
                     // caveat reads as a warning about a variant that has nothing to warn about.
                     const gStart = parseGenomicHgvs(gVariant)?.start;
-                    if (alleles.source === 'reference' && gStart !== undefined && Number(alleles.pos) !== gStart) {
+                    if (alleles.source === 'reference' && (alleles.asTyped || (gStart !== undefined && Number(alleles.pos) !== gStart))) {
                         // Explain the coordinate mismatch a reader would otherwise take
                         // for a bug: HGVS shifts indels 3′, VCF left-aligns them.
-                        vcfLine.title = 'Left-aligned against the GRCh37 reference. HGVS places an indel at its 3′-most position while VCF (and gnomAD) use the 5′-most one, so this position can differ from the g. notation above.';
+                        vcfLine.title = 'Left-aligned against the GRCh37 reference. HGVS places an indel at its 3′-most position while VCF (and gnomAD) use the 5′-most one, so this position can differ from the g. notation above.'
+                            // A row that was not left-aligned is not shown as pasted.
+                            + (alleles.asTyped ? ` The row as entered: ${alleles.asTyped}.` : '');
                         const note = document.createElement('span');
                         note.style.cssText = 'font-size:0.75rem;color:#6b7280;';
                         note.textContent = '(left-aligned)';
@@ -13435,7 +13512,9 @@ const initVariantSearchUi = () => {
                 // the reference so the SpliceAI query — and the deep link — work for
                 // anything more complex than a substitution.
                 const spliceReady = getResolvedVcfAlleles().then((alleles) => {
-                    if (spliceApiVariant || !alleles) {
+                    // (A row that was not left-aligned is asked about left-aligned,
+                    // as it is everywhere else: see leftAlignedRowAlleles.)
+                    if ((spliceApiVariant && !(alleles && alleles.asTyped)) || !alleles) {
                         if (!spliceApiVariant && !spliceVariantText) {
                             spliceHint.textContent = 'No chr/pos/ref/alt tuple could be resolved; opening SpliceAI home page.';
                         }
@@ -13768,7 +13847,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, codonFromResidueRecords,
-        recoderAlleleNamesProtein, gnomadMitochondrialGroups, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
+        recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,
