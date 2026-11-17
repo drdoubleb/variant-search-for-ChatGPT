@@ -106,6 +106,9 @@ const hit = (id, genename, aa, transcriptid) => ({ _id: id, dbnsfp: { genename, 
     const val607 = residues['PDGFRA V 367'].hits.find(record => record._id === 'chr4:g.55143588T>C');
     assert.deepEqual([val607.dbnsfp.genename, val607.dbnsfp.aa.pos], [['AC058822.1', 'PDGFRA'], [367, 607]]);
     assert.deepEqual(listed('PDGFRA V 367', 'A'), { alleles: ['chr4:g.55133887T>C'], residueKnown: true });
+    // (The gene is read off the record too: that transcript would not count
+    // even if it were listed among PDGFRA's.)
+    assert.deepEqual(listed('PDGFRA V 367', 'A', ['ENST00000257290', 'ENST00000507166']), { alleles: ['chr4:g.55133887T>C'], residueKnown: true });
     // UGT1A1: Lys520's codon is Lys521 of UGT1A3, 4 and 5, which share the
     // exon. "UGT1A1 K521Q" came out as p.Lys520Gln.
     const lys520 = residues['UGT1A1 K 521'].hits.find(record => record._id === 'chr2:g.234681161A>C');
@@ -170,11 +173,13 @@ const hit = (id, genename, aa, transcriptid) => ({ _id: id, dbnsfp: { genename, 
     for (const [label, records] of [
         ['base on neither strand', [gene5('chr1:g.1000G>C', { alt: 'H', codonpos: 1 })]],
         ['codon of another amino acid', [hit('chr1:g.1000T>C', 'GENE', { alt: 'H', codonpos: 1, pos: 5, ref: 'Y', refcodon: 'TGC' }, one)]],
+        // (TGC is a cysteine, and one base makes it an arginine: not "Y5R".)
+        ['codon of another amino acid, and a change of it asked for', [hit('chr1:g.1000T>G', 'GENE', { alt: 'D', codonpos: 1, pos: 5, ref: 'Y', refcodon: 'TGC' }, one)]],
         ['a listed change the code does not give', [gene5('chr1:g.1000T>C', { alt: 'W', codonpos: 1 })]],
         ['no codon given', [hit('chr1:g.1000T>C', 'GENE', { alt: 'H', pos: 5, ref: 'Y' }, one)]],
         ['one base at two places', [gene5('chr1:g.1000T>C', { alt: 'H', codonpos: 1 }), gene5('chr1:g.1900T>C', { alt: 'H', codonpos: 1 })]]
     ]) {
-        const alt = label === 'a listed change the code does not give' ? 'W' : 'H';
+        const alt = label === 'a listed change the code does not give' ? 'W' : (/asked for$/.test(label) ? 'R' : 'H');
         assert.equal(h.proteinSubstitutionAlleles(records, 'GENE', { ref: 'Y', pos: 5, alt }, one), null, label);
     }
 
@@ -238,6 +243,39 @@ const hit = (id, genename, aa, transcriptid) => ({ _id: id, dbnsfp: { genename, 
         assert.equal(h.proteinResidueQuery(gene, change), '', JSON.stringify([gene, change]));
     }
 
+    // A list MyVariant cut short is no list. MECP2's residue 306 is two codons;
+    // with the records of one of them left out, "no single base makes Arg306 a
+    // stop" would follow — and one does, in the codon that was cut.
+    {
+        const whole = residues['MECP2 R 306'];
+        const oneCodon = whole.hits.filter(record => /g\.15329636\d/.test(record._id));
+        assert(oneCodon.length > 0 && oneCodon.length < whole.hits.length);
+        assert.deepEqual(h.proteinSubstitutionAlleles(oneCodon, 'MECP2', { ref: 'R', pos: 306, alt: '*' }, STANDARD.MECP2).alleles, [],
+            'what the cut list would have said');
+        const realFetch = globalThis.fetch;
+        const asked = [];
+        const answering = (body, status = 200) => { globalThis.fetch = async (address) => { asked.push(String(address)); return new Response(JSON.stringify(body), { status }); }; };
+        const standard = async () => STANDARD.MECP2;
+        try {
+            answering({ total: whole.total, hits: oneCodon });
+            assert.equal(await h.fetchProteinSubstitutionAlleles('MECP2', { ref: 'R', pos: 306, alt: '*' }, standard), null);
+            answering(whole);
+            assert.deepEqual((await h.fetchProteinSubstitutionAlleles('MECP2', { ref: 'R', pos: 306, alt: '*' }, standard)).alleles, ['chrX:g.153296399G>A']);
+            assert.match(decodeURIComponent(asked[asked.length - 1]), /^https:\/\/myvariant\.info\/v1\/query\?q=dbnsfp\.genename:MECP2 AND dbnsfp\.aa\.ref:R AND dbnsfp\.aa\.pos:306&fields=.*dbnsfp\.aa\.refcodon.*&size=60$/);
+            // Nothing is concluded when MyVariant fails, or when nobody says which transcripts count.
+            answering({ error: 'down' }, 503);
+            assert.equal(await h.fetchProteinSubstitutionAlleles('MECP2', { ref: 'R', pos: 306, alt: '*' }, standard), null);
+            answering(whole);
+            assert.equal(await h.fetchProteinSubstitutionAlleles('MECP2', { ref: 'R', pos: 306, alt: '*' }, async () => null), null);
+            // ...and a mitochondrial gene is not asked about at all.
+            const before = asked.length;
+            assert.equal(await h.fetchProteinSubstitutionAlleles('MT-ND4', { ref: 'R', pos: 340, alt: 'H' }, standard), null);
+            assert.equal(asked.length, before);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+    }
+
     // Which transcripts a gene's names are counted on: NCBI's list, by
     // Ensembl's names. null when it cannot say — nothing is then concluded.
     assert.deepEqual(await h.fetchStandardEnsemblTranscripts('KRAS', async () => ({ ensembl: STANDARD.KRAS })), STANDARD.KRAS);
@@ -266,6 +304,18 @@ const hit = (id, genename, aa, transcriptid) => ({ _id: id, dbnsfp: { genename, 
     assert.match(h.recoderPaneText(placedByNcbi, null), /^Ensembl's recoder had not answered\. The variant was placed by NCBI Variation Services:\n\[/);
     assert.equal(h.recoderPaneText(null, null), '');
     assert.equal(h.recoderPaneText(null, placedByNcbi), '');
+
+    // Which alleles MyVariant could not be asked about: those none of whose
+    // spellings came with a record, one spelling of each.
+    const spelt = ['a1', 'a1b', 'b1', 'c1', 'c1b'];
+    const alleleOf = id => id[0];
+    assert.deepEqual(h.allelesNotAskedAbout(spelt, [{}, null, null, null, null], ['b1'], alleleOf), ['b1']);
+    assert.deepEqual(h.allelesNotAskedAbout(spelt, [{}, null, null, null, null], ['a1b', 'c1b', 'c1'], alleleOf), ['c1b'],
+        'an allele on record under another spelling was asked about; two failed spellings are one allele');
+    assert.deepEqual(h.allelesNotAskedAbout(spelt, [null, null, null, null, null], ['c1', 'b1'], alleleOf), ['b1', 'c1'], 'in one order');
+    assert.deepEqual(h.allelesNotAskedAbout(['x', 'y'], [{}, null], ['y']), ['y'], 'each spelling its own allele, where nothing says otherwise');
+    assert.deepEqual(h.allelesNotAskedAbout(spelt, [{}, {}, {}, {}, {}], [], alleleOf), []);
+    assert.deepEqual(h.allelesNotAskedAbout(null, null, null), []);
     console.log('protein-substitution unit checks passed');
 }
 
@@ -532,11 +582,13 @@ const unwaited = (label, lookup) => Promise.race([lookup, new Promise((resolve, 
     // records, and the name is Ensembl's to resolve, as before.
     for (const [label, options] of [
         ['NCBI not answering', { without: [/datasets\/v2\/gene\/symbol/] }],
+        // (Its answer is not waited for longer than MyVariant's own.)
+        ['NCBI\'s answer never completing', { route: (url, key) => (/datasets\/v2\/gene\/symbol/.test(key) ? never : undefined) }],
         ['NCBI naming no transcript by Ensembl\'s id', { route: (url, key, respond) => (/datasets\/v2\/gene\/symbol\/KRAS\//.test(key)
             ? respond({ reports: [{ product: { symbol: 'KRAS', transcripts: [{ accession_version: 'NM_004985.5', select_category: 'MANE_SELECT' }] } }] })
             : undefined) }]
     ]) {
-        const page = await runLookup(cassettes.krasY64Stop, options);
+        const page = await unwaited(`KRAS Y64*, ${label}`, runLookup(cassettes.krasY64Stop, options));
         assertResolved(assert, page, `KRAS Y64*, ${label}`);
         assert.match(page.variant, /g\.: chr12:g\.25380266G>C/, label);
         assert.match(page.panel, /Resolve nomenclature · Ensembl\s*\d+ transcripts/, `${label}: Ensembl was waited for`);
@@ -662,6 +714,27 @@ const unwaited = (label, lookup) => Promise.race([lookup, new Promise((resolve, 
         else assert.doesNotMatch(page.panel, /could not be asked for a record/, label);
     }
     console.log('ok protein substitution: an allele MyVariant could not be asked about is named, and one it listed is shown without its record');
+}
+
+// 13. What the AI review is given as Ensembl's recoder result is Ensembl's:
+//     nothing where it was not waited for (it was MyVariant's list of
+//     alleles, in the shape of an answer), its answer where it came.
+{
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const recorded = cassettes.krasY64Stop.responses['grch37.rest.ensembl.org/variant_recoder/human/KRAS:p.Tyr64Ter?content-type=application/json'].body;
+    for (const [label, route, expected] of [['Ensembl not answering', recoderSilent, null], ['Ensembl answering', undefined, recorded]]) {
+        const sent = [];
+        const page = await unwaited(`KRAS Y64*, ${label}`, runLookup(cassettes.krasY64Stop, { ...(route ? { route } : {}),
+            backend: { 'ai-review': (url, options) => { sent.push(JSON.parse(options.body)); return { review: {} }; } } }));
+        assertResolved(assert, page, `KRAS Y64*, ${label}`);
+        const run = [...page.document.querySelectorAll('button')].find(button => button.textContent === 'Run AI review');
+        run.dispatchEvent(new page.document.defaultView.Event('click'));
+        for (let i = 0; i < 500 && !sent.length; i++) await wait(10);
+        assert.equal(sent.length, 1, `${label}: the review was asked for`);
+        assert.deepEqual(sent[0].context.ensembl_recoder, expected, label);
+        assert.equal(sent[0].context.normalized_genomic_variant, 'chr12:g.25380266G>C', label);
+    }
+    console.log('ok protein substitution: the AI review is not given MyVariant\'s list as Ensembl\'s answer');
 }
 
 console.log('Protein substitution allele tests passed');

@@ -1474,42 +1474,107 @@ Measured over 30 names on one afternoon: 2 to 23 s where it answered, and for
 with no allele on a bad one.
 
 MyVariant carries dbNSFP, which lists every non-synonymous single-base change
-in the genome together with the residue it changes on each transcript. Asked
-for a residue — gene, reference amino acid, position — it returns every such
-change there in 0.1 to 0.6 s (`proteinSubstitutionAlleles`), and what it
-returns are records. For the names Ensembl did answer, the single-base alleles
-were the same in every case but two: `GNAS R201H` and `CDKN2A P114L`, where
-Ensembl's older annotation adds the same-named residue of a minor transcript.
-(Ensembl also adds, for a gene whose transcripts number residues differently,
-changes of several bases on the other transcript; those have no record and
-were never shown.)
+in the genome — with the residue it changes on each transcript, the codon it
+lies in and which base of that codon it is. Asked for a residue (gene,
+reference amino acid, position) it returns every such change there in 0.1 to
+0.6 s. Three things are read from those records (`proteinSubstitutionAlleles`):
+
+1. **Which codon the name means.** A record counts where the residue has that
+   number on a transcript the name may be counted on: MANE Select or MANE Plus
+   Clinical of the gene named (RefSeq Select where the gene has no MANE Select,
+   as CDKN2A) — NCBI's list, the one coding names are read by, here by Ensembl's
+   ids (`fetchStandardEnsemblTranscripts`). MECP2's T158M and R306C are on its
+   Plus Clinical transcript.
+2. **Where its bases are.** Each such record places one base of the codon: its
+   own position, which base it changes, and — its reference base against the
+   codon's — the strand.
+3. **Which changes give the amino acid asked for.** That follows from the
+   reference codon and the genetic code, not from what happens to be listed.
+
+The first version took the alleles from every record MyVariant returned — every
+record in which *some* transcript has the residue under the number typed. An
+independent review found what that does, and that main had been right in each
+case:
+
+| Input | was shown as | the number typed is |
+| --- | --- | --- |
+| `TP53 R202X` | p.Arg213Ter, "X read as a stop" | Arg213's on ENST00000615910, a fragment transcript. Arg202 cannot become a stop by one base: the codon, `p.Arg202Xaa` |
+| `TP53 W53G` | p.Trp146Gly, "the best documented of 2" | Trp146's on that same transcript |
+| `PDGFRA V367A` | p.Val607Ala | Val607's on a transcript of another gene the record is shared with |
+| `UGT1A1 K521Q` | p.Lys520Gln | Lys520's in UGT1A3, 4 and 5, which share the exon |
+| `MT-ND4 R340H` | `chrMT:g.11779G>A`, p.: N/A — one base off | MyVariant files dbNSFP's chrM records by another reference's positions than the rest of this page uses. Mitochondrial names are not asked of it at all |
+| `KRAS G12G` | the codon and *"No single-base change gives p.Gly12Gly"* | three do (GGC, GGA, GGG). dbNSFP holds no silent changes, so "the residue is listed and no record gives this" proved nothing |
+
+Checked afterwards against Ensembl for 50 names over 32 genes: where Ensembl
+answered (41), the single-base alleles were the same for 34. For six, Ensembl
+adds the same-numbered residue of a further transcript (`GNAS R201H` and
+`R201C`, `CDKN2A P114L`, `KIT D816V`, `HRAS G13R`, `PDGFRA V367A`) — the allele
+on the standard transcript is the one both give. One name is in no standard
+numbering (`MET Y1253D`) and is left to Ensembl, as below. (Ensembl also adds,
+for a gene whose transcripts number residues differently, changes of several
+bases on the other transcript; those have no record and were never shown.)
 
 So a substitution named on a gene symbol, which the name search has not found,
 is put to MyVariant first:
 
-| MyVariant says | then |
+| The records say | then |
 | --- | --- |
 | these single-base changes give it | they are the candidates — the same ones whatever Ensembl is doing — and Ensembl is not waited for. `KRAS Y64*`: 3 s |
-| the residue is there, and no single-base change gives it (`p.Gly12Ter` takes two) | Ensembl may still name the larger changes, and has until its first attempt is over (12 s). After that the codon is shown, with the reason: *No single-base change gives p.Gly12Ter, and which larger changes do could not be looked up* |
+| the residue is there, and by the genetic code no single-base change gives it (`p.Gly12Ter` takes two) | Ensembl may still name the larger changes, and has until its first attempt is over (12 s). After that the codon is shown, with the reason: *No single-base change gives p.Gly12Ter, and which larger changes do could not be looked up* |
 | the same, where "X" was typed | that already settles how X is read: any amino acid. Ensembl is not waited for at all. `KRAS G12X`: 3 s, where it was 11 to 55 |
-| it has no such residue under that number, or does not answer | Ensembl, as before (`TP53 R72P`: the reference genome has the proline) |
+| nothing that can be relied on: the residue has no such number on a standard transcript (`TP53 R72P`: the reference genome has the proline); a change that gives the amino acid lies at a base no record places (every silent change of a third base: `KRAS G12G`); NCBI did not say which transcripts are the gene's standard ones; MyVariant's list was cut short, or it did not answer; the gene is mitochondrial | Ensembl, as before |
 
 A variant that lies in two reading frames comes from MyVariant as two
 amino-acid changes — MECP2's R306C is A301V in the other — and the residue has
 to be right within one of them: MyVariant's search matches across frames, and
-would return that record for "R301C" as well.
+would return that record for "R301C" as well. Such a record names the
+transcripts of its first change only; for the other it places a base of a codon
+it fits (same strand, same reference codon, next to a base already placed), and
+is otherwise left out.
 
-The same records place the codon when Ensembl cannot. Each says which base of
-the codon it changes, so two of them at different bases give the codon's span
-and its strand (`codonFromResidueRecords`): KRAS Gly12 has base 1 at 25398285
-and base 2 at 25398284, hence 25398283–25398285, read backwards — the span
-Ensembl's translation map gives. `KRAS G12K`, a change of two bases, ended in
-*"Could not resolve … to a genomic position"* on a day Ensembl answered
-neither for the alleles nor for the codon; it is now the codon view, with no
-request to Ensembl needed. Only where the records agree on one codon: a number
-that is two codons (TP53's residue 125 on two of its transcripts, MECP2's 306)
-or a codon split by an intron is not guessed at. See
-`tests/protein-substitution-alleles.test.js`.
+The same records place the codon when Ensembl cannot — **as much of it as they
+place**. KRAS Gly12 (GGT, read backwards) has base 1 at 25398285 and base 2 at
+25398284; every change of its third base is silent, so no record is at that
+base, and it is not assumed to follow the second. PTEN's Leu70 is why: `CT|G`
+with an intron after its second base, where the first version gave
+`chr10:g.89685313_89685315` — the last of those being the intron's first base.
+With Ensembl down, `KRAS G12K` (a change of two bases, which used to end in
+*"Could not resolve … to a genomic position"*) is the codon view with *Codon
+region (hg19): chr12:g.25398284_25398285* and, on the card, *The region is the 2
+bases of the codon that MyVariant's records place: Ensembl, which maps the whole
+codon, did not answer.* A codon whose three bases all have records is shown
+whole; a number that is two codons (MECP2's 306 on its two transcripts) or a
+codon an intron splits is no span at all. Whenever Ensembl does answer, the
+codon is Ensembl's.
+
+**When MyVariant answers for some of what it is asked.** A 404 says "no
+record"; a failed request says nothing, and the page used to treat the two
+alike wherever one of several requests failed:
+
+- `KRAS Y64*` is two alleles, both on record. With the request for one record
+  failing, the other was shown as *the* variant — c.192C>A or c.192C>G according
+  to which request it was. It is still shown, being on record, and the card
+  says *p.Tyr64Ter can be 2 nucleotide changes. This one is on record; MyVariant
+  could not be asked about the other, which may be better documented:* with the
+  allele as a link.
+- `KRAS Q61X`: MyVariant lists the one change that makes Gln61 a stop, then
+  does not answer for its record. The allele is known all the same and is shown
+  (VEP supplies the transcripts), with *could not be asked for a record of this
+  allele — it is shown without one* on the panel. It used to come out as the
+  codon and *"Which nucleotide change a stop here would be could not be looked
+  up"*.
+
+Three smaller things from the same review. The same name looked up again
+waited out Ensembl — 49 s for a second `KRAS Y64*` on a day Ensembl was silent
+— because the first lookup's answer, arriving late, was still on the page and
+was taken for the second one's own; the recoder's last answer now starts each
+lookup empty. An Ensembl protein id typed without its version
+(`ENSP00000256078:p.Gly12Ter`) reads like a gene symbol and was shown as the
+gene. And *Show Ensembl recoder result*, like the AI review's `ensembl_recoder`
+field, held MyVariant's list of alleles in the shape of an Ensembl answer; they
+hold Ensembl's own answer, or a line saying what stood in for it.
+
+See `tests/protein-substitution-alleles.test.js`.
 
 What *is* determined by protein notation is the codon. Rather than failing the
 whole lookup, `resolveProteinCodonRegion` maps the residue range to GRCh37

@@ -8296,6 +8296,22 @@ function recoderShapedFromAlleles(query, alleles) {
     return data;
 }
 
+/*
+ * The alleles of a name that MyVariant could not be asked about, one spelling
+ * of each. `candidates` are the spellings asked about, `records` what came for
+ * each (null: none), `failed` the spellings whose request failed, `alleleOf`
+ * which allele a spelling is of. An allele one of whose spellings came with a
+ * record has been asked about.
+ */
+function allelesNotAskedAbout(candidates, records, failed, alleleOf = id => id) {
+    const withRecord = new Set((candidates || []).filter((candidate, i) => records && records[i]).map(alleleOf));
+    const unasked = new Map();
+    for (const id of failed || []) {
+        if (!withRecord.has(alleleOf(id)) && !unasked.has(alleleOf(id))) unasked.set(alleleOf(id), id);
+    }
+    return Array.from(unasked.values()).sort();
+}
+
 // What the page shows and passes on as "Ensembl's recoder result": Ensembl's
 // own answer, or — where something stands in its place — a line saying whose
 // it is. The stand-ins have the answer's shape, and were shown under Ensembl's
@@ -10404,11 +10420,15 @@ const initVariantSearchUi = () => {
                             if (!perAllele.has(allele)) perAllele.set(allele, entry);
                         }
                         let chosen = fitting[0];
-                        if (isProteinVariant && !/c\./i.test(query) && perAllele.size > 1) {
-                            const { ranked, tied } = rankAllelesOnRecord([...perAllele.values()]);
-                            chosen = ranked[0];
-                            allelesOnRecord = { others: ranked.slice(1).map(entry => entry.id), tied };
-                            LookupProgress.note('recoder', `${ranked.length} alleles on record for this protein change — showing `
+                        const proteinLevel = isProteinVariant && !/c\./i.test(query);
+                        let others = [];
+                        let tied = false;
+                        if (proteinLevel && perAllele.size > 1) {
+                            const ranking = rankAllelesOnRecord([...perAllele.values()]);
+                            chosen = ranking.ranked[0];
+                            others = ranking.ranked.slice(1).map(entry => entry.id);
+                            tied = ranking.tied;
+                            LookupProgress.note('recoder', `${ranking.ranked.length} alleles on record for this protein change — showing `
                                 + `${tied ? 'one of them' : 'the best documented'}, ${chosen.id}`);
                         }
                         selectedAnn = chosen.record;
@@ -10422,19 +10442,15 @@ const initVariantSearchUi = () => {
                          * but the card names the alleles nobody could be asked
                          * about. (Found in review.)
                          */
-                        if (isProteinVariant && !/c\./i.test(query) && candidatesUnasked.length) {
-                            const alleleOf = id => (candidateAlleleIndex.has(id) ? candidateAlleleIndex.get(id) : id);
-                            const withRecord = new Set(uniqueCandidates.filter((cand, i) => candidateAnns[i]).map(alleleOf));
-                            const unasked = new Map();
-                            for (const id of candidatesUnasked) {
-                                if (!withRecord.has(alleleOf(id)) && !unasked.has(alleleOf(id))) unasked.set(alleleOf(id), id);
-                            }
-                            if (unasked.size) {
-                                allelesOnRecord = { ...(allelesOnRecord || { others: [], tied: false }), unasked: Array.from(unasked.values()).sort() };
-                                LookupProgress.note('recoder', `MyVariant could not be asked about ${unasked.size === 1 ? 'another allele' : `${unasked.size} other alleles`} `
-                                    + `that give${unasked.size === 1 ? 's' : ''} this protein change — showing ${chosen.id}, which is on record`);
-                            }
+                        const unasked = proteinLevel && candidatesUnasked.length
+                            ? allelesNotAskedAbout(uniqueCandidates, candidateAnns, candidatesUnasked,
+                                id => (candidateAlleleIndex.has(id) ? candidateAlleleIndex.get(id) : id))
+                            : [];
+                        if (unasked.length) {
+                            LookupProgress.note('recoder', `MyVariant could not be asked about ${unasked.length === 1 ? 'another allele' : `${unasked.length} other alleles`} `
+                                + `that give${unasked.length === 1 ? 's' : ''} this protein change — showing ${chosen.id}, which is on record`);
                         }
+                        if (others.length || unasked.length) allelesOnRecord = { others, tied, unasked };
                     }
                     // The recoder can resolve an exact HGVS expression even when
                     // MyVariant omits that transcript's annotation. Its mapped
@@ -14241,7 +14257,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
-        ensemblRecoderAnswer, recoderPaneText,
+        ensemblRecoderAnswer, recoderPaneText, allelesNotAskedAbout, fetchProteinSubstitutionAlleles,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,
