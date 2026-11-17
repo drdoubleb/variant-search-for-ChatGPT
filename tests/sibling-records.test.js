@@ -445,6 +445,17 @@ const rawJson = page => JSON.parse(page.document.getElementById('rawOutput').tex
     assert.match(page.variant, /Transcript: NM_000059\.3c\.: c\.1084_1085insCA/);
     assert.doesNotMatch(page.variant, /Transcript: ENST/);
     assert.match(page.panel, /Consequences · Ensembl VEPRefSeq transcripts unavailable — the record's own are shown/);
+    // RefSeq answering that it has no transcript there is not that outage: then
+    // Ensembl's rows are what there is to show.
+    const noRefSeq = await runLookup(cassettes.brca2Neighbour, {
+        route: (url, key, respond) => {
+            if (!/\/vep\/human\/hgvs\//.test(key)) return undefined;
+            return /refseq=1/.test(key) ? respond([{ ...ensemblSet[0], transcript_consequences: [] }]) : respond(ensemblSet);
+        }
+    });
+    assertResolved(assert, noRefSeq, 'BRCA2 c.1084_1085insCA, no RefSeq transcript');
+    assert.match(noRefSeq.variant, /Transcript: ENST00000544455\.1c\.: c\.1084_1085insCA/);
+    assert.match(noRefSeq.panel, /●Consequences · Ensembl VEP3 transcripts/);
     // Where the record has no transcript rows of its own, Ensembl's are the answer.
     const dbsnpOnly = await runLookup(cassettes.rs80357906, {
         route: (url, key, respond) => (/\/vep\/human\/hgvs\//.test(key) && /refseq=1/.test(key)

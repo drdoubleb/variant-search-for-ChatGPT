@@ -1716,7 +1716,8 @@ function leftAlignedVcfBlock(vcf, genomic, windowStart, seq) {
  * With the reference in hand, the record's vcf block is also re-anchored to the
  * left-aligned spelling when it is filed under another (leftAlignedVcfBlock):
  * `vcfRespelled` is then true and the block as MyVariant has it is kept in
- * `_vcf_as_filed`. That happens whatever the status, short of 'unverified'.
+ * `_vcf_as_filed`. That happens whatever became of the other ids — also when
+ * MyVariant could not be asked about them — but not without the reference.
  */
 async function gatherAlleleRecords(primary, genomic, fetchReference = fetchIdentityReference, fetchRecords = fetchMyVariantRecords) {
     const result = { record: primary, status: 'not-needed', added: {}, asked: [], detail: '' };
@@ -6521,6 +6522,9 @@ async function fetchVepHgvsHg19(variant) {
     // as gene "ATP6", transcript "ATP6.1". Ensembl's set gives the HGNC symbol
     // and a real transcript (MT-ATP6, ENST00000361899), so use that one there.
     const mitochondrial = /^MT?:/i.test(hgvs);
+    // True when the rows returned are Ensembl's only because the RefSeq request
+    // failed — as opposed to RefSeq having no transcript at this position.
+    let refseqFailed = false;
     try {
         data = await requestVep(!mitochondrial);
         const cons = (data[0] && data[0].transcript_consequences) || [];
@@ -6530,6 +6534,7 @@ async function fetchVepHgvsHg19(variant) {
     } catch (refseqErr) {
         // If the RefSeq request failed outright, fall back to the default Ensembl transcript set.
         if (mitochondrial) throw refseqErr;
+        refseqFailed = true;
         data = await requestVep(false);
     }
     // Extract transcript consequences list from the first result
@@ -6539,7 +6544,8 @@ async function fetchVepHgvsHg19(variant) {
         vepData: data,
         consequences,
         mostSevere: first.most_severe_consequence || '',
-        gVariant: buildGenomicHgvsFromVep(first)
+        gVariant: buildGenomicHgvsFromVep(first),
+        refseqFailed
     };
 }
 
@@ -9125,9 +9131,9 @@ const initVariantSearchUi = () => {
                     // one fails. Asked unprompted, that answer must not displace
                     // RefSeq rows the record already has: during an Ensembl blip
                     // "13 32906699 BRCA2 G GCA" came out on ENST00000544455.1
-                    // while the record's NM_000059.3 row went unused.
-                    const displacesRefSeq = unprompted && relevant.length > 0
-                        && relevant.every(t => /^ENS/i.test(t.transcript))
+                    // while the record's NM_000059.3 row went unused. (Where
+                    // RefSeq simply has no transcript, Ensembl's rows are the answer.)
+                    const displacesRefSeq = unprompted && vep.refseqFailed && relevant.length > 0
                         && pairedAnnotationRows.some(a => /^N[MR]_/i.test(a.transcript));
                     if (relevant.length && !displacesRefSeq) transcriptsFromRecoder = relevant;
                     if (unprompted) {
