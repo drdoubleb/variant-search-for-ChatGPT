@@ -273,7 +273,8 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
         const reading = choose([t158m, onSelect], 'c.473C>T', known);
         assert.equal(reading.accession, 'NM_001110792.2');
         assert.equal(reading.hit, onSelect);
-        assert.deepEqual(reading.alternatives, [{ accession: 'NM_004992.4', kind: 'plus', known: true }]);
+        assert.deepEqual(reading.alternatives, [{ accession: 'NM_004992.4', kind: 'plus', known: true,
+            hitId: 'chrX:g.153296806G>A', inClinvar: true }], 'with the record it rests on, and whether ClinVar has that');
     }
     // One record that is the change on both transcripts (KRAS4A/4B share their
     // numbering up to codon 150): nothing to choose between.
@@ -294,7 +295,7 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
         assert.equal(reading.hit, null);
         assert.deepEqual(reading.untried, ['NM_004992.4']);
         assert.deepEqual(reading.alternatives, [{ accession: 'NM_004992.4', kind: 'plus', known: false },
-            { accession: 'NM_001316337.2', kind: 'listed', known: true }]);
+            { accession: 'NM_001316337.2', kind: 'listed', known: true, hitId: p251l._id, inClinvar: true }]);
         assert.deepEqual(choose([], 'c.473C>T', known).alternatives, [{ accession: 'NM_004992.4', kind: 'plus', known: false }]);
         // (A record that did decide leaves the unrecorded reading unmentioned, as before.)
         assert.deepEqual(choose([t158m], 'c.473C>T', known).alternatives, [{ accession: 'NM_001110792.2', kind: 'select', known: false }]);
@@ -329,8 +330,12 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
     { text: 'MECP2 c.473C>T is read on NM_004992.4, a MANE Plus Clinical transcript of MECP2.',
         links: [{ variant: 'NM_001110792.2:c.473C>T', lead: 'If the MANE Select transcript was meant, look up' }] });
     assert.deepEqual(h.nameReadingNote({ ...typed, accession: 'NM_001110792.2', basis: select.basis,
-        alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: true }], rejected: [] }).links,
+        alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: true, inClinvar: true }], rejected: [] }).links,
     [{ variant: 'NM_004992.4:c.473C>T', lead: 'Counted on the MANE Plus Clinical transcript the same name is another variant, which ClinVar lists:' }]);
+    // ("which ClinVar lists" is said of a record ClinVar has, not of any record.)
+    assert.deepEqual(h.nameReadingNote({ ...typed, accession: 'NM_001110792.2', basis: select.basis,
+        alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: true, inClinvar: false }], rejected: [] }).links,
+    [{ variant: 'NM_004992.4:c.473C>T', lead: 'Counted on the MANE Plus Clinical transcript the same name is another variant:' }]);
     assert.deepEqual(h.nameReadingNote({ ...typed, accession: 'NM_004992.4', basis: 'a MANE Plus Clinical transcript of MECP2', alternatives: [],
         rejected: [{ accession: 'NM_001110792.2', basis: select.basis, actual: 'G', stated: 'C' }] }),
     { text: 'MECP2 c.473C>T is read on NM_004992.4, a MANE Plus Clinical transcript of MECP2: it is not a change on '
@@ -457,6 +462,8 @@ assert.equal(h.geneSymbolCodingName('NM_001304717.5:c.512T>G'), null);
 }
 
 const readingNote = page => page.document.querySelector('.name-reading-note');
+// (For "no note": the text, so that a failure prints a sentence and not the page's whole tree.)
+const readingText = page => (readingNote(page) ? readingNote(page).textContent : null);
 const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => decodeURIComponent(a.getAttribute('href')));
 
 // 9. MECP2 c.473C>T — T158M, the commonest Rett syndrome variant, in the
@@ -527,8 +534,8 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
         + '(a MANE Plus Clinical transcript of CDKN2A). If the RefSeq Select transcript was meant, look up NM_000077.6:c.3G>C.');
     assert.deepEqual(noteLinks(page), ['?variant=NM_000077.6:c.3G>C']);
     // A name ClinVar gives on MANE Select itself has nothing to add (scenario 8).
-    assert.equal(readingNote(await runLookup(cassettes.kras35)), null);
-    assert.equal(readingNote(await runLookup(cassettes.brca1Dup)), null);
+    assert.equal(readingText(await runLookup(cassettes.kras35)), null);
+    assert.equal(readingText(await runLookup(cassettes.brca1Dup)), null);
     console.log('ok gene-symbol name: a name ClinVar gives on another transcript says so');
 }
 
@@ -705,6 +712,87 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     console.log('ok gene-symbol name: a lookup that has been overtaken does not run itself again');
 }
 
+// 18b. ...nor does it write onto the page of the lookup that overtook it. The
+//      same moment, the next variant being one that asks VEP nothing ("KRAS
+//      p.Gly12Xaa" is a codon) and is still under way when the overtaken
+//      lookup's VEP request fails: that failure belongs to no step of the
+//      lookup now on the page.
+{
+    const first = cassettes.mecp2OnPlusClinical;
+    const second = cassettes.krasG12Stop;
+    const both = { input: first.input, reference: [...first.reference, ...second.reference],
+        api: { ...(first.api || {}), ...(second.api || {}) }, responses: { ...first.responses, ...second.responses } };
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let submitted = false;
+    let failed = false;
+    const page = await runLookup(both, {
+        settleMs: 400,
+        route: async (url, key, respond, options, { document }) => {
+            if (!submitted && key.includes('/vep/human/hgvs/NM_001110792.2:c.474G>C') && !key.includes('refseq=1')) {
+                submitted = true;
+                document.getElementById('variantInput').value = 'KRAS p.Gly12Xaa';
+                document.getElementById('variantForm').dispatchEvent(new document.defaultView.Event('submit', { cancelable: true }));
+                await wait(30);
+                failed = true;
+                return undefined;
+            }
+            // The second lookup is held at its first Ensembl request until the
+            // first one's VEP request has failed, and a little longer.
+            if (submitted && key.includes('/variant_recoder/human/KRAS:p.Gly12Xaa')) {
+                for (let i = 0; i < 200 && !failed; i++) await wait(2);
+                await wait(20);
+                return undefined;
+            }
+            return undefined;
+        }
+    });
+    assert(submitted && failed, 'the second lookup was under way when the first one\'s VEP request failed');
+    assertResolved(assert, page, 'KRAS p.Gly12Xaa, submitted during MECP2 c.474G>C');
+    assert.match(page.panel, /You entered\s*KRAS p\.Gly12Xaa/);
+    assert.match(page.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
+    assert.doesNotMatch(page.panel, /Consequences · Ensembl VEP/, 'no VEP step: this lookup asked VEP nothing');
+    assert.doesNotMatch(page.panel + page.variant, /MECP2|NM_001110792/, 'nothing of the lookup that was overtaken');
+    console.log('ok gene-symbol name: an overtaken lookup\'s failure is not written onto the next one');
+}
+
+// 18c. And overtaken earlier still — while it waits for Ensembl's answer about
+//      the name — it stops when that answer arrives, instead of asking again
+//      and going on to look up the alleles in it. ("KRAS G12*" comes back as
+//      three; "BRAF V600E" is on the page by then.)
+{
+    const first = cassettes.krasG12Stop;
+    const second = cassettes.brafV600E;
+    const both = { input: 'KRAS G12*', reference: [...first.reference, ...second.reference],
+        api: { ...(first.api || {}), ...(second.api || {}) }, responses: { ...first.responses, ...second.responses } };
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let submitted = false;
+    const page = await runLookup(both, {
+        settleMs: 400,
+        route: async (url, key, respond, options, { document }) => {
+            if (!submitted && key.includes('/variant_recoder/human/KRAS:p.Gly12Ter')) {
+                // Ensembl takes its time. The first lookup gets as far as
+                // waiting for it; only then is the next variant submitted.
+                await wait(40);
+                submitted = true;
+                document.getElementById('variantInput').value = 'BRAF V600E';
+                document.getElementById('variantForm').dispatchEvent(new document.defaultView.Event('submit', { cancelable: true }));
+                await wait(10);
+                return undefined;
+            }
+            return undefined;
+        }
+    });
+    assert(submitted, 'the second lookup was submitted while the first waited for Ensembl');
+    assertResolved(assert, page, 'BRAF V600E, submitted during KRAS G12*');
+    assert.match(page.panel, /You entered\s*BRAF V600E/);
+    assert.match(page.variant, /g\.: chr7:g\.140453136A>T/);
+    assert.equal(asked(page, /variant_recoder\/human\/KRAS:p\.Gly12Ter/).length, 1, 'Ensembl is not asked about the first name again');
+    assert.deepEqual(asked(page, /myvariant\.info\/v1\/variant\/chr12:/), [], 'and the alleles in its answer are not looked up');
+    assert.deepEqual(page.api('clinvar-protein').filter(r => /gene=KRAS/.test(r)), [], 'nor ClinVar asked about it');
+    assert.doesNotMatch(page.panel + page.variant, /KRAS|Gly12/, 'nothing of the lookup that was overtaken');
+    console.log('ok gene-symbol name: a lookup overtaken while Ensembl worked stops when Ensembl answers');
+}
+
 // 19. A name ClinVar itself settles can still be two variants. "MECP2
 //     c.916C>T" is ClinVar's name for p.Arg306Ter on MANE Select — and, on the
 //     Plus Clinical transcript the clinic counts on, R306C (ClinVar 11824).
@@ -718,7 +806,11 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     const minor = record('chrX:g.153296084G>A', ['NM_001316337.2:c.916C>T']);
     const settled = { accession: 'NM_001110792.2', change: 'c.916C>T', hitId: stop._id };
     assert.deepEqual(h.settledNameAlternatives([minor, stop, r306c], settled, 'NM_001110792.2', ['NM_004992.4']),
-        [{ accession: 'NM_004992.4', kind: 'plus', known: true }], 'the namesake on the Plus Clinical transcript, and not the one on a minor isoform');
+        [{ accession: 'NM_004992.4', kind: 'plus', known: true, hitId: r306c._id, inClinvar: true }],
+        'the namesake on the Plus Clinical transcript, and not the one on a minor isoform');
+    assert.deepEqual(h.settledNameAlternatives([stop, { _id: r306c._id, snpeff: { ann: [{ feature_id: 'NM_004992.3', hgvs_c: 'c.916C>T', genename: 'MECP2' }] } }],
+        settled, 'NM_001110792.2', ['NM_004992.4']),
+    [{ accession: 'NM_004992.4', kind: 'plus', known: true, hitId: r306c._id, inClinvar: false }], 'a record ClinVar does not have is not said to be ClinVar\'s');
     assert.deepEqual(h.settledNameAlternatives([stop], settled, 'NM_001110792.2', ['NM_004992.4']), [], 'no record there: nothing to add');
     assert.deepEqual(h.settledNameAlternatives([stop, { ...stop }], settled, 'NM_001110792.2', ['NM_004992.4']), []);
     // ClinVar's name on the Plus Clinical transcript: MANE Select is offered, known or not.
@@ -726,13 +818,13 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     assert.deepEqual(h.settledNameAlternatives([r306c], onPlus, 'NM_001110792.2', ['NM_004992.4']),
         [{ accession: 'NM_001110792.2', kind: 'select', known: false }]);
     assert.deepEqual(h.settledNameAlternatives([r306c, stop], onPlus, 'NM_001110792.3', ['NM_004992.4']),
-        [{ accession: 'NM_001110792.3', kind: 'select', known: true }], 'in whichever version');
+        [{ accession: 'NM_001110792.3', kind: 'select', known: true, hitId: stop._id, inClinvar: true }], 'in whichever version');
     // How each is put.
     const said = reading => { const n = h.nameReadingNote(reading); return n && [n.text, ...n.links.map(l => `${l.lead} ${l.variant}`)].join(' '); };
     const base = { typed: 'MECP2 c.916C>T', gene: 'MECP2', change: 'c.916C>T', accession: 'NM_001110792.2',
         basis: 'the MANE Select transcript of MECP2', select: 'NM_001110792.2', untried: [], rejected: [] };
     assert.equal(said({ ...base, alternatives: [] }), null);
-    assert.equal(said({ ...base, alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: true }] }),
+    assert.equal(said({ ...base, alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: true, inClinvar: true }] }),
         'MECP2 c.916C>T is read on NM_001110792.2, the MANE Select transcript of MECP2. Counted on the MANE Plus Clinical transcript '
         + 'the same name is another variant, which ClinVar lists: NM_004992.4:c.916C>T');
     assert.equal(said({ ...base, alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: false }] }),
@@ -741,12 +833,53 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
         'MECP2 c.916C>T is read on NM_001110792.2, the MANE Select transcript of MECP2. MyVariant could not be searched for the name, '
         + 'so no record decided this. If the MANE Plus Clinical transcript was meant, look up NM_004992.4:c.916C>T');
     assert.equal(said({ ...base, accession: 'NM_004992.4', basis: 'a MANE Plus Clinical transcript of MECP2',
-        alternatives: [{ accession: 'NM_001110792.2', kind: 'select', known: true }] }),
+        alternatives: [{ accession: 'NM_001110792.2', kind: 'select', known: true, inClinvar: true }] }),
     'MECP2 c.916C>T is read on NM_004992.4, a MANE Plus Clinical transcript of MECP2. Counted on the MANE Select transcript '
         + 'the same name is another variant, which ClinVar lists: NM_001110792.2:c.916C>T');
     assert.equal(said({ ...base, accession: 'NM_058195.4', basis: 'x', select: 'NM_000077.6', selectLabel: 'RefSeq Select',
         alternatives: [{ accession: 'NM_000077.6', kind: 'select', known: false }] }),
     'MECP2 c.916C>T is read on NM_058195.4, x. If the RefSeq Select transcript was meant, look up NM_000077.6:c.916C>T');
+    // (Where it is ClinVar's naming transcript standing in for MANE Select, it is called that.)
+    assert.equal(said({ ...base, accession: 'NM_004992.4', basis: 'x', selectLabel: '',
+        alternatives: [{ accession: 'NM_001110792.2', kind: 'select', known: false }] }),
+    'MECP2 c.916C>T is read on NM_004992.4, x. If the transcript ClinVar names MECP2 variants on was meant, look up NM_001110792.2:c.916C>T');
+
+    // Which of those readings are another variant at all, once the variant's
+    // name on each transcript is known. KRAS's two clinical transcripts number
+    // exon 2 alike, NF1's everything before the exon only one of them has: the
+    // name is then the same variant whichever was meant, and nothing is offered.
+    {
+        const row = (transcript, cDNA) => ({ transcript, cDNA });
+        const kras = { accession: 'NM_004985.5', change: 'c.34_36dup', hitId: '',
+            alternatives: [{ accession: 'NM_033360.4', kind: 'plus', known: false }] };
+        assert.deepEqual(h.namesakesGivenRows(kras, [row('NM_004985.5', 'c.36_38dup'), row('NM_033360.4', 'c.36_38dup')]), [],
+            'the same name on both: no other reading');
+        assert.deepEqual(h.namesakesGivenRows(kras, [row('NM_004985.4', 'c.36_38dupTGG'), row('NM_033360.3', 'c.36_38dup')]), [],
+            'whatever the version, and with the bases written out');
+        // MECP2's two count 36 bases apart: the name on the other one is elsewhere.
+        const mecp2 = { accession: 'NM_001110792.2', change: 'c.916C>T', hitId: 'chrX:g.153296399G>A',
+            alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: true, hitId: 'chrX:g.153296363G>A', inClinvar: true }] };
+        assert.deepEqual(h.namesakesGivenRows(mecp2, [row('NM_001110792.2', 'c.916C>T'), row('NM_004992.4', 'c.880C>T')]), mecp2.alternatives);
+        // No row for one of them: two substitutions under two ids are two variants...
+        assert.deepEqual(h.namesakesGivenRows(mecp2, [row('NM_001110792.2', 'c.916C>T')]), mecp2.alternatives);
+        assert.deepEqual(h.namesakesGivenRows(mecp2, []), mecp2.alternatives);
+        // ...two records of an indel need not be, and the claim is then not made.
+        const indel = { accession: 'NM_004985.5', change: 'c.34_36dup', hitId: 'chr12:g.25398284_25398286dup',
+            alternatives: [{ accession: 'NM_033360.4', kind: 'plus', known: true, hitId: 'chr12:g.25398285_25398286insACC', inClinvar: true }] };
+        assert.deepEqual(h.namesakesGivenRows(indel, []), [{ ...indel.alternatives[0], known: false }]);
+        assert.deepEqual(h.namesakesGivenRows(indel, [row('NM_004985.5', 'c.36_38dup'), row('NM_033360.4', 'c.36_38dup')]), []);
+        // An unrecorded reading is left as it is.
+        assert.deepEqual(h.namesakesGivenRows({ ...kras }, []), kras.alternatives);
+        // A namesake on some further transcript is worth a mention only while
+        // the name is not a known variant where it was read.
+        const brca1 = { accession: 'NM_007294.4', change: 'c.5265_5266insC', hitId: '',
+            alternatives: [{ accession: 'NM_001407610.1', kind: 'listed', known: true, hitId: 'chr17:g.41209139_41209140insG', inClinvar: true }] };
+        assert.deepEqual(h.namesakesGivenRows(brca1, [row('NM_007294.4', 'c.5266dup')], { onRecord: true }), []);
+        assert.deepEqual(h.namesakesGivenRows(brca1, [row('NM_007294.4', 'c.5266dup')]), [{ ...brca1.alternatives[0], known: false }]);
+        // (The gene's other clinical transcript is another matter: that reading stays.)
+        assert.deepEqual(h.namesakesGivenRows(mecp2, [row('NM_001110792.2', 'c.916C>T'), row('NM_004992.4', 'c.880C>T')], { onRecord: true }), mecp2.alternatives);
+        assert.deepEqual(h.namesakesGivenRows(null, []), []);
+    }
 
     const page = await runLookup(cassettes.mecp2R306);
     assertResolved(assert, page, 'MECP2 c.916C>T');
@@ -819,6 +952,154 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     assert.match(page.panel, /read as NM_004992\.4:c\.474G>C/);
     assert.doesNotMatch(page.panel, /is a newer version than GRCh37's annotation has/, 'that was another transcript');
     console.log('ok gene-symbol name: the version note stays with the transcript it is about');
+}
+
+// 22. A name Ensembl re-spells, on a gene that lies on the minus strand.
+//     "KRAS c.34_36dup" duplicates a glycine codon; HGVS places it two bases
+//     along, and Ensembl answers c.36_38dup. That answer was discarded for not
+//     carrying the name as typed, the name went to VEP as a last resort, and
+//     VEP's answer — "-/GGT", strand -1: bases of the transcript's strand — was
+//     taken as genomic: chr12:g.25398285_25398286insGGT, shown as
+//     c.33_34insACC, p.Ala11_Gly12insThr. Another variant, on `main` as well.
+{
+    // The pieces. VEP's coordinates are the genome's; its bases are the strand's.
+    const vep = (allele_string, start, end, strand = -1) => ({ seq_region_name: '12', start, end, strand, allele_string });
+    assert.equal(h.buildGenomicHgvsFromVep(vep('-/GGT', 25398286, 25398285)), 'chr12:g.25398285_25398286insACC');
+    assert.equal(h.buildGenomicHgvsFromVep(vep('G/A', 25398284, 25398284)), 'chr12:g.25398284C>T', 'c.35G>A is C>T on the genome');
+    assert.equal(h.buildGenomicHgvsFromVep(vep('GG/TT', 25398284, 25398285)), 'chr12:g.25398284_25398285delinsAA');
+    assert.equal(h.buildGenomicHgvsFromVep(vep('GG/-', 25398284, 25398285)), 'chr12:g.25398284_25398285del');
+    // (Asked by a genomic name, or of a gene on the plus strand, VEP answers in the genome's strand.)
+    assert.equal(h.buildGenomicHgvsFromVep(vep('-/CCA', 25398284, 25398283, 1)), 'chr12:g.25398283_25398284insCCA');
+    assert.equal(h.buildGenomicHgvsFromVep({ seq_region_name: '7', start: 55259515, end: 55259515, strand: 1, allele_string: 'T/G' }), 'chr7:g.55259515T>G');
+    assert.equal(h.buildGenomicHgvsFromVep({ seq_region_name: '7', start: 55259515, end: 55259515, allele_string: 'T/G' }), 'chr7:g.55259515T>G');
+
+    // Ensembl's own spelling of the name it was asked.
+    const answer = { input: 'NM_004985.5:c.34_36dup', hgvsg: ['NC_000012.11:g.25398284_25398286dup'],
+        hgvsc: ['ENST00000256078.4:c.36_38dup', 'NM_004985.5:c.36_38dup', 'NM_033360.4:c.36_38dup'] };
+    assert.equal(h.recoderRespelling(answer, 'NM_004985.5:c.34_36dup'), 'NM_004985.5:c.36_38dup');
+    assert.equal(h.selectRecoderAlleles([{ GGT: answer }], 'NM_004985.5:c.34_36dup').length, 1, 'the answer to the name is the variant');
+    assert.equal(h.selectRecoderAlleles([{ GGT: answer }], 'NM_004985:c.34_36dup').length, 0, 'not the answer to this query');
+    // Nothing is left to chance: the answer must be to this query, on this
+    // transcript, and an indel of the same size.
+    assert.equal(h.recoderRespelling(answer, 'NM_004985.5:c.31_33dup'), '', 'the answer to another name');
+    assert.equal(h.recoderRespelling({ ...answer, input: 'KRAS:c.34_36dup' }, 'KRAS:c.34_36dup'), '', 'a gene symbol leaves Ensembl to pick the transcript');
+    assert.equal(h.recoderRespelling({ ...answer, hgvsc: ['NM_033360.4:c.36_38dup'] }, 'NM_004985.5:c.34_36dup'), '', 'no name on the transcript asked');
+    assert.equal(h.recoderRespelling({ ...answer, hgvsc: ['NM_004985.5:c.36_39dup'] }, 'NM_004985.5:c.34_36dup'), '', 'another size');
+    assert.equal(h.recoderRespelling({ ...answer, hgvsc: ['NM_004985.5:c.34_36dup'] }, 'NM_004985.5:c.34_36dup'), '', 'spelled as asked: nothing to say');
+    assert.equal(h.recoderRespelling({ input: 'NM_004985.5:c.35G>A', hgvsc: ['NM_004985.5:c.35G>T'] }, 'NM_004985.5:c.35G>A'), '',
+        'a substitution is never re-spelled');
+    // (An insertion that repeats what precedes it is a duplication to HGVS.)
+    assert.equal(h.recoderRespelling({ input: 'NM_004985.5:c.36_37insTGG', hgvsc: ['NM_004985.5:c.36_38dup'] }, 'NM_004985.5:c.36_37insTGG'),
+        'NM_004985.5:c.36_38dup');
+    assert.equal(h.codingIndelSize('c.34_36dup'), 3);
+    assert.equal(h.codingIndelSize('c.5266dupC'), 1);
+    assert.equal(h.codingIndelSize('c.1521_1523del'), -3);
+    assert.equal(h.codingIndelSize('c.35_36insAAA'), 3);
+    assert.equal(h.codingIndelSize('c.34_35delinsTT'), 0);
+    assert.equal(h.codingIndelSize('c.489+1_489+4del'), -4);
+    assert.equal(h.codingIndelSize('c.*5_*7dup'), 3);
+    assert(Number.isNaN(h.codingIndelSize('c.-2_1del')), 'across the start codon: not read off the name');
+    assert(Number.isNaN(h.codingIndelSize('c.489_490-1del')), 'across an exon boundary');
+    assert.equal(h.codingIndelSize('c.35G>A'), null);
+
+    // As recorded live. Whichever services answer, it is the same allele.
+    const cassette = cassettes.krasDup;
+    const noRecoder = [/variant_recoder/];
+    const noPlacement = [/variant_recoder/, /api\.ncbi\.nlm\.nih\.gov\/variation/];
+    const outcomes = [
+        ['KRAS c.34_36dup', {}, /g\.: chr12:g\.25398284_25398286dup/],
+        ['NM_004985.5:c.34_36dup', {}, /g\.: chr12:g\.25398284_25398286dup/],
+        ['KRAS c.34_36dup', { without: noRecoder }, /g\.: chr12:g\.25398286_25398287insCCA/],
+        // Ensembl's recoder and NCBI both silent: VEP, by the name, as a last resort.
+        ['KRAS c.34_36dup', { without: noPlacement }, /g\.: chr12:g\.25398285_25398286insACC/],
+        ['NM_004985.5:c.34_36dup', { without: noPlacement }, /g\.: chr12:g\.25398285_25398286insACC/]
+    ];
+    for (const [typed, options, genomic] of outcomes) {
+        const label = `${typed}${options.without ? ` without ${options.without.length} service(s)` : ''}`;
+        const page = await runLookup(cassette, { input: typed, ...options });
+        assertResolved(assert, page, label);
+        assert.match(page.variant, genomic, label);
+        assert.match(page.variant, /VCF \(hg19\): 12-25398280-G-GCCA \(left-aligned\)/, `${label}: one allele, however it was reached`);
+        assert.match(page.variant, /Transcript: NM_004985\.5 \(MANE Select\)c\.: c\.36_38dup/, label);
+        assert.doesNotMatch(page.variant + page.panel, /insGGT|c\.33_34insACC|Ala11_Gly12insThr/, `${label}: not the insertion of ACC`);
+        // The name is the same variant on both of KRAS's clinical transcripts:
+        // there is no other reading to offer.
+        assert.equal(readingText(page), null, `${label}: no other reading`);
+        if (options.without === noPlacement) {
+            assert(asked(page, /\/vep\/human\/hgvs\/NM_004985\.5:c\.34_36dup/).length > 0, `${label}: VEP was asked by the name`);
+        } else {
+            assert.match(page.variant, /p\.: p\.Gly13dup/, label);
+        }
+        if (!options.without) {
+            assert.match(page.panel, /Ensembl gives this change as c\.36_38dup — the same variant, written where HGVS places it/, label);
+            assert.match(page.panel, /Resolve nomenclature · Ensembl\s*8 transcripts/, label);
+            assert(!asked(page, /\/vep\/human\/hgvs\/NM_/).length, `${label}: not left to VEP`);
+        }
+    }
+    console.log('ok gene-symbol name: KRAS c.34_36dup is the duplication, whichever service answers');
+}
+
+// 22b. The same where ClinVar's own name for the variant is on the gene's
+//      second clinical transcript: if both number the variant alike there is
+//      nothing to say about which was read. (KRAS c.35G>A as recorded, with
+//      ClinVar's preferred name moved to NM_033360.4 — the transcript it used
+//      to name KRAS variants on.)
+{
+    const cassette = cassettes.kras35;
+    const searchKey = 'myvariant.info/v1/query?q=KRAS c.35G>A&size=20';
+    const search = JSON.parse(JSON.stringify(cassette.responses[searchKey].body).replace(/NM_004985\.5\(KRAS\):c\.35G>A/g, 'NM_033360.4(KRAS):c.35G>A'));
+    assert.notDeepEqual(search, cassette.responses[searchKey].body, 'ClinVar\'s preferred name was on NM_004985.5');
+    const page = await runLookup(cassette, { route: (url, key, respond) => (key === searchKey ? respond(search) : undefined) });
+    assertResolved(assert, page, 'KRAS c.35G>A, named by ClinVar on NM_033360.4');
+    assert.match(page.variant, /g\.: chr12:g\.25398284C>T/);
+    assert.match(page.clinvar, /Variation ID: 12582/);
+    assert.equal(readingText(page), null, 'c.35G>A is the same variant on both transcripts');
+    console.log('ok gene-symbol name: a name that is the same variant on both clinical transcripts needs no note');
+}
+
+// 22c. And a name that is on no record as typed, because HGVS writes it
+//      otherwise: "BRCA1 c.5265_5266insC" inserts a C after a C, which is
+//      c.5266dup — 5382insC, ClinVar 17677. (Ensembl did not answer for it in
+//      this recording; NCBI placed it.) A record that carries the name as typed
+//      on a minor isoform was offered as what might have been meant:
+//      "Counted on another transcript the same name is another variant, which
+//      ClinVar lists: NM_001407610.1:c.5265_5266insC". Read on MANE Select the
+//      name is a known variant; that is no longer mentioned.
+{
+    const page = await runLookup(cassettes.brca1InsC);
+    assertResolved(assert, page, 'BRCA1 c.5265_5266insC');
+    assert.match(page.variant, /VCF \(hg19\): 17-41209079-T-TG/);
+    assert.match(page.variant, /Transcript: NM_007294\.4 \(MANE Select\)c\.: c\.5266dupp\.: p\.Gln1756ProfsTer74/);
+    assert.match(page.clinvar, /Variation ID: 17677/);
+    assert.equal(readingText(page), null, 'no other reading is offered for a known variant on MANE Select');
+    console.log('ok gene-symbol name: BRCA1 c.5265_5266insC is c.5266dup, and nothing else is suggested');
+}
+
+// 23. What the other transcript is called. MANE Select has two authorities; a
+//     gene neither names one for is read on RefSeq's own pick, and when
+//     neither answers in time ClinVar's naming transcript stands in. Offered
+//     as the other reading, each is called what it is — the first of the two
+//     used to be introduced as "the MANE Select transcript".
+{
+    const reportKey = 'api.ncbi.nlm.nih.gov/datasets/v2/gene/symbol/MECP2/taxon/9606/product_report';
+    // (NCBI's list with the gene's MANE Select tag turned into RefSeq Select:
+    // the shape of its answer for a gene that has no MANE Select.)
+    const report = structuredClone(cassettes.mecp2T158M.responses[reportKey].body);
+    for (const t of report.reports[0].product.transcripts) if (t.select_category === 'MANE_SELECT') t.select_category = 'REFSEQ_SELECT';
+    const refseq = await runLookup(cassettes.mecp2T158M, { without: [/rest\.ensembl\.org\/lookup/, /preferred_name/],
+        route: (url, key, respond) => (key === reportKey ? respond(report) : undefined) });
+    assertResolved(assert, refseq, 'MECP2 c.473C>T, RefSeq Select standing in');
+    assert.match(refseq.clinvar, /Variation ID: 11811/);
+    assert.equal(readingText(refseq), 'MECP2 c.473C>T is read on NM_004992.4, a MANE Plus Clinical transcript of MECP2. '
+        + 'If the RefSeq Select transcript was meant, look up NM_001110792.2:c.473C>T.');
+
+    const standIn = await runLookup(cassettes.mecp2T158M, { without: [/rest\.ensembl\.org\/lookup/, /\/datasets\//] });
+    assertResolved(assert, standIn, 'MECP2 c.473C>T, ClinVar\'s naming transcript standing in');
+    assert.match(standIn.clinvar, /Variation ID: 11811/);
+    assert.equal(readingText(standIn), 'MECP2 c.473C>T is read on NM_004992.4, a transcript ClinVar lists this name on '
+        + '(whether MECP2 is reported on it could not be learned). If the transcript ClinVar names MECP2 variants on was meant, '
+        + 'look up NM_001110792.2:c.473C>T.');
+    console.log('ok gene-symbol name: the other transcript is called what it is');
 }
 
 console.log('Gene-symbol name tests passed');

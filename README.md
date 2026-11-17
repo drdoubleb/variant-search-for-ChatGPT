@@ -356,7 +356,35 @@ card said nothing:
 - **RefSeq Select is not MANE Select.** Where a gene has no MANE Select in
   NCBI's list (CDKN2A, whose RefSeq record has moved a version on), RefSeq's own
   pick stands in — and was introduced as "the MANE Select transcript". It is
-  called what it is.
+  called what it is, and so is ClinVar's naming transcript where that is the
+  stand-in: *If the transcript ClinVar names MECP2 variants on was meant, look
+  up …*.
+
+**Only a reading that is another variant is offered.** A gene's two clinical
+transcripts number most of it alike — every KRAS name up to exon 4, every NF1
+name before the one exon only NM_001042492 has. There the name is the same
+variant whichever transcript was meant, and the offer made for a name no record
+carries suggested a choice where there is none:
+
+> KRAS c.34_36dup is read on NM_004985.5, the MANE Select transcript of KRAS.
+> If the MANE Plus Clinical transcript was meant, look up
+> NM_033360.4:c.34_36dup.
+
+Once the variant is resolved its name on every transcript is known, and those
+rows decide (`namesakesGivenRows`): where the variant carries the same name on
+both transcripts nothing is offered, and nothing is said. Where it does not —
+`NF1 c.7846C>T` is c.7783C>T on NM_000267.4 — the other reading stands. Two
+smaller points of the same kind: *"…is another variant, which ClinVar lists"*
+is said of a record that has a ClinVar entry, not of any record that carries
+the name; and when the rows cannot say (one of the two transcripts has none)
+*"is another variant"* is kept only for two substitutions — under two ids those
+are two variants, while an indel is filed under whatever spelling its source
+used and can be two records. And a namesake on some further, minor transcript
+is mentioned only while the name is not a known variant where it was read:
+`BRCA1 c.5265_5266insC` is on no record as typed, because HGVS writes it
+c.5266dup — and once it has resolved to that (5382insC, ClinVar 17677), the
+record that carries "c.5265_5266insC" on NM_001407610.1 is no longer offered as
+what might have been meant.
 
 The same note appears when ClinVar's own name for a variant is on a transcript
 other than MANE Select — `CDKN2A c.3G>C` is ClinVar's name for a p14ARF variant
@@ -368,7 +396,42 @@ The lookup runs itself again to read a name on another transcript, and a lookup
 that has been overtaken must not: `MECP2 c.474G>C`, with `BRAF V600E` submitted
 while its last fallback was out, went on to its second pass and took the page —
 MECP2's result under a box that said BRAF V600E. A lookup now stops as soon as
-it is no longer the current one, before any second pass.
+it is no longer the current one: before any second pass, when the answer it was
+waiting on from Ensembl arrives (it used to go on and look up the alleles in
+it), and before it writes a failure of its own onto the panel of the lookup
+that overtook it.
+
+**A name Ensembl re-spells.** HGVS places an indel in a repeat at its 3′-most
+position, and Ensembl answers in that form: asked for `NM_004985.5:c.34_36dup`
+— the duplication of KRAS codon 12 — it gives `c.36_38dup`, the same
+duplication written two bases along. Two things went wrong with that, on a
+gene-symbol name and on an accession alike:
+
+| `KRAS c.34_36dup` | |
+| --- | --- |
+| before | `chr12:g.25398285_25398286insGGT` · c.33_34insACC · **p.Ala11_Gly12insThr** — another variant |
+| now | `chr12:g.25398284_25398286dup` · c.36_38dup · p.Gly13dup, and the panel says *Ensembl gives this change as c.36_38dup — the same variant, written where HGVS places it* |
+
+- The answer was discarded for not carrying the name as typed ("no transcript
+  match"). It is now taken (`recoderRespelling`) where nothing is left to
+  chance: the answer is to this very query, the name is on an accession (a gene
+  symbol would leave Ensembl to pick the transcript), the answer names that
+  same transcript, and both are indels of the same size. A substitution is
+  never re-spelled.
+- The name then went to VEP as a last resort, and **VEP answers a name on a
+  transcript in that transcript's strand**: `-/GGT` with `strand: -1`. The
+  coordinates are the genome's; the bases are not until they are
+  reverse-complemented. They were taken as they stood (`buildGenomicHgvsFromVep`)
+  — for an insertion on a minus-strand gene that is another variant, and for a
+  substitution a reference base the genome does not hold there. Whichever of
+  Ensembl's recoder, NCBI's placement and VEP now answers, the result is the
+  same allele (`12-25398280-G-GCCA`).
+
+(One thing is Ensembl's and is shown as given: its protein name for an
+insertion depends on how the insertion is spelled. The duplication above is
+p.Gly13dup when VEP is asked by `g.25398284_25398286dup`, and p.Val14dup when
+asked by `g.25398285_25398286insACC` — which is only what the page has when the
+recoder and NCBI are both down.)
 
 If NCBI's list cannot be had, whether the gene has a second clinical transcript
 is *unknown*, which is not the same as none: a record that carries the name on
@@ -1167,8 +1230,10 @@ holds a record for it, or one base makes the stop (CGA → TGA, CAA → TAA).
 Otherwise X is "any amino acid" and the codon is what the name gives — which
 also brings up ClinVar's records at that codon, the thing "G12X" is asking
 about. Either way the card says which reading was taken, since it is a choice
-made on the user's behalf. Literature is searched as `G12X`, the way it is
-written about.
+made on the user's behalf — also where it is ClinVar that settled it, by
+listing several variants with the stop's protein change: the codon is then
+shown as the stop, with those variants, and is not re-read as "any amino acid"
+on the way. Literature is searched as `G12X`, the way it is written about.
 
 **Several alleles.** `p.Gly12Ter` is GGT → TAA, TAG or TGA, and Ensembl gives
 all three (for most missense names it gives one: `BRAF V600E`, `KRAS G12D`,
@@ -1187,8 +1252,10 @@ depends on that order:
 - *records for none:* nothing distinguishes them, and none is shown; each is
   one click away.
 
-A single allele without a record (`BRAF V600*`) is still shown, and so is the
-first allele when MyVariant could not be asked — a 404 says "no record", an
+A single allele without a record is still shown — once ClinVar's names have
+been asked, since the variant known by a name can be another allele than the
+one Ensembl gives — and so is the first allele when MyVariant could not be
+asked — a 404 says "no record", an
 outage says nothing, and *"none on record"* is not claimed after one. Nor is
 it claimed when Ensembl did not answer at all: `KRAS Q61X` with the recoder
 down used to read *"No variant is on record for the stop (p.Gln61Ter)"*, a
