@@ -246,7 +246,123 @@ allele being looked up — and every consumer sees the one spelling: the VCF lin
 both gnomAD halves, SpliceAI and the AI review. What MyVariant has is kept in the
 raw JSON as `_vcf_as_filed`.
 
+**...and whichever way a pasted row spells them.** A row's own alleles were the
+one source that fix did not reach: they were passed on as typed, and not every
+row is left-aligned.
+
+| Row | was sent to gnomAD and SpliceAI as | now |
+| --- | --- | --- |
+| `7 117199645 CFTR TCTT T` (F508del) | `7-117199645-TCTT-T` — "Not found" in gnomAD v4.1 | `7-117199644-ATCT-A` |
+| `1 115258748 C CACC` (NRAS codon 12 duplication) | `1-115258748-C-CACC` | `1-115258741-A-ACAC` |
+
+The variant itself was resolved correctly either way (ClinVar 7105, rs113993960);
+it was the frequency lookup that came back empty for an allele gnomAD holds
+18,037 times. An insertion or deletion in a row is now left-aligned against the
+reference (`leftAlignedRowAlleles`) — only when the row's REF is what the
+reference holds there — and stripped of shared leading bases beyond the one that
+anchors it (`CATCT > CA` is `ATCT > A`). The reference is the window the lookup
+has already read around the indel, so it costs no request. The Variant card
+shows the left-aligned alleles with *(left-aligned)*, the row as entered is in
+the line's tooltip, and without the reference the row is passed on as typed, as
+before. A substitution has one spelling and is left alone.
+
 See `tests/sibling-records.test.js`.
+
+### One allele, one protein name
+
+Ensembl's VEP supplies the protein change shown for each transcript, and its
+answer for an insertion or deletion depends on how the allele is spelled. To see
+how much, VEP was asked about the equivalent spellings of 50 indels that can be
+written more than one way — some 500 requests, every spelling of each (a spread
+of them for the longest repeats):
+
+| | indels | named the same at every spelling |
+| --- | --- | --- |
+| coding name (c.) | 50 | 49 (not HTT's CAG repeat, where RefSeq's transcript is not the genome's) |
+| protein name of a frameshift | 9 | 9 |
+| protein name, in-frame, gene on the forward strand | 14 | 14 |
+| protein name, in-frame, gene on the reverse strand | 27 | **14** |
+
+The 13 that are misnamed are not corner cases:
+
+| Allele | right name | what VEP also calls it |
+| --- | --- | --- |
+| BRAF `c.1794_1796dup` | p.Thr599dup | `p.Thr599_Val600insTer` — an inserted stop — at the 3′-most genomic spelling |
+| NRAS `c.34_36dup` | p.Gly13dup | `p.Val14delinsGlyPhe` at three of its nine spellings, among them `g.115258746_115258748dup` — the one Ensembl's own recoder gives; `p.Val14dup` at another |
+| KRAS `c.34_36dup` | p.Gly13dup | `p.Val14dup`, also when asked by that very name; `p.Gly13_Val14insCys` |
+| FLT3 `c.1780_1800dup` | p.Phe594_Asp600dup | `p.Asp600_Leu601insTer` |
+| PHOX2B `c.721_780dup` | p.Ala241_Ala260dup | an insertion of 19 other residues and a stop, when asked by that very name |
+| CDKN2A `c.9_32dup` | p.Ala4_Pro11dup | eight other insertions; no protein name at all at 16 of its 50 spellings |
+
+and CEBPA `c.937_939dup`, HRAS `c.34_36dup`, KRAS `c.37_39dup`, TP53
+`c.522_524dup`, FOXL2 `c.672_701dup`, ARX `c.304_327dup` and the deletion CDKN2A
+`c.9_32del`. The page asked VEP by whatever spelling the lookup had arrived at —
+normally the recoder's, so **`NRAS c.34_36dup` was shown as
+p.Val14delinsGlyPhe with every service answering**, and `KRAS c.34_36dup` as
+p.Val14dup when neither Ensembl's recoder nor NCBI had placed the name.
+(`shift_3prime` and `shift_genomic`, VEP's own options, change none of these.)
+
+**On the reverse strand the left-aligned spelling was named right in all 27** —
+and in 25 exon-edge indels asked about afterwards, where another spelling was
+misnamed in six (TP53 `c.783_785dup`, p.Gly262dup, is `p.Gly262_Asn263insTrp`
+when asked by that very name). There it is where HGVS itself puts the change on
+the transcript, so VEP has nothing to shift. It is not the spelling to ask about
+everything by, though, because VEP works out the effect — and whether there is a
+protein name at all — from the bases it is given:
+
+| Allele | as the lookup spells it | left-aligned |
+| --- | --- | --- |
+| BRCA2 `c.6842_6844dup` — forward strand, first bases of exon 12 | p.Gly2281dup · inframe_insertion, splice_region_variant | no protein name · splice_region_variant, splice_polypyrimidine_tract_variant, intron_variant |
+| KRAS `c.109_111dup` — reverse strand, last bases of exon 2, one more Glu37 in front of an untouched `gt` (`c.110_111+1dup` to VEP, which has no protein name for it at any spelling) | inframe_insertion, splice_region_variant | splice_donor_variant |
+
+So:
+
+- VEP is asked about the allele **as the lookup spells it**, as it always was,
+  and — an in-frame insertion, duplication or deletion only — **a second time,
+  left-aligned**, alongside the first (`vepSpellingFor`, `leftAlignedSpelling`).
+  The spelling comes from the reference window the lookup reads anyway for the
+  allele's other MyVariant records: one request serves both.
+- **A reverse-strand transcript's row is replaced by the left-aligned answer's
+  row when that names the protein change** (`reverseStrandRowsFrom`). The `g.`
+  shown is unchanged; the panel says `reverse-strand transcripts asked as
+  chr1:g.115258741_115258742insCAC — the same allele, left-aligned`.
+- Forward-strand rows, and reverse-strand rows the left-aligned answer has no
+  protein name for, are VEP's for the spelling in hand — the two rows of the
+  table above.
+- **A reverse-strand protein name that could not be confirmed that way is not
+  shown**: the reference could not be read, or VEP did not answer for the
+  left-aligned spelling in time. The card reads `p.: N/A`, the coding name and
+  effect stay, and the panel flags the line: `▲ … protein change not shown:
+  Ensembl names an in-frame insertion or deletion on the reverse strand reliably
+  only when it is written left-aligned, and no name could be had for it written
+  that way`. The same goes for rows VEP gave for a *name* (the last-resort
+  route) when it then does not answer for the allele.
+- An insertion or deletion written as a replacement — `g.140453142delinsGTAG`
+  keeps the G it "deletes" and inserts TAG after it — is put in its own notation
+  first. An insertion that names no place between two neighbouring bases
+  (`g.25398280_25398285insCCA`, `g.25398280insCCA`) is not made into one:
+  Ensembl refuses it, and so does the lookup.
+- A frameshift, a substitution and anything else is asked about once, as
+  before: their names did not depend on the spelling in any measurement.
+
+| Input | was | now |
+| --- | --- | --- |
+| `NRAS c.34_36dup` | p.Val14delinsGlyPhe | p.Gly13dup |
+| `KRAS c.34_36dup`, Ensembl's recoder and NCBI silent | p.Val14dup | p.Gly13dup |
+| `chr7:g.140453142_140453143insTAG`, `chr7:g.140453142delinsGTAG` (BRAF), recoder silent | p.Thr599_Val600insTer | p.Thr599dup |
+| `chr12:g.25398285_25398286insACC`, `12 25398285 C CACC` (KRAS) | p.Val14dup | p.Gly13dup |
+
+What this does not cover:
+
+- A name VEP gets wrong at *every* spelling. HTT `c.52_54dup`, one more CAG in
+  the repeat, is "p.Pro39del" however it is written, because RefSeq's HTT
+  transcript carries a different number of repeats than GRCh37 does.
+- A forward-strand indel at the start of an exon, typed left-aligned (a VCF row)
+  while Ensembl's recoder does not answer: it is then asked about by those bases
+  only, as it always was, and `13 32918692 T TAGG` — the BRCA2 duplication of
+  the table — comes without a protein name.
+
+See `tests/indel-protein-name.test.js`.
 
 ### Which variant a gene-symbol name means
 
@@ -549,10 +665,62 @@ Homoplasmic AF: 0.1117%  AC/AN: 63/56401
 Heteroplasmic AF: 0.0195%  AC/AN: 11/56401
 Homoplasmic: in at least 95% of a carrier's mitochondrial copies; heteroplasmic: in 10–95%. Highest level seen: 100%.
 View on gnomAD (mitochondrial)
+▸ Population details
+▸ Haplogroup details
 ```
 
 gnomAD not answering is reported as *could not be read*, never as *not in
 gnomAD*, and the AI review receives the same counts with what they mean.
+
+**Who the carriers are.** The totals were all that was read. gnomAD also counts
+the carriers per genetic-ancestry group and per mitochondrial haplogroup — its
+own page tabulates both — and for a mitochondrial variant that is much of what
+a frequency means: one that defines a haplogroup is common in it and absent
+elsewhere. The same request now asks for both (`populations`, `haplogroups`),
+and they are folded under the link the way the population tables of the nuclear
+data sets are:
+
+| Population | Homoplasmic | Heteroplasmic | AN |
+| --- | --- | --- | --- |
+| AFR | 21 (0.1465%) | 1 (0.0070%) | 14339 |
+| ASJ | 0 (0.0000%) | 0 (0.0000%) | 1415 |
+| EAS | 3 (0.2024%) | 1 (0.0675%) | 1482 |
+| NFE | 25 (0.0968%) | 5 (0.0194%) | 25837 |
+| … | | | |
+
+(m.1555A>G: ten ancestry groups, then gnomAD's 29 haplogroups — `H` 19 of
+14,773, `L2` 12 of 4,721, … — each count with its share of the group, and the
+group's size.) A variant nobody carries gets no tables; m.3243A>G's six
+heteroplasmic carriers are three in AFR and three in NFE. The AI review
+receives both lists with the shares worked out. Should gnomAD refuse the
+longer query (HTTP 400 — a field it no longer has), the totals are asked for
+alone rather than lost.
+
+Four columns are a tight fit: at the size of the card's other tables they ran
+24 px past the card's edge, which cuts off what crosses it (the AN column,
+measured in Chromium). They are set a size down — they then need 324 to 328 px
+of a 336 px card — and sit in a box that scrolls sideways where the card is
+narrower still.
+
+**Tables wider than their card scroll; they are no longer cut off.** The same
+measurement showed the population tables of the nuclear data sets doing what
+the new ones would have. A card's width follows the window — three columns of
+cards, two below 980 px, one below 640 px — and the card cuts off whatever runs
+past its edge:
+
+| window | card | v4.1 population table (351 px) was |
+| --- | --- | --- |
+| 1180 px | 372 px | whole (reaching into the card's padding) |
+| 1000 px | 312 px | cut off by 39 px: no AN column |
+| 390 px (a phone) | 358 px | cut off by 11 px: AN without its last digits |
+| 320 px | 288 px | cut off by 81 px: no AN, AC without its last digits |
+
+A number that has lost its last digits still reads as a number. Each of these
+tables now sits in a box that scrolls sideways (`scrollableTable`); for the
+nuclear ones the box reaches into the card's padding as the tables always did,
+so nothing changes where they fit. A phone or a Mac shows no scrollbar until
+the box is scrolled, and a table that scrolls then looks exactly like one that
+is cut off — so the side with more to show is shaded.
 
 Two things found here apply to every chromosome:
 
@@ -1230,6 +1398,10 @@ things followed (`proteinNameReading`; measured live, found in review):
 | `KRAS G12*` | `…delinsTCA` in one run, `…delinsTTA` in the next | the codon: *p.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown*, with a link to each |
 | `KRAS G12K` | one of two replacements, likewise by the order of Ensembl's answer | the codon, with both linked |
 
+(The alleles of such a note are listed in one order — sorted — whatever order
+Ensembl gave them in: it changes between calls, and the sentence used to read
+differently from one lookup of the same name to the next.)
+
 **"X".** It is the old one-letter code for a stop — `TP53 R213X` is what ClinVar
 and the literature call p.Arg213Ter — and in HGVS (`Xaa`) and in oncology
 shorthand it is *any* amino acid: "KRAS G12X" is G12C, G12D, G12V and the rest.
@@ -1262,17 +1434,147 @@ depends on that order:
 
 A single allele without a record is still shown — once ClinVar's names have
 been asked, since the variant known by a name can be another allele than the
-one Ensembl gives — and so is the first allele when MyVariant could not be
-asked — a 404 says "no record", an
-outage says nothing, and *"none on record"* is not claimed after one. Nor is
-it claimed when Ensembl did not answer at all: `KRAS Q61X` with the recoder
-down used to read *"No variant is on record for the stop (p.Gln61Ter)"*, a
-variant MyVariant holds (its name search just does not find it); the note now
-says the stop could not be looked up.
+one Ensembl gives.
 
-This applies to a name on a gene symbol; on a protein accession
-(`NP_004976.2:p.Gly12Ter`) there is no gene to find the codon through and the
-first allele stands. See `tests/protein-name-reading.test.js`.
+When MyVariant cannot be asked, there is likewise nothing to choose one of
+several alleles by, and none is shown: the codon, with each as a link. (The
+first one Ensembl listed used to be shown then — a different variant from one
+run to the next, which is what the rule above was written to end.) What is
+said differs: a 404 says "no record", an outage says nothing, so the note reads
+*p.Gly12Ter can be any of 3 nucleotide changes. MyVariant could not be asked
+which of them is on record* and never *"none of them is on record"*. Nor is
+that claimed when Ensembl did not answer at all: `KRAS Q61X` with the recoder
+down used to read *"No variant is on record for the stop (p.Gln61Ter)"*, a
+variant MyVariant holds (its name search just does not find it).
+
+**On a protein accession.** All of this went through the gene symbol, which is
+how the codon is found, so `NP_004976.2:p.Gly12Ter` still took the first of
+Ensembl's three alleles (and showed "Gene: N/A"); and of two alleles on record,
+`NP_004976.2:p.Tyr64Ter` showed whichever Ensembl listed first, because no
+record "fitted" the name — outside ClinVar, MyVariant's protein notations
+carry no accession to match one against. Both now follow the rules above:
+
+- Ensembl's answer names the change on every protein it is the same change on,
+  its own among them (`ENSP00000256078.4:p.Gly12Ter`), and that protein's
+  residues map straight onto the genome. So the codon is found on the protein
+  that was named (`translationForProteinName`), not on the gene's canonical one;
+  the gene comes from NCBI for a RefSeq accession, and from Ensembl for one of
+  its own. The card reads *Resolved to residue 12 on NP_004976.2 only*.
+- It is likewise Ensembl's answer that says each allele *is* that change on
+  that protein, so a record of the allele is a record of the variant named
+  (`recoderAlleleNamesProtein`) and the best documented one is shown.
+
+See `tests/protein-name-reading.test.js`.
+
+**Which bases, without waiting for Ensembl.** Only Ensembl's recoder turned a
+protein substitution into alleles, and it is the slowest thing this page asks.
+Measured over 30 names on one afternoon: 2 to 23 s where it answered, and for
+11 of the 30 no answer within 25 s. The page then sat out four attempts, about
+50 s, and showed the codon alone — `KRAS Y64*` was 13 s on a good day and 54 s
+with no allele on a bad one.
+
+MyVariant carries dbNSFP, which lists every non-synonymous single-base change
+in the genome — with the residue it changes on each transcript, the codon it
+lies in and which base of that codon it is. Asked for a residue (gene,
+reference amino acid, position) it returns every such change there in 0.1 to
+0.6 s. Three things are read from those records (`proteinSubstitutionAlleles`):
+
+1. **Which codon the name means.** A record counts where the residue has that
+   number on a transcript the name may be counted on: MANE Select or MANE Plus
+   Clinical of the gene named (RefSeq Select where the gene has no MANE Select,
+   as CDKN2A) — NCBI's list, the one coding names are read by, here by Ensembl's
+   ids (`fetchStandardEnsemblTranscripts`). MECP2's T158M and R306C are on its
+   Plus Clinical transcript.
+2. **Where its bases are.** Each such record places one base of the codon: its
+   own position, which base it changes, and — its reference base against the
+   codon's — the strand.
+3. **Which changes give the amino acid asked for.** That follows from the
+   reference codon and the genetic code, not from what happens to be listed.
+
+The first version took the alleles from every record MyVariant returned — every
+record in which *some* transcript has the residue under the number typed. An
+independent review found what that does, and that main had been right in each
+case:
+
+| Input | was shown as | the number typed is |
+| --- | --- | --- |
+| `TP53 R202X` | p.Arg213Ter, "X read as a stop" | Arg213's on ENST00000615910, a fragment transcript. Arg202 cannot become a stop by one base: the codon, `p.Arg202Xaa` |
+| `TP53 W53G` | p.Trp146Gly, "the best documented of 2" | Trp146's on that same transcript |
+| `PDGFRA V367A` | p.Val607Ala | Val607's on a transcript of another gene the record is shared with |
+| `UGT1A1 K521Q` | p.Lys520Gln | Lys520's in UGT1A3, 4 and 5, which share the exon |
+| `MT-ND4 R340H` | `chrMT:g.11779G>A`, p.: N/A — one base off | MyVariant files dbNSFP's chrM records by another reference's positions than the rest of this page uses. Mitochondrial names are not asked of it at all |
+| `KRAS G12G` | the codon and *"No single-base change gives p.Gly12Gly"* | three do (GGC, GGA, GGG). dbNSFP holds no silent changes, so "the residue is listed and no record gives this" proved nothing |
+
+Checked afterwards against Ensembl for 50 names over 32 genes: where Ensembl
+answered (41), the single-base alleles were the same for 34. For six, Ensembl
+adds the same-numbered residue of a further transcript (`GNAS R201H` and
+`R201C`, `CDKN2A P114L`, `KIT D816V`, `HRAS G13R`, `PDGFRA V367A`) — the allele
+on the standard transcript is the one both give. One name is in no standard
+numbering (`MET Y1253D`) and is left to Ensembl, as below. (Ensembl also adds,
+for a gene whose transcripts number residues differently, changes of several
+bases on the other transcript; those have no record and were never shown.)
+
+So a substitution named on a gene symbol, which the name search has not found,
+is put to MyVariant first:
+
+| The records say | then |
+| --- | --- |
+| these single-base changes give it | they are the candidates — the same ones whatever Ensembl is doing — and Ensembl is not waited for. `KRAS Y64*`: 3 s |
+| the residue is there, and by the genetic code no single-base change gives it (`p.Gly12Ter` takes two) | Ensembl may still name the larger changes, and has until its first attempt is over (12 s). After that the codon is shown, with the reason: *No single-base change gives p.Gly12Ter, and which larger changes do could not be looked up* |
+| the same, where "X" was typed | that already settles how X is read: any amino acid. Ensembl is not waited for at all. `KRAS G12X`: 3 s, where it was 11 to 55 |
+| nothing that can be relied on: the residue has no such number on a standard transcript (`TP53 R72P`: the reference genome has the proline); a change that gives the amino acid lies at a base no record places (every silent change of a third base: `KRAS G12G`); NCBI did not say which transcripts are the gene's standard ones; MyVariant's list was cut short, or it did not answer; the gene is mitochondrial | Ensembl, as before |
+
+A variant that lies in two reading frames comes from MyVariant as two
+amino-acid changes — MECP2's R306C is A301V in the other — and the residue has
+to be right within one of them: MyVariant's search matches across frames, and
+would return that record for "R301C" as well. Such a record names the
+transcripts of its first change only; for the other it places a base of a codon
+it fits (same strand, same reference codon, next to a base already placed), and
+is otherwise left out.
+
+The same records place the codon when Ensembl cannot — **as much of it as they
+place**. KRAS Gly12 (GGT, read backwards) has base 1 at 25398285 and base 2 at
+25398284; every change of its third base is silent, so no record is at that
+base, and it is not assumed to follow the second. PTEN's Leu70 is why: `CT|G`
+with an intron after its second base, where the first version gave
+`chr10:g.89685313_89685315` — the last of those being the intron's first base.
+With Ensembl down, `KRAS G12K` (a change of two bases, which used to end in
+*"Could not resolve … to a genomic position"*) is the codon view with *Codon
+region (hg19): chr12:g.25398284_25398285* and, on the card, *The region is the 2
+bases of the codon that MyVariant's records place: Ensembl, which maps the whole
+codon, did not answer.* A codon whose three bases all have records is shown
+whole; a number that is two codons (MECP2's 306 on its two transcripts) or a
+codon an intron splits is no span at all. Whenever Ensembl does answer, the
+codon is Ensembl's.
+
+**When MyVariant answers for some of what it is asked.** A 404 says "no
+record"; a failed request says nothing, and the page used to treat the two
+alike wherever one of several requests failed:
+
+- `KRAS Y64*` is two alleles, both on record. With the request for one record
+  failing, the other was shown as *the* variant — c.192C>A or c.192C>G according
+  to which request it was. It is still shown, being on record, and the card
+  says *p.Tyr64Ter can be 2 nucleotide changes. This one is on record; MyVariant
+  could not be asked about the other, which may be better documented:* with the
+  allele as a link.
+- `KRAS Q61X`: MyVariant lists the one change that makes Gln61 a stop, then
+  does not answer for its record. The allele is known all the same and is shown
+  (VEP supplies the transcripts), with *could not be asked for a record of this
+  allele — it is shown without one* on the panel. It used to come out as the
+  codon and *"Which nucleotide change a stop here would be could not be looked
+  up"*.
+
+Three smaller things from the same review. The same name looked up again
+waited out Ensembl — 49 s for a second `KRAS Y64*` on a day Ensembl was silent
+— because the first lookup's answer, arriving late, was still on the page and
+was taken for the second one's own; the recoder's last answer now starts each
+lookup empty. An Ensembl protein id typed without its version
+(`ENSP00000256078:p.Gly12Ter`) reads like a gene symbol and was shown as the
+gene. And *Show Ensembl recoder result*, like the AI review's `ensembl_recoder`
+field, held MyVariant's list of alleles in the shape of an Ensembl answer; they
+hold Ensembl's own answer, or a line saying what stood in for it.
+
+See `tests/protein-substitution-alleles.test.js`.
 
 What *is* determined by protein notation is the codon. Rather than failing the
 whole lookup, `resolveProteinCodonRegion` maps the residue range to GRCh37

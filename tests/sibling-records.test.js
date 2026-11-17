@@ -19,7 +19,7 @@
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { runLookup, assertResolved } from './support/lookup-harness.js';
+import { runLookup, assertResolved, referenceSlice } from './support/lookup-harness.js';
 
 await import('../script.js');
 const h = globalThis.__variantSearchHelpers;
@@ -505,6 +505,106 @@ const rawJson = page => JSON.parse(page.document.getElementById('rawOutput').tex
     assert.deepEqual(row.api('gnomad-v4'), ['gnomad-v4?chrom=7&pos37=117199644&ref=ATCT&alt=A']);
     assert.equal(rawJson(row)._vcf_as_filed, undefined);
     console.log('ok sibling records: the VCF alleles are left-aligned whichever record the lookup landed on');
+}
+
+// 14. ...and whichever way a ROW spells them. A row's alleles were passed on
+//     as typed, and not every row is left-aligned: F508del pasted as
+//     "7 117199645 CFTR TCTT T" resolved to the right variant and was then
+//     put to gnomAD and SpliceAI as 7-117199645-TCTT-T — "Not found" in
+//     gnomAD v4.1, which holds it as 7-117199644-ATCT-A.
+{
+    const vcfLine = page => [...page.document.querySelectorAll('span')].find(el => /^VCF \(hg19\):/.test(el.textContent));
+    const gnomadLinks = page => page.links.filter(l => /gnomad\.broadinstitute\.org\/variant\//.test(l.href)).map(l => l.href.match(/variant\/([^?]+)/)[1]);
+    for (const typed of ['7 117199645 CFTR TCTT T', '7\t117199645\tCFTR\tTCTT\tT', '7 117199643 CFTR CATCT CA']) {
+        const page = await runLookup(cassettes.cftrF508del, { input: typed });
+        assertResolved(assert, page, typed);
+        assert.match(page.variant, /VCF \(hg19\): 7-117199644-ATCT-A \(left-aligned\)Gene: CFTR/, typed);
+        assert.match(page.clinvar, /Variation ID: 7105/, typed);
+        assert.deepEqual(page.api('gnomad-v4'), ['gnomad-v4?chrom=7&pos37=117199644&ref=ATCT&alt=A'], typed);
+        assert.deepEqual(page.api('spliceai').map(r => r.match(/variant=([^&]+)/)[1]), ['chr7-117199644-ATCT-A'], typed);
+        assert.deepEqual(Array.from(new Set(gnomadLinks(page))), ['7-117199644-ATCT-A'], `${typed}: every gnomAD link`);
+        assert.match(page.cards.SpliceAI || '', /SpliceAI query: chr7 117199644 ATCT A/, typed);
+        assert(page.links.some(l => /spliceailookup\.broadinstitute\.org\/#variant=chr7%20117199644%20ATCT%20A&hg=37/.test(l.href)), `${typed}: SpliceAI's page`);
+        // The row as entered is not on the card; it is kept where the reader can find it.
+        const [, pos, ref, alt] = typed.match(/(\d{6,})\s+CFTR\s+([ACGT]+)\s+([ACGT]+)/);
+        assert.equal(vcfLine(page).getAttribute('title').replace(/^.*above\. /, ''), `The row as entered: 7-${pos}-${ref}-${alt}.`, typed);
+        assert.doesNotMatch(page.variant, new RegExp(`${pos}-${ref}-${alt}`), typed);
+    }
+    // The reference the row is re-spelled against is the window the lookup
+    // reads anyway around an indel: no request of its own.
+    {
+        const page = await runLookup(cassettes.cftrF508del, { input: '7 117199645 CFTR TCTT T' });
+        assert.deepEqual(page.requests.filter(r => r.includes('/sequence/region/')).map(r => r.match(/human\/([^?]+)/)[1]).sort(),
+            ['7:117199496..117199798', '7:117199645..117199648']);
+    }
+    // A row that is left-aligned is shown as it is, and nothing is said.
+    const asIs = await runLookup(cassettes.cftrF508del);
+    assert.match(asIs.variant, /VCF \(hg19\): 7-117199644-ATCT-AGene: CFTR/);
+    assert.equal(vcfLine(asIs).getAttribute('title'), null);
+    // So is a substitution (one spelling; the reference is not read for it).
+    const snv = await runLookup(cassettes.brafV600E, { input: '7 140453136 BRAF A T' });
+    assertResolved(assert, snv, 'BRAF V600E as a row');
+    assert.match(snv.variant, /VCF \(hg19\): 7-140453136-A-TGene: BRAF/);
+    assert.equal(snv.requests.filter(r => r.includes('/sequence/region/human/7:1404530')).length, 0, 'no window read for a substitution row');
+    // Without the reference the row cannot be re-spelled: it is passed on as typed, as before.
+    const blind = await runLookup(cassettes.cftrF508del, { input: '7 117199645 CFTR TCTT T', without: [/\/sequence\/region\//] });
+    assertResolved(assert, blind, 'the row, reference unavailable');
+    assert.match(blind.variant, /VCF \(hg19\): 7-117199645-TCTT-TGene: CFTR/);
+    assert.deepEqual(blind.api('gnomad-v4'), ['gnomad-v4?chrom=7&pos37=117199645&ref=TCTT&alt=T']);
+
+    // The piece. (The reference as the cassette holds it.)
+    const windows = cassettes.cftrF508del.reference.concat(cassettes.krasDup.reference);
+    const asked = [];
+    const reference = async (chrom, start, end) => {
+        asked.push([chrom, start, end]);
+        return referenceSlice(windows, String(chrom).replace(/^chr/, ''), start, end);
+    };
+    assert.deepEqual(await h.leftAlignedRowAlleles('7', '117199645', 'TCTT', 'T', reference), { pos: '117199644', ref: 'ATCT', alt: 'A' });
+    assert.deepEqual(asked, [['7', 117199585, 117199709]], 'one window: 60 bases either side');
+    // Offered a window that holds the row, it reads that one instead — the
+    // lookup has it in hand already, so the row costs no request...
+    asked.length = 0;
+    const inHand = { chrom: 'chr7', start: 117199496, end: 117199798 };
+    assert.deepEqual(await h.leftAlignedRowAlleles('7', '117199645', 'TCTT', 'T', reference, inHand), { pos: '117199644', ref: 'ATCT', alt: 'A' });
+    assert.deepEqual(asked, [['chr7', 117199496, 117199798]]);
+    // ...and one that does not hold it is not used.
+    asked.length = 0;
+    for (const elsewhere of [{ chrom: 'chr7', start: 117199646, end: 117199798 }, { chrom: 'chr7', start: 117199496, end: 117199648 },
+        { chrom: 'chr7', start: 117199645, end: 117199798 }, { chrom: 'chr7', start: 117199496, end: 117199649 }]) {
+        assert.deepEqual(await h.leftAlignedRowAlleles('7', '117199645', 'TCTT', 'T', reference, elsewhere), { pos: '117199644', ref: 'ATCT', alt: 'A' });
+    }
+    assert.deepEqual(asked, Array(4).fill(['7', 117199585, 117199709]));
+    assert.equal(await h.leftAlignedRowAlleles('7', '117199644', 'ATCT', 'A', reference), null, 'left-aligned already');
+    // Shared leading bases beyond the one that anchors it.
+    assert.deepEqual(await h.leftAlignedRowAlleles('7', '117199643', 'CATCT', 'CA', reference), { pos: '117199644', ref: 'ATCT', alt: 'A' });
+    assert.deepEqual(await h.leftAlignedRowAlleles('7', '117199642', 'TCATCT', 'TCA', reference), { pos: '117199644', ref: 'ATCT', alt: 'A' });
+    // An insertion: the KRAS duplication, written at each of its seven places.
+    for (const [pos, ref, alt] of [[25398281, 'C', 'CCAC'], [25398282, 'C', 'CACC'], [25398283, 'A', 'ACCA'], [25398284, 'C', 'CCAC'],
+        [25398285, 'C', 'CACC'], [25398286, 'A', 'ACCA'], [25398285, 'CA', 'CACCA'], [25398283, 'ACCA', 'ACCACCA']]) {
+        assert.deepEqual(await h.leftAlignedRowAlleles('12', String(pos), ref, alt, reference), { pos: '25398280', ref: 'G', alt: 'GCCA' }, `12-${pos}-${ref}-${alt}`);
+    }
+    assert.equal(await h.leftAlignedRowAlleles('12', '25398280', 'G', 'GCCA', reference), null);
+    // What cannot be re-spelled, or need not be.
+    asked.length = 0;
+    assert.equal(await h.leftAlignedRowAlleles('7', '140453136', 'A', 'T', reference), null, 'a substitution');
+    assert.equal(await h.leftAlignedRowAlleles('7', '117199645', 'TC', 'AG', reference), null, 'same length');
+    assert.equal(await h.leftAlignedRowAlleles('7', '117199645', 'TCTT', '-', reference), null, 'not plain bases');
+    assert.equal(await h.leftAlignedRowAlleles('7', 'x', 'TCTT', 'T', reference), null);
+    assert.deepEqual(asked, [], 'and the reference is not read for those');
+    // (TCAT is not what GRCh37 has at 117199645. Left to slide it would end up
+    // somewhere, as some other change: this returned 7-117199641-ATCA-A.)
+    assert.equal(await h.leftAlignedRowAlleles('7', '117199645', 'TCAT', 'T', reference), null, 'a REF the reference does not hold there is not slid along it');
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+        assert.equal(await h.leftAlignedRowAlleles('7', '117199645', 'TCTT', 'T', async () => { throw new Error('503'); }), null);
+    } finally {
+        console.warn = warn;
+    }
+    assert.equal(await h.leftAlignedRowAlleles('7', '117199645', 'TCTT', 'T', async () => null), null);
+    // A complex change (neither allele a prefix of the other) stays where it is.
+    assert.equal(await h.leftAlignedRowAlleles('12', '25398283', 'ACC', 'T', reference), null);
+    console.log('ok sibling records: a row that is not left-aligned is, before gnomAD and SpliceAI are asked');
 }
 
 console.log('Sibling-record tests passed');

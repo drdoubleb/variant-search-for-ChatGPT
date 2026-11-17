@@ -70,11 +70,11 @@ assert.equal(h.proteinNameReading({ typedX: false, alleles: 3, candidates: three
 // "V600*": Ensembl gives one way; that is the allele, as before.
 assert.equal(h.proteinNameReading({ typedX: false, alleles: 1, candidates: ['chr7:g.140453136_140453137delinsTA'] }), 'allele');
 assert.equal(h.proteinNameReading(), 'allele');
-// MyVariant not answering is not "nothing on record": that cannot be said, so
-// the old behaviour stands — but a stop that needs the codon replaced is still
-// not what "X" meant.
-assert.equal(h.proteinNameReading({ typedX: false, alleles: 3, candidates: three, recordsKnown: false }), 'allele');
-assert.equal(h.proteinNameReading({ typedX: true, alleles: 3, candidates: three, recordsKnown: false }), 'any-residue');
+// MyVariant not answering changes what can be SAID — "none on record" cannot —
+// and not what is shown: there is still no record to choose one of three by.
+// (The first one Ensembl listed used to be shown then.)
+assert.equal(h.proteinNameReading({ typedX: false, alleles: 3, candidates: three, onRecord: false }), 'undetermined');
+assert.equal(h.proteinNameReading({ typedX: true, alleles: 3, candidates: three, onRecord: false }), 'any-residue');
 // The change is the second thing typed, whatever follows it.
 assert.equal(h.typedResidueX('KRAS G12X somatic', 'KRAS:p.Gly12Ter'), true);
 assert.equal(h.typedResidueX('KRAS G12* X', 'KRAS:p.Gly12Ter'), false);
@@ -131,10 +131,14 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
         assert.match(page.variant, /p\.: p\.Gly12Ter/);
         assert.match(note(page)[0], /^p\.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown: /);
         // One link per allele, each a lookup of its own; the same three whatever the order.
-        assert.deepEqual(noteLinks(page).map(decodeURIComponent).sort(), [
+        // ...and listed in the same order: the sentence does not change from
+        // one call to the next either.
+        assert.deepEqual(noteLinks(page).map(decodeURIComponent), [
             '?variant=chr12:g.25398283_25398285delinsCTA',
             '?variant=chr12:g.25398283_25398285delinsTCA',
-            '?variant=chr12:g.25398283_25398285delinsTTA']);
+            '?variant=chr12:g.25398283_25398285delinsTTA'], String(order));
+        assert.equal(note(page)[0], 'p.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown: '
+            + 'chr12:g.25398283_25398285delinsCTA, chr12:g.25398283_25398285delinsTCA, chr12:g.25398283_25398285delinsTTA.', String(order));
         assert.match(page.panel, /Resolve nomenclature · Ensembl\s*3 different nucleotide changes give this protein change, none on record/);
         // It IS a stop that was asked about: the same-protein search stands.
         assert.deepEqual(page.api('clinvar-protein').filter(r => !/retmax=/.test(r)), ['clinvar-protein?gene=KRAS&change=Gly12Ter,G12*']);
@@ -216,10 +220,13 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
     console.log('ok protein name: p.Gly12Xaa is the codon');
 }
 
-// 6. Ensembl not answering at all: nothing says whether one base would do, and
-//    no variant is on record for the stop — X is shown for what it is.
+// 6. Neither source of the alleles answering — Ensembl, nor MyVariant's list
+//    of the single-base changes at the residue (which settles these names on
+//    its own: tests/protein-substitution-alleles.test.js). Nothing then says
+//    whether one base would do, and X is shown for what it is.
 {
-    const page = await runLookup(cassettes.krasG12Stop, { input: 'KRAS G12X', without: ['variant_recoder'] });
+    const neither = ['variant_recoder', 'dbnsfp.aa.pos'];
+    const page = await runLookup(cassettes.krasG12Stop, { input: 'KRAS G12X', without: neither });
     assertResolved(assert, page, 'KRAS G12X, recoder down');
     assert.match(page.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
     assert.match(page.variant, /p\.: p\.Gly12Xaa/);
@@ -238,7 +245,7 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
         'grch37.rest.ensembl.org/lookup/symbol/homo_sapiens/KRAS?expand=1&content-type=application/json':
             cassettes.krasG12Stop.responses['grch37.rest.ensembl.org/lookup/symbol/homo_sapiens/KRAS?expand=1&content-type=application/json'],
         'grch37.rest.ensembl.org/map/translation/ENSP00000256078/61..61?content-type=application/json': { status: 200, body: codon61 } } };
-    const unanswered = await runLookup(q61WithCodon, { without: ['variant_recoder'] });
+    const unanswered = await runLookup(q61WithCodon, { without: neither });
     assertResolved(assert, unanswered, 'KRAS Q61X, recoder down');
     assert.match(unanswered.variant, /Codon region \(hg19\): chr12:g\.25380275_25380277/);
     assert.deepEqual(note(unanswered), ['"X" can mean a stop codon or any amino acid. Which nucleotide change a stop here (p.Gln61Ter) would be '
@@ -251,6 +258,7 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
     const one = Object.values(q61.responses[recoderKey].body[0]).find(value => value && value.hgvsg);
     const two = [{ T: one, TT: { ...one, hgvsg: ['NC_000012.11:g.25380276_25380277delinsAA'], spdi: ['NC_000012.11:25380275:TG:AA'] } }];
     const twoWays = await runLookup(q61WithCodon, {
+        without: ['dbnsfp.aa.pos'],
         route: (url, key, respond) => {
             if (key === recoderKey) return respond(two);
             if (/myvariant\.info\/v1\/variant\/chr12:g\.2538027/.test(key)) return respond({ success: false, error: 'Not Found.' }, 404);
@@ -273,9 +281,29 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
     assertResolved(assert, typedX, 'KRAS G12X, MyVariant down');
     assert.match(typedX.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
     assert.deepEqual(note(typedX), ['"X" was read as any amino acid (p.Gly12Xaa), not as a stop: no single-base change turns Gly12 into a stop codon.']);
-    const stop = await runLookup(cassettes.krasG12Stop, { input: 'KRAS G12*', route: down });
-    assert.doesNotMatch(note(stop).join(' '), /on record/, 'nothing is said about records MyVariant was not asked for');
-    console.log('ok protein name: a MyVariant outage is not "nothing on record"');
+    // A stop written as one, three ways to make it, and no telling which is on
+    // record: none is shown as the variant. The first one Ensembl listed used
+    // to be — a different allele from one run to the next.
+    const key = 'grch37.rest.ensembl.org/variant_recoder/human/KRAS:p.Gly12Ter?content-type=application/json';
+    const recorded = cassettes.krasG12Stop.responses[key].body;
+    const alleles = Object.keys(recorded[0]).filter(k => k !== 'warnings');
+    for (const order of [[0, 1, 2], [2, 0, 1]]) {
+        const body = [Object.fromEntries(order.map(i => [alleles[i], recorded[0][alleles[i]]]))];
+        const stop = await runLookup(cassettes.krasG12Stop, { input: 'KRAS G12*',
+            route: (url, k, respond) => (k === key ? respond(body) : down(url, k, respond)) });
+        assertResolved(assert, stop, 'KRAS G12*, MyVariant down');
+        assert.match(stop.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/, String(order));
+        assert.doesNotMatch(stop.variant, /g\.: chr12|c\.34_36delins|stop_gained/, String(order));
+        assert.equal(note(stop)[0].replace(/: chr12.*$/, ':'), 'p.Gly12Ter can be any of 3 nucleotide changes. MyVariant could not be asked which '
+            + 'of them is on record, so no single one is shown:', String(order));
+        assert.deepEqual(noteLinks(stop).map(decodeURIComponent).sort(), [
+            '?variant=chr12:g.25398283_25398285delinsCTA',
+            '?variant=chr12:g.25398283_25398285delinsTCA',
+            '?variant=chr12:g.25398283_25398285delinsTTA'], String(order));
+        assert.doesNotMatch(note(stop).join(' '), /none of them is on record/, 'nothing is said about records MyVariant was not asked for');
+        assert.match(stop.panel, /3 different nucleotide changes give this protein change, and MyVariant could not be asked which is on record/);
+    }
+    console.log('ok protein name: with MyVariant down, several alleles are the codon and "none on record" is not said');
 }
 
 // 8. A missense with a record is what it always was.
@@ -325,7 +353,11 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
     for (const typed of ['KRAS Y64*', 'KRAS Y64X']) {
         for (const order of [alleles, [...alleles].reverse()]) {
             const body = [Object.fromEntries(order.map(a => [a, recorded[0][a]]))];
-            const page = await runLookup(cassette, { input: typed, route: (url, k, respond) => (k === key ? respond(body) : undefined) });
+            // (Ensembl's answer being all there is: MyVariant's own list of the
+            // residue's single-base changes, which has no order to depend on, is
+            // withheld here and tested in protein-substitution-alleles.test.js.)
+            const page = await runLookup(cassette, { input: typed, without: ['dbnsfp.aa.pos'],
+                route: (url, k, respond) => (k === key ? respond(body) : undefined) });
             assertResolved(assert, page, `${typed}, alleles listed ${order.join(',')}`);
             assert.match(page.variant, /g\.: chr12:g\.25380266G>C/, `${typed} ${order}`);
             assert.match(page.variant, /c\.: c\.192C>G/, `${typed} ${order}`);
@@ -370,6 +402,111 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
         assert.match(page.panel, /Resolve nomenclature · Ensembl\s*its allele is one of several ClinVar has for this name — not shown as the variant/, typed);
     }
     console.log('ok protein name: X typed where ClinVar lists stop variants stays a stop');
+}
+
+// 11. The same name on a protein accession. All of the above went through the
+//     gene symbol, which is how the codon is found — so "NP_004976.2:p.Gly12Ter"
+//     still took the first of Ensembl's three alleles. The codon is found on
+//     the accession's own protein instead: Ensembl's answer names the change on
+//     each protein it is the same change on, its own among them.
+{
+    const answer = [
+        { input: 'NP_004976.2:p.Gly12Ter', hgvsg: ['NC_000012.11:g.25398283_25398285delinsCTA'],
+            hgvsp: ['ENSP00000256078.4:p.Gly12Ter', 'ENSP00000308495.3:p.Gly12Ter', 'NP_004976.2:p.Gly12Ter'] }
+    ];
+    assert.equal(h.translationForProteinName(answer, 'NP_004976.2:p.Gly12Ter'), 'ENSP00000256078');
+    assert.equal(h.translationForProteinName(answer, 'NP_004976.2:p.(Gly12*)'), 'ENSP00000256078', 'however the change is written');
+    assert.equal(h.translationForProteinName(answer, 'NP_004976.2:p.Gly13Ter'), '', 'another residue: none of them');
+    assert.equal(h.translationForProteinName([{ hgvsp: ['NP_004976.2:p.Gly12Ter'] }], 'NP_004976.2:p.Gly12Ter'), '', 'no Ensembl protein in the answer');
+    assert.equal(h.translationForProteinName([], 'ENSP00000256078.4:p.Gly12Ter'), 'ENSP00000256078', 'an Ensembl accession is its own');
+    assert.equal(h.translationForProteinName([{ hgvsp: ['ENSP00000275493.2:p.Glu746_Ala750del'] }], 'NP_005219.2:p.Glu746_Ala750del'),
+        'ENSP00000275493', 'a change that is not a substitution, by its text');
+    assert.equal(h.translationForProteinName(null, ''), '');
+
+    const cassette = cassettes.npGly12Ter;
+    const key = 'grch37.rest.ensembl.org/variant_recoder/human/NP_004976.2:p.Gly12Ter?content-type=application/json';
+    const recorded = cassette.responses[key].body;
+    const alleles = Object.keys(recorded[0]).filter(k => k !== 'warnings');
+    assert.equal(alleles.length, 3, 'Ensembl gives three alleles for NP_004976.2:p.Gly12Ter');
+    for (const order of [[0, 1, 2], [2, 0, 1], [1, 2, 0]]) {
+        const body = [Object.fromEntries(order.map(i => [alleles[i], recorded[0][alleles[i]]]))];
+        const page = await runLookup(cassette, { route: (url, k, respond) => (k === key ? respond(body) : undefined) });
+        assertResolved(assert, page, 'NP_004976.2:p.Gly12Ter');
+        assert.match(page.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/, String(order));
+        assert.doesNotMatch(page.variant, /g\.: chr12|c\.34_36delins|stop_gained/, String(order));
+        assert.match(page.variant, /Gene: KRAS/, String(order));
+        assert.match(page.variant, /p\.: p\.Gly12Ter/, String(order));
+        assert.match(note(page)[0], /^p\.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown: /);
+        assert.deepEqual(noteLinks(page).map(decodeURIComponent).sort(), [
+            '?variant=chr12:g.25398283_25398285delinsCTA',
+            '?variant=chr12:g.25398283_25398285delinsTCA',
+            '?variant=chr12:g.25398283_25398285delinsTTA'], String(order));
+        // On the protein that was named, found through Ensembl's own id for it.
+        assert.match(page.variant, /Resolved to residue 12 on NP_004976\.2 only\./, String(order));
+        assert(page.requests.some(r => /map\/translation\/ENSP00000256078\/12\.\.12/.test(r)), 'the codon is mapped on Ensembl\'s protein for it');
+        assert(page.requests.some(r => /datasets\/v2\/gene\/accession\/NP_004976\.2$/.test(r)), 'and the gene is NCBI\'s for the accession');
+        assert(!page.requests.some(r => /lookup\/symbol\/homo_sapiens\/KRAS\?expand=1/.test(r)), 'not the gene\'s canonical protein');
+    }
+    // MyVariant not answering: the codon just the same, and nothing said of records.
+    const down = (url, k, respond) => (url.hostname === 'myvariant.info' ? respond({ error: 'Service Unavailable' }, 503) : undefined);
+    const unasked = await runLookup(cassette, { route: down });
+    assertResolved(assert, unasked, 'NP_004976.2:p.Gly12Ter, MyVariant down');
+    assert.match(unasked.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
+    assert.match(note(unasked)[0], /^p\.Gly12Ter can be any of 3 nucleotide changes\. MyVariant could not be asked which of them is on record/);
+    // NCBI not saying whose accession it is: the codon is still the codon.
+    const nameless = await runLookup(cassette, { without: ['gene/accession'] });
+    assertResolved(assert, nameless, 'NP_004976.2:p.Gly12Ter, gene not learned');
+    assert.match(nameless.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
+    assert.equal(noteLinks(nameless).length, 3);
+
+    // Two alleles ON record under an accession: the best documented, whatever
+    // order Ensembl lists them in. (The first listed used to be shown here as
+    // well: no record "fitted" the name, because outside ClinVar MyVariant's
+    // protein notations carry no accession. It is Ensembl's answer that says
+    // each allele is p.Tyr64Ter on NP_004976.2.)
+    const named = { input: 'NP_004976.2:p.Tyr64Ter', hgvsp: ['ENSP00000256078.4:p.Tyr64Ter', 'NP_004976.2:p.Tyr64Ter', 'NP_203524.1:p.Tyr64Ter'] };
+    assert.equal(h.recoderAlleleNamesProtein(named, 'NP_004976.2:p.Tyr64Ter'), true);
+    assert.equal(h.recoderAlleleNamesProtein(named, 'NP_004976.2:p.(Y64*)'), true);
+    assert.equal(h.recoderAlleleNamesProtein(named, 'NP_004976.1:p.Tyr64Ter'), false, 'another version of the accession');
+    assert.equal(h.recoderAlleleNamesProtein(named, 'NP_004976.2:p.Tyr64Cys'), false, 'another change');
+    assert.equal(h.recoderAlleleNamesProtein(named, 'KRAS:p.Tyr64Ter'), false, 'a gene symbol is matched by the record, not by this');
+    assert.equal(h.recoderAlleleNamesProtein(null, 'NP_004976.2:p.Tyr64Ter'), false);
+    const twoKey = 'grch37.rest.ensembl.org/variant_recoder/human/NP_004976.2:p.Tyr64Ter?content-type=application/json';
+    const twoRecorded = cassettes.npTyr64Ter.responses[twoKey].body;
+    const twoAlleles = Object.keys(twoRecorded[0]).filter(k => k !== 'warnings');
+    assert.equal(twoAlleles.length, 2);
+    for (const order of [twoAlleles, [...twoAlleles].reverse()]) {
+        const body = [Object.fromEntries(order.map(a => [a, twoRecorded[0][a]]))];
+        const two = await runLookup(cassettes.npTyr64Ter, { route: (url, k, respond) => (k === twoKey ? respond(body) : undefined) });
+        assertResolved(assert, two, `NP_004976.2:p.Tyr64Ter, alleles listed ${order}`);
+        assert.match(two.variant, /g\.: chr12:g\.25380266G>C/, String(order));
+        assert.deepEqual([...two.document.querySelectorAll('.protein-alleles-note')].map(el => el.textContent),
+            ['p.Tyr64Ter is 2 alleles on record. This is the best documented one; the other is chr12:g.25380266G>T.'], String(order));
+    }
+    // The same on Ensembl's own id for the protein — which, written without
+    // its version, reads like a gene symbol. It is not one: the card said
+    // "Gene: ENSP00000256078", and ClinVar's names, CIViC, PubMed and the MANE
+    // lookup were asked about a gene of that name. (Found in review. Ensembl's
+    // answers below are the recorded one for the RefSeq accession, and what it
+    // says of its protein and transcript.)
+    for (const typed of ['ENSP00000256078:p.Gly12Ter', 'ENSP00000256078.4:p.Gly12Ter', 'ensp00000256078:p.G12*']) {
+        const page = await runLookup(cassette, { input: typed,
+            route: (url, k, respond) => {
+                if (/\/variant_recoder\/human\/ENSP00000256078(?:\.4)?:p\.Gly12Ter/i.test(k)) return respond(recorded);
+                if (/lookup\/id\/ENSP00000256078\?/.test(k)) return respond({ id: 'ENSP00000256078', Parent: 'ENST00000256078', object_type: 'Translation' });
+                if (/lookup\/id\/ENST00000256078\?content-type/.test(k)) return respond({ id: 'ENST00000256078', display_name: 'KRAS-004', Parent: 'ENSG00000133703' });
+                return undefined;
+            } });
+        assertResolved(assert, page, typed);
+        assert.match(page.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/, typed);
+        assert.match(page.variant, /Gene: KRAS/, typed);
+        assert.doesNotMatch(page.variant, /Gene: ENSP/i, typed);
+        assert.match(page.variant, /Resolved to residue 12 on ENSP00000256078(?:\.4)? only\./i, typed);
+        assert.deepEqual(page.requests.filter(r => /ENSP00000256078/i.test(r) && !/variant_recoder|map\/translation|myvariant\.info|lookup\/id\/ENSP/.test(r)), [],
+            `${typed}: nothing else is asked about the accession, as if it were a gene`);
+        assert(page.requests.some(r => /[?&]gene=KRAS\b/.test(r)), `${typed}: gene-level cards ask about KRAS`);
+    }
+    console.log('ok protein name: on a protein accession, several unrecorded alleles are the codon too');
 }
 
 console.log('Protein name reading tests passed');

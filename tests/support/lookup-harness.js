@@ -95,7 +95,9 @@ export async function runLookup(cassette, {
     const fetch = async (address, options = {}) => {
         const url = new URL(String(address), 'https://drdoubleb.com/variant/');
         const key = requestKey(url);
-        requests.push(key);
+        // (Its place in the log: another request may be logged while `route`
+        // is awaited, and the batch POST below rewrites its own entry.)
+        const logged = requests.push(key) - 1;
         const routed = await route(url, key, respond, options, { document });
         if (routed) return routed;
         const path = decodeURIComponent(url.pathname);
@@ -103,7 +105,7 @@ export async function runLookup(cassette, {
         // per-id recordings. Logged with the ids it asked for.
         if (url.hostname === 'myvariant.info' && path === '/v1/variant' && String(options.method).toUpperCase() === 'POST') {
             const ids = new URLSearchParams(String(options.body || '')).get('ids').split(',');
-            requests[requests.length - 1] = `${key} [POST ids=${ids.join(',')}]`;
+            requests[logged] = `${key} [POST ids=${ids.join(',')}]`;
             if (withheld(key)) return respond({ error: 'Service Unavailable' }, 503);
             return respond(ids.map((id) => {
                 const recorded = cassette.responses?.[`myvariant.info/v1/variant/${id}`];

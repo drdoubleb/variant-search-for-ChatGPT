@@ -121,7 +121,87 @@
    "chrom": "X",
    "start": 20156600,
    "seq": "CCCAGCTAAAAAAGAAAGGATGTTATTTTAAAAAGCGTAATTTATGAAAACACTTACCCTGACCATCCTCTTTGAATACCAGTTCTCTTTTTTCAGATTCATTCTCATTCTTACCCCTGCGTCTGTTTTTACCTCCTTTACCTGATGGTTTAAAAAAAAGAAAAGGAGGTAAATGACATTAATTATCTGTAAAACAGTATGAAATAAAATGAAATTAAGGC"
-  }
+  },
+  "referenceWide": {
+   "chrom": "X",
+   "start": 20156500,
+   "seq": "CTGCTTCAGCCCAGGAGGTCATGGCTGCAGTGGGCTGTAATCGTGCCACCACACTTCACCCTGGGCGATGGGCAAGACGCTGTCTCAAAAAAATAAAGTCCCCAGCTAAAAAAGAAAGGATGTTATTTTAAAAAGCGTAATTTATGAAAACACTTACCCTGACCATCCTCTTTGAATACCAGTTCTCTTTTTTCAGATTCATTCTCATTCTTACCCCTGCGTCTGTTTTTACCTCCTTTACCTGATGGTTTAAAAAAAAGAAAAGGAGGTAAATGACATTAATTATCTGTAAAACAGTATGAAATAAAATGAAATTAAGGCTTATAAAACCATTTTTTAAAAGATCACTTAAATTAAAAAATTCATCTATTTTAGCTACACAATCATATTAAATTTACAAT"
+  },
+  "vepLeftAligned": [
+   {
+    "seq_region_name": "X",
+    "most_severe_consequence": "inframe_insertion",
+    "allele_string": "-/AGATTCATTCTCATTCTTACCCCTGCGTCT",
+    "input": "X:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT",
+    "strand": 1,
+    "end": 20156693,
+    "transcript_consequences": [
+     {
+      "hgvsc": "NM_001412.4:c.34_63dup",
+      "used_ref": "-",
+      "cdna_end": 262,
+      "cds_start": 63,
+      "gene_id": "1964",
+      "canonical": 1,
+      "hgvsp": "NP_001403.1:p.Arg12_Ser21dup",
+      "protein_end": 22,
+      "cds_end": 64,
+      "gene_symbol": "EIF1AX",
+      "cdna_start": 261,
+      "gene_symbol_source": "EntrezGene",
+      "protein_start": 21,
+      "variant_allele": "AGATTCATTCTCATTCTTACCCCTGCGTCT",
+      "transcript_id": "NM_001412.4",
+      "amino_acids": "-/RRRGKNENES",
+      "consequence_terms": [
+       "inframe_insertion"
+      ],
+      "codons": "-/AGACGCAGGGGTAAGAATGAGAATGAATCT",
+      "impact": "MODERATE",
+      "given_ref": "-",
+      "biotype": "protein_coding",
+      "strand": -1
+     },
+     {
+      "transcript_id": "NR_023358.1",
+      "gene_id": "100158262",
+      "used_ref": "-",
+      "variant_allele": "AGATTCATTCTCATTCTTACCCCTGCGTCT",
+      "gene_symbol": "SCARNA9L",
+      "given_ref": "-",
+      "biotype": "ncRNA",
+      "distance": 2162,
+      "gene_symbol_source": "EntrezGene",
+      "strand": -1,
+      "canonical": 1,
+      "consequence_terms": [
+       "upstream_gene_variant"
+      ],
+      "impact": "MODIFIER"
+     },
+     {
+      "variant_allele": "AGATTCATTCTCATTCTTACCCCTGCGTCT",
+      "used_ref": "-",
+      "transcript_id": "NR_046592.2",
+      "gene_id": "100874078",
+      "consequence_terms": [
+       "upstream_gene_variant"
+      ],
+      "canonical": 1,
+      "impact": "MODIFIER",
+      "biotype": "lncRNA",
+      "gene_symbol": "EIF1AX-AS1",
+      "given_ref": "-",
+      "strand": 1,
+      "gene_symbol_source": "EntrezGene",
+      "distance": 1392
+     }
+    ],
+    "id": "X:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT",
+    "start": 20156694,
+    "assembly_name": "GRCh37"
+   }
+  ]
  },
  "eif1axReadme": {
   "row": "X 20148674 EIF1AX T TG",
@@ -597,7 +677,7 @@
         "gnomade_amr": 0.003958,
         "gnomade_afr": 0.002302,
         "eas": 0,
-        "gnomade_eas": 2.524e-05
+        "gnomade_eas": 0.00002524
        }
       },
       "seq_region_name": "7",
