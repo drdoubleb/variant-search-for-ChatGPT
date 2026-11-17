@@ -130,15 +130,20 @@ async function pubtatorVariantSearch({ gene, variant, extra, maxResults, apiKey 
 //
 // Part of a variant surviving is still a search for it ("p.Glu746_Ala750del"
 // loses "p.Glu746" and matches on "Ala750del"), so only a variant with nothing
-// left counts as dropped.
+// left of it counts as dropped — nothing that says which variant, that is. A
+// variant is told apart by its position: "c.1026+59T>G" loses "c.1026+59T", and
+// what PubMed then searches is PTEN AND "G" — 1,491 papers; "c.489+1G>T" is
+// CFTR AND "T", 8,572. A stray base is not the variant, nor is a "del".
 export function variantPhraseDropped(variant, phrasesNotFound) {
-    let rest = String(variant || '').toLowerCase();
-    if (!/[a-z0-9]/.test(rest)) return false;
+    const whole = String(variant || '').toLowerCase();
+    if (!/[a-z0-9]/.test(whole)) return false;
+    let rest = whole;
     for (const phrase of Array.isArray(phrasesNotFound) ? phrasesNotFound : []) {
         const dropped = String(phrase || '').toLowerCase();
         if (dropped) rest = rest.split(dropped).join(' ');
     }
-    return !/[a-z0-9]/.test(rest);
+    if (rest === whole) return false; // nothing of the variant was dropped
+    return /\d/.test(whole) ? !/\d/.test(rest) : !/[a-z0-9]/.test(rest);
 }
 
 export default async function handler(req, res) {

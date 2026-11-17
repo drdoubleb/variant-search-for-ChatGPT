@@ -82,6 +82,19 @@ assert.equal(variantPhraseDropped('V600E', []), false);
 assert.equal(variantPhraseDropped('V600E', undefined), false);
 assert.equal(variantPhraseDropped('V600E', ['hgsoc']), false, 'some other word was dropped, not the variant');
 assert.equal(variantPhraseDropped('', ['D362fs']), false, 'no variant was asked about');
+// What says which variant it is, is the position. With that dropped, PubMed
+// goes on to search for the base that is left: PTEN AND "G" (1,491 papers),
+// CFTR AND "T" (8,572); "A" it ignores altogether (CFTR alone: 15,803).
+assert.equal(variantPhraseDropped('c.1026+59T>G', ['c.1026+59T']), true);
+assert.equal(variantPhraseDropped('c.489+1G>T', ['c.489+1G']), true);
+assert.equal(variantPhraseDropped('c.1585-1G>A', ['c.1585-1G']), true);
+assert.equal(variantPhraseDropped('c.5266_5277del', ['c.5266_5277']), true, 'a bare "del" is not the variant either');
+assert.equal(variantPhraseDropped('c.1083_1084insCA', ['1084insCA']), false, 'a position is still being searched');
+assert.equal(variantPhraseDropped('c.35G>A', []), false, 'PubMed knew it as a phrase');
+// A variant that never had a position is judged as before.
+assert.equal(variantPhraseDropped('exon 14 skipping', ['skipping']), false);
+assert.equal(variantPhraseDropped('amplification', ['amplification']), true);
+assert.equal(variantPhraseDropped('MET amplification', ['metamp']), false);
 
 function fakeResponse() {
     return {
@@ -123,6 +136,20 @@ async function pubmed(query, upstream) {
     assert.equal(out.status, 200);
     assert.deepEqual(out.payload, { total: 0, articles: [], backend: 'term', notFound: ['D362fs'] });
     assert(!out.asked.some(u => /esummary|efetch/.test(u)), 'the gene-only papers are not fetched');
+}
+{
+    // As recorded: PubMed does not know "c.1026+59T", and answers for PTEN and
+    // the letter G.
+    const out = await pubmed({ term: 'PTEN c.1026+59T>G', gene: 'PTEN', variant: 'c.1026+59T>G', limit: '5' }, (url) => {
+        if (url.includes('/entity/autocomplete/')) return [];
+        if (url.includes('esearch.fcgi')) {
+            return { esearchresult: { count: '1491', idlist: ['39000001', '39000002'], querytranslation: '"PTEN"[All Fields] AND "G"[All Fields]',
+                errorlist: { phrasesnotfound: ['c.1026+59T'], fieldsnotfound: [] } } };
+        }
+        throw new Error(`unexpected upstream request ${url}`);
+    });
+    assert.deepEqual(out.payload, { total: 0, articles: [], backend: 'term', notFound: ['c.1026+59T'] });
+    assert(!out.asked.some(u => /esummary|efetch/.test(u)), 'the papers on PTEN and "G" are not fetched');
 }
 {
     // A variant PubMed does know is answered as before.

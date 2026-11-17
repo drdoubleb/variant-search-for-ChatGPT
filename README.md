@@ -900,7 +900,11 @@ the AI review as literature on the variant. `esearch` names what it discarded
 returns no articles and the phrase, and the card says
 `no article in PubMed uses "D362fs"`. Part of a variant surviving
 (`p.Glu746_Ala750del` loses `p.Glu746` and still matches on `Ala750del`) is left
-alone, as is any search that names no variant.
+alone, as is any search that names no variant. What has to survive is something
+that says which variant it is, though — a position. `PTEN c.1026+59T>G` loses
+`c.1026+59T` and PubMed goes on to search PTEN and the letter "G": 1,491 papers
+(`CFTR c.489+1G>T`: CFTR and "T", 8,572). A base on its own, or a bare "del",
+counts as the variant having been dropped.
 
 **A stop typed by hand.** `TP53 R213*`, `R213X` and `p.Arg213*` are all read as
 `TP53:p.Arg213Ter`; the first two used to be passed on as typed and came back
