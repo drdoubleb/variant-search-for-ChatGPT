@@ -1191,23 +1191,23 @@ const VCF_NORMALIZATION_PAD = 60;
  * Left-aligned, and with no more shared leading bases than the one that
  * anchors it ("CATCT > CA" is "ATCT > A", one base along).
  *
- * `window` — { chrom, start, end } — names a stretch of reference to read
+ * `stretch` — { chrom, start, end } — names a stretch of reference to read
  * instead of the 60 bases either side: the lookup has one in hand around an
  * indel (gatherAlleleRecords), and reading that one costs no request.
  */
-async function leftAlignedRowAlleles(chrom, pos, ref, alt, fetchReference = fetchGrch37ReferenceSequence, window = null) {
+async function leftAlignedRowAlleles(chrom, pos, ref, alt, fetchReference = fetchGrch37ReferenceSequence, stretch = null) {
     const start = Number(pos);
     const r = String(ref || '').toUpperCase();
     const a = String(alt || '').toUpperCase();
     if (!Number.isInteger(start) || r.length === a.length || !/^[ACGT]+$/.test(r) || !/^[ACGT]+$/.test(a)) return null;
     if (Math.max(r.length, a.length) > MAX_VCF_ALLELE_SPAN) return null;
-    // (The window offered has to hold the row, with a base to spare either side.)
-    const holdsRow = window && window.start < start && window.end > start + r.length;
-    const windowStart = holdsRow ? window.start : Math.max(1, start - VCF_NORMALIZATION_PAD);
-    const windowEnd = holdsRow ? window.end : start + r.length + VCF_NORMALIZATION_PAD;
+    // (The stretch offered has to hold the row, with a base to spare either side.)
+    const holdsRow = stretch && stretch.start < start && stretch.end > start + r.length;
+    const windowStart = holdsRow ? stretch.start : Math.max(1, start - VCF_NORMALIZATION_PAD);
+    const windowEnd = holdsRow ? stretch.end : start + r.length + VCF_NORMALIZATION_PAD;
     let seq = null;
     try {
-        seq = await fetchReference(holdsRow ? window.chrom : chrom, windowStart, windowEnd);
+        seq = await fetchReference(holdsRow ? stretch.chrom : chrom, windowStart, windowEnd);
     } catch (err) {
         console.warn('Reference sequence unavailable for a row\'s alleles', err);
     }
