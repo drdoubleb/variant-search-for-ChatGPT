@@ -675,7 +675,27 @@ alone rather than lost.
 Four columns are a tight fit: at the size of the card's other tables they ran
 24 px past the card's edge, which cuts off what crosses it (the AN column,
 measured in Chromium). They are set a size down — 336 px in a 336 px card — and
-sit in a box that scrolls sideways where the card is narrower still (a phone).
+sit in a box that scrolls sideways where the card is narrower still.
+
+**Tables wider than their card scroll; they are no longer cut off.** The same
+measurement showed the population tables of the nuclear data sets doing what
+the new ones would have. A card's width follows the window — three columns of
+cards, two below 980 px, one below 640 px — and the card cuts off whatever runs
+past its edge:
+
+| window | card | v4.1 population table (351 px) was |
+| --- | --- | --- |
+| 1180 px | 372 px | whole (reaching into the card's padding) |
+| 1000 px | 312 px | cut off by 39 px: no AN column |
+| 390 px (a phone) | 358 px | cut off by 11 px: AN without its last digits |
+| 320 px | 288 px | cut off by 81 px: no AN, AC without its last digits |
+
+A number that has lost its last digits still reads as a number. Each of these
+tables now sits in a box that scrolls sideways (`scrollableTable`); for the
+nuclear ones the box reaches into the card's padding as the tables always did,
+so nothing changes where they fit. A phone or a Mac shows no scrollbar until
+the box is scrolled, and a table that scrolls then looks exactly like one that
+is cut off — so the side with more to show is shaded.
 
 Two things found here apply to every chromosome:
 

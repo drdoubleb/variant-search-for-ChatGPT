@@ -295,6 +295,9 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
         for (const table of section.querySelectorAll('details table')) {
             assert.match(table.getAttribute('style'), /font-size:\s*0\.82rem/);
             assert.match(table.parentElement.getAttribute('style') || '', /overflow-x:\s*auto/, 'the table scrolls inside the card');
+            // (Shaded on the side that has more to show: a phone shows no scrollbar.)
+            assert.match(table.parentElement.getAttribute('style'), /background:.*radial-gradient/);
+            assert.doesNotMatch(table.parentElement.getAttribute('style'), /margin-right/, 'it fits the card as it is');
             assert.equal(table.parentElement.parentElement.tagName, 'DETAILS');
             assert([...table.querySelectorAll('th, td')].every(cell => /padding:\s*0\.25rem 0\.3rem/.test(cell.getAttribute('style'))));
         }
@@ -369,11 +372,29 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
     // A nuclear variant's card is as it was: v2 link, and the proxy asked.
     {
         const api = gnomad();
-        const page = await runLookup(cassettes.brafV600E, { route: api.route });
+        const page = await runLookup(cassettes.brafV600E, { route: api.route,
+            backend: { 'gnomad-v4': () => ({ status: 'found', grch38Id: '7-140753336-A-T', data: { genome: null,
+                exome: { ac: 2, an: 1460618, af: 0.00000137, populations: [{ id: 'nfe', ac: 2, an: 1111822 }, { id: 'afr', ac: 0, an: 33480 }] } } }) } });
         assert.deepEqual(api.asked, []);
         assert.equal(page.api('gnomad-v4').length, 1);
         assert.match(page.cards.gnomAD, /v2\.1\.1 · GRCh37.*v4\.1 · GRCh38 \(gnomAD API\)/);
         assert(gnomadLinks(page).some(href => /\/variant\/7-140453136-A-T\?dataset=gnomad_r2_1$/.test(href)));
+        // Its population tables — five columns, wider than the card on a phone
+        // or in a narrower window, where the card cut them off mid-number —
+        // scroll sideways too. Their box reaches into the card's padding, as
+        // the tables always did, so nothing changes where they fit.
+        const tables = gnomadTables(page);
+        assert.deepEqual(Object.keys(tables), ['v2.1.1 population details', 'v4.1 population details']);
+        assert.deepEqual(tables['v4.1 population details'], [['Dataset', 'Population', 'AF', 'AC', 'AN'],
+            ['Exome', 'NFE', '0.0002%', '2', '1111822'], ['Exome', 'AFR', '0.0000%', '0', '33480']]);
+        const card = [...page.document.querySelectorAll('.card')].find(el => el.querySelector('h3')?.textContent === 'gnomAD');
+        const boxes = [...card.querySelectorAll('details table')].map(table => table.parentElement);
+        assert.equal(boxes.length, 2);
+        for (const box of boxes) {
+            assert.equal(box.tagName, 'DIV');
+            assert.match(box.getAttribute('style'), /overflow-x:\s*auto;\s*margin-right:\s*-1rem;\s*background:.*radial-gradient/);
+            assert.equal(box.parentElement.tagName, 'DETAILS');
+        }
     }
     console.log('ok mitochondrial lookup: gnomAD\'s mitochondrial call set, not a liftover error');
 

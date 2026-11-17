@@ -6260,6 +6260,41 @@ async function fetchGnomadMitochondrial(pos, ref, alt) {
     };
 }
 
+/*
+ * A table in a card's folded section, in a box that scrolls sideways where
+ * the card is narrower than the table.
+ *
+ * A card cuts off what runs past its edge, and its width follows the window
+ * (three columns of cards, two below 980 px, one below 640 px). Measured in
+ * Chromium, the v4.1 population table is 351 px wide: it fits a 372 px card
+ * by reaching into the card's padding, loses 11 px of its AN column in a
+ * 358 px one (a phone) and all of that column, with part of AC, at 288 px —
+ * and a number that has lost its last digits still reads as a number.
+ *
+ * `intoPadding`: the box reaches into the card's right padding as those tables
+ * do, so that nothing changes where they fit today — the table scrolls exactly
+ * where digits used to be cut off.
+ *
+ * Not every browser shows a scrollbar (phones and macOS show none until the
+ * box is scrolled), and without one a table that scrolls looks just like one
+ * that is cut off. So the side that has more to show is shaded: a shadow fixed
+ * to the box's edge, covered by a white patch that travels with the table and
+ * arrives over the shadow when that end of the table is in view.
+ */
+const SCROLL_SHADE = [
+    'linear-gradient(to right, #fff 30%, rgba(255,255,255,0)) left center / 28px 100% no-repeat local',
+    'linear-gradient(to left, #fff 30%, rgba(255,255,255,0)) right center / 28px 100% no-repeat local',
+    'radial-gradient(farthest-side at 0 50%, rgba(0,0,0,0.36), rgba(0,0,0,0)) left center / 14px 100% no-repeat scroll',
+    'radial-gradient(farthest-side at 100% 50%, rgba(0,0,0,0.36), rgba(0,0,0,0)) right center / 14px 100% no-repeat scroll'
+].join(', ');
+function scrollableTable(table, { intoPadding = false } = {}) {
+    const wrap = document.createElement('div');
+    wrap.className = 'table-scroll';
+    wrap.style.cssText = `overflow-x:auto;${intoPadding ? 'margin-right:-1rem;' : ''}background:${SCROLL_SHADE};`;
+    wrap.appendChild(table);
+    return wrap;
+}
+
 // Fill the gnomAD card's lower section for a mitochondrial variant: the two
 // carrier frequencies, what they mean, and a link to gnomAD's own page.
 // `result` is fetchGnomadMitochondrial()'s answer, or null when gnomAD could
@@ -6356,10 +6391,7 @@ function renderGnomadMitochondrial(container, variantId, result) {
             table.appendChild(tbody);
             // Where the card is narrower still (a phone), the table scrolls
             // sideways inside it rather than losing its last column.
-            const scroll = document.createElement('div');
-            scroll.style.overflowX = 'auto';
-            scroll.appendChild(table);
-            details.appendChild(scroll);
+            details.appendChild(scrollableTable(table));
             container.appendChild(details);
         };
         // (Ancestry groups in capitals, as the other tables of this card have them.)
@@ -12414,7 +12446,7 @@ const initVariantSearchUi = () => {
                         });
                     }
                     table.appendChild(tbody);
-                    detailsEl.appendChild(table);
+                    detailsEl.appendChild(scrollableTable(table, { intoPadding: true }));
                     content.appendChild(detailsEl);
                 }
 
@@ -12611,7 +12643,7 @@ const initVariantSearchUi = () => {
                                 v4Tbody.appendChild(tr);
                             });
                             v4Table.appendChild(v4Tbody);
-                            v4Details.appendChild(v4Table);
+                            v4Details.appendChild(scrollableTable(v4Table, { intoPadding: true }));
                             v4Section.appendChild(v4Details);
                         }
                     }).catch(() => {
