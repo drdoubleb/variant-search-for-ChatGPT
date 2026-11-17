@@ -813,6 +813,13 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     [{ accession: 'NM_004992.4', kind: 'plus', known: true, hitId: r306c._id, inClinvar: false }], 'a record ClinVar does not have is not said to be ClinVar\'s');
     assert.deepEqual(h.settledNameAlternatives([stop], settled, 'NM_001110792.2', ['NM_004992.4']), [], 'no record there: nothing to add');
     assert.deepEqual(h.settledNameAlternatives([stop, { ...stop }], settled, 'NM_001110792.2', ['NM_004992.4']), []);
+    // The record that settled the name is not its own namesake: KRAS c.35G>A is
+    // one record, and carries the name on both of KRAS's clinical transcripts.
+    {
+        const g12d = record('chr12:g.25398284C>T', ['NM_004985.5:c.35G>A', 'NM_033360.4:c.35G>A']);
+        assert.deepEqual(h.settledNameAlternatives([g12d], { accession: 'NM_004985.5', change: 'c.35G>A', hitId: g12d._id },
+            'NM_004985.5', ['NM_033360.4']), []);
+    }
     // ClinVar's name on the Plus Clinical transcript: MANE Select is offered, known or not.
     const onPlus = { accession: 'NM_004992.4', change: 'c.916C>T', hitId: r306c._id };
     assert.deepEqual(h.settledNameAlternatives([r306c], onPlus, 'NM_001110792.2', ['NM_004992.4']),
