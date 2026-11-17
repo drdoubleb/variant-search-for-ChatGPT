@@ -60,6 +60,11 @@ function mitochondrialToChr(value) {
     return m ? `chrMT:g.${m[1]}` : null;
 }
 
+// The mitochondrial chromosome under any of the names it arrives by.
+function isMitochondrialChromosome(chrom) {
+    return /^(?:chr)?MT?$/i.test(String(chrom || '').trim());
+}
+
 const DEFAULT_BACKEND_API_BASE_URL = 'https://variant-search-for-chat-gpt.vercel.app';
 // The canonical production Vercel host. Any *other* *.vercel.app host is a
 // preview/branch deployment.
@@ -344,8 +349,13 @@ function makeFetchWithRetry(fetchImpl) {
         const attempts = Math.max(1, retryOpts.attempts ?? 3);
         const baseDelayMs = retryOpts.baseDelayMs ?? 400;
         const onAttempt = typeof retryOpts.onAttempt === 'function' ? retryOpts.onAttempt : null;
+        // `shouldStop` lets a caller that no longer needs the answer (another
+        // source gave it first) call off the attempts still to come: one more
+        // try would only add load to a service that is already struggling.
+        const shouldStop = typeof retryOpts.shouldStop === 'function' ? retryOpts.shouldStop : null;
         let lastErr = null;
         for (let attempt = 1; attempt <= attempts; attempt++) {
+            if (attempt > 1 && shouldStop && shouldStop()) break;
             if (onAttempt) onAttempt({ attempt, attempts });
             try {
                 const res = await fetchImpl(url, options, timeoutMs);
@@ -1227,6 +1237,57 @@ function sameGenomicAllele(a, b, windowStart, seq) {
     return resultA === resultB;
 }
 
+/*
+ * Two alleles that cannot be the same one, shown without the reference.
+ *
+ * Whether two spellings of an indel are one allele is normally read off the
+ * reference — and Ensembl's sequence endpoint is the one the comparison then
+ * depends on. When it is down the answer was "cannot tell" for every pair, and
+ * a MyVariant record whose ClinVar entry belongs to the neighbouring allele was
+ * shown, classification and all, for the allele typed. Two things need no
+ * reference:
+ *
+ *   - Alleles that change the sequence length by different amounts differ.
+ *     MyVariant files ClinVar's g.41209082dup (one base) under
+ *     g.41209079_41209080dup (two).
+ *   - An insertion slid k positions along a repeat has its bases rotated by k:
+ *     insCA at 699^700 is, if anything, insAC at 700^701 — never insCA there.
+ *     (If S·W = W·T for the bases W between the two sites, T is S rotated by
+ *     |W|.) MyVariant files ClinVar's g.32906700_32906701insCA under
+ *     g.32906699_32906700insCA.
+ *
+ * Returns true only on such a proof; false means "the reference must decide".
+ */
+function netLengthChange(desc) {
+    if (!desc) return null;
+    const span = desc.end - desc.start + 1;
+    // Bases spelled out that do not fill the stated span: not a notation to reason from.
+    if (desc.refSeq && desc.type !== 'sub' && desc.refSeq.length !== span) return null;
+    switch (desc.type) {
+        case 'sub': case 'inv': return 0;
+        case 'ins': return desc.altSeq ? desc.altSeq.length : null;
+        case 'dup': return span;
+        case 'del': return -span;
+        case 'delins': return desc.altSeq ? desc.altSeq.length - span : null;
+        default: return null;
+    }
+}
+function provablyDifferentAlleles(a, b) {
+    if (!a || !b) return false;
+    if (a.chrom !== b.chrom) return true;
+    const changeA = netLengthChange(a);
+    const changeB = netLengthChange(b);
+    if (changeA !== null && changeB !== null && changeA !== changeB) return true;
+    // Two insertions written "g.N_N+1ins…", bases given.
+    const plainInsertion = d => d.type === 'ins' && d.altSeq && d.end === d.start + 1;
+    if (plainInsertion(a) && plainInsertion(b) && a.altSeq.length === b.altSeq.length) {
+        const n = a.altSeq.length;
+        const shift = (((b.start - a.start) % n) + n) % n;
+        return a.altSeq.slice(shift) + a.altSeq.slice(0, shift) !== b.altSeq;
+    }
+    return false;
+}
+
 // Furthest apart two spellings of one indel are ever expected to sit, and the
 // widest stretch of reference fetched to compare them. Repeat tracts that let
 // an indel slide are tens of bases long; a "re-spelling" kilobases away is a
@@ -1282,7 +1343,12 @@ async function compareGenomicAlleles(query, resolved, fetchReference = fetchIden
     } catch (err) {
         console.warn('Reference sequence unavailable for allele comparison', err);
     }
-    if (!seq) return { status: 'unverified', detail: 'reference sequence unavailable' };
+    if (!seq) {
+        // Some pairs need no reference to be told apart (see provablyDifferentAlleles).
+        return provablyDifferentAlleles(q, r)
+            ? { status: 'different', detail: '' }
+            : { status: 'unverified', detail: 'reference sequence unavailable' };
+    }
     const same = sameGenomicAllele(queryId, resolvedId, windowStart, seq);
     if (same === null) return { status: 'unverified', detail: 'notation does not fit the reference' };
     return { status: same ? 'same' : 'different', detail: '' };
@@ -1688,9 +1754,14 @@ function tupleVcfAlleles(tuple, vcfData) {
 // resolvedAlleles: optional { chrom, pos, ref, alt } from resolveVcfAlleles(), which
 // recovers VCF alleles for indels whose HGVS notation does not spell them out.
 function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData, resolvedAlleles) {
+    // gnomAD v2 has no mitochondrial variants (its page for one says so); the
+    // page that exists is the mitochondrial call set's, under v4.
+    const variantPage = (chrom, pos, ref, alt) => (isMitochondrialChromosome(chrom)
+        ? gnomadMitochondrialUrl(gnomadMitochondrialId(pos, ref, alt))
+        : `https://gnomad.broadinstitute.org/variant/${chrom}-${pos}-${ref}-${alt}?dataset=gnomad_r2_1`);
     if (resolvedAlleles && resolvedAlleles.chrom && resolvedAlleles.pos && resolvedAlleles.ref && resolvedAlleles.alt) {
         const { chrom, pos, ref, alt } = resolvedAlleles;
-        return `https://gnomad.broadinstitute.org/variant/${chrom}-${pos}-${ref}-${alt}?dataset=gnomad_r2_1`;
+        return variantPage(chrom, pos, ref, alt);
     }
     // Raw token input (e.g. "10 89692913 PTEN G GG") is preferred because it
     // preserves REF/ALT for indels even when gVariant is normalised to ins/delins.
@@ -1699,8 +1770,9 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData, resolv
         const chrom = tuple.chrom.replace(/^chr/i, '');
         const alleles = tupleVcfAlleles(tuple, vcfData);
         if (alleles) {
-            return `https://gnomad.broadinstitute.org/variant/${chrom}-${alleles.pos}-${alleles.ref}-${alleles.alt}?dataset=gnomad_r2_1`;
+            return variantPage(chrom, alleles.pos, alleles.ref, alleles.alt);
         }
+        if (isMitochondrialChromosome(chrom)) return '';
         // No alleles available — fall back to a region view spanning the variant so
         // the button still appears (and, for an indel, actually covers the event).
         const startNum = Number(tuple.start ?? tuple.pos);
@@ -1711,7 +1783,7 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData, resolv
     const source = annotationId || gVariant || '';
     const m = String(source).match(/^chr([0-9XYMT]+):g\.(\d+)([A-Za-z-]+)>([A-Za-z-]+)$/i);
     if (!m) return '';
-    return `https://gnomad.broadinstitute.org/variant/${m[1]}-${m[2]}-${m[3].toUpperCase()}-${m[4].toUpperCase()}?dataset=gnomad_r2_1`;
+    return variantPage(m[1], m[2], m[3].toUpperCase(), m[4].toUpperCase());
 }
 
 // Build a UCSC Genome Browser link (hg19/GRCh37) centered on the variant, with a
@@ -2565,7 +2637,7 @@ function recoderHostsFor(query) {
     return parts && !/^MT?$/.test(parts.chrom) ? RECODER_HOSTS.slice(0, 1) : RECODER_HOSTS;
 }
 
-async function fetchVariantRecoderEnsembl(query) {
+async function fetchVariantRecoderEnsembl(query, { abandoned = null } = {}) {
     // Ensembl names the mitochondrial chromosome MT ("MT:g.8993T>G") and cannot
     // parse MyVariant's "chrMT:g.…" — the one spelling the rest of this pipeline
     // uses, since it is the one MyVariant files records under.
@@ -2583,13 +2655,15 @@ async function fetchVariantRecoderEnsembl(query) {
                 }
             }, API_TIMEOUT_MS.recoder, {
                 attempts: attemptsPerHost,
+                shouldStop: abandoned,
                 onAttempt: ({ attempt }) => LookupProgress.attempt(
                     'recoder', hostIdx * attemptsPerHost + attempt, hosts.length * attemptsPerHost)
             });
         } catch (err) {
-            // Transport-level failure after this host's retries — try the next host.
+            // Transport-level failure after this host's retries — try the next host,
+            // unless the answer is no longer wanted.
             lastErr = err;
-            if (err && err.retryable && hostIdx < hosts.length - 1) continue;
+            if (err && err.retryable && hostIdx < hosts.length - 1 && !(abandoned && abandoned())) continue;
             throw err;
         }
         if (!response.ok) {
@@ -2706,7 +2780,11 @@ async function fetchVariationServicesRecoder(query) {
 // usable answer is taken. A name outside NCBI's scope waits for Ensembl as before.
 async function fetchVariantRecoder(query) {
     let ensemblErr = null;
-    const ensembl = fetchVariantRecoderEnsembl(query).catch((err) => { ensemblErr = err; return null; });
+    // Once NCBI's answer has been taken, Ensembl's remaining retries are called
+    // off: nothing reads their answer, and the service is slow as it is.
+    let answerTaken = false;
+    const ensembl = fetchVariantRecoderEnsembl(query, { abandoned: () => answerTaken })
+        .catch((err) => { ensemblErr = err; return null; });
     const pending = Symbol('pending');
     const early = await Promise.race([
         ensembl,
@@ -2730,7 +2808,10 @@ async function fetchVariantRecoder(query) {
         })
         // Ensembl has already failed.
         : await ncbi;
-    if (answer) return answer;
+    if (answer) {
+        answerTaken = true;
+        return answer;
+    }
     // Both done without an answer (the promise above resolves null only then).
     await ensembl;
     throw ensemblErr || new Error('Variant recoder request failed');
@@ -2917,6 +2998,9 @@ function knownHg38Start(annotation, pos37) {
 async function fetchGnomadV4(chrom, pos37, ref, alt, pos38) {
     const c = String(chrom).replace(/^chr/i, '');
     if (!c || !pos37 || !ref || !alt) return null;
+    // Mitochondrial variants live in a call set of their own, which the proxy
+    // does not read (see fetchGnomadMitochondrial).
+    if (isMitochondrialChromosome(c)) return fetchGnomadMitochondrial(pos37, ref, alt).catch(() => null);
     const endpoint = getConfiguredApiEndpoint('GNOMAD_V4_API_ENDPOINT', '/api/gnomad-v4');
     const params = new URLSearchParams({ chrom: c, pos37: String(pos37), ref: ref.toUpperCase(), alt: alt.toUpperCase() });
     const hinted = Number.parseInt(pos38, 10);
@@ -5189,13 +5273,137 @@ async function fetchClingenErepo(gVariant) {
  * One CORS-open GraphQL query against the gnomAD API (v2, GRCh37 — the
  * exome-heavy dataset constraint was computed on).
  */
+const GNOMAD_API_URL = 'https://gnomad.broadinstitute.org/api';
+
+/*
+ * gnomAD's mitochondrial call set.
+ *
+ * gnomAD keeps mitochondrial variants apart from the nuclear ones: a call set
+ * of its own, which counts carriers by heteroplasmy (homoplasmic — at least
+ * 95 % of a person's copies; heteroplasmic — 10 to 95 %), reached through its
+ * own query, on the one sequence both assemblies share, and absent from v2
+ * altogether. The v4 proxy looks up nuclear variants only: asked for one on
+ * "M" it tried a liftover, Ensembl rejected the chromosome name, and the card
+ * told the reader "the Ensembl liftover service is not responding … try again
+ * shortly" — for every mitochondrial variant, every time; the v2 link beside
+ * it opened a gnomAD page saying v2 has no such variants. The call set is read
+ * here instead, with one query against gnomAD's CORS-open API (the same one
+ * gene constraint comes from).
+ */
+const GNOMAD_MITOCHONDRIAL_DATASET = 'gnomAD mitochondrial call set';
+
+// "M-1555-A-G" — the id gnomAD files a mitochondrial variant under (VCF-style
+// alleles; no liftover, the sequence is the same in both builds). '' when the
+// alleles are not plain bases.
+function gnomadMitochondrialId(pos, ref, alt) {
+    const position = Number.parseInt(pos, 10);
+    const r = String(ref || '').toUpperCase();
+    const a = String(alt || '').toUpperCase();
+    if (!Number.isInteger(position) || position < 1 || !/^[ACGT]+$/.test(r) || !/^[ACGT]+$/.test(a)) return '';
+    return `M-${position}-${r}-${a}`;
+}
+
+function gnomadMitochondrialUrl(variantId) {
+    return variantId ? `https://gnomad.broadinstitute.org/variant/${variantId}?dataset=gnomad_r4` : '';
+}
+
+// Resolves to { status: 'found', variant_id, an, ac_hom, ac_het, af_hom, af_het,
+// max_heteroplasmy, … } or { status: 'not_found', variant_id, … }; null when the
+// alleles cannot be written as a gnomAD id. Throws when gnomAD could not be
+// asked, so "not in gnomAD" is never said on the strength of an outage.
+async function fetchGnomadMitochondrial(pos, ref, alt) {
+    const variantId = gnomadMitochondrialId(pos, ref, alt);
+    if (!variantId) return null;
+    const query = `query($id: String!) {
+        mitochondrial_variant(variant_id: $id, dataset: gnomad_r4) {
+            variant_id an ac_hom ac_het max_heteroplasmy
+        }
+    }`;
+    const res = await fetchWithTimeout(GNOMAD_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ query, variables: { id: variantId } })
+    }, API_TIMEOUT_MS.gnomadV4);
+    if (!res.ok) throw new Error(`gnomAD request failed (${res.status})`);
+    const data = await res.json();
+    const hit = data && data.data && data.data.mitochondrial_variant;
+    const base = { dataset: GNOMAD_MITOCHONDRIAL_DATASET, variant_id: variantId };
+    if (!hit) {
+        // A variant gnomAD does not hold comes back as a "Variant not found"
+        // error beside null data. Any other error is a failure to answer.
+        const messages = ((data && data.errors) || []).map((e) => String((e && e.message) || ''));
+        if (messages.some((m) => !/not found/i.test(m))) throw new Error(`gnomAD: ${messages.join('; ')}`);
+        return { status: 'not_found', ...base };
+    }
+    const an = Number(hit.an);
+    const share = (count) => (an > 0 && Number.isFinite(Number(count)) && count != null ? Number(count) / an : null);
+    return {
+        status: 'found',
+        ...base,
+        an: hit.an,
+        ac_hom: hit.ac_hom,
+        ac_het: hit.ac_het,
+        af_hom: share(hit.ac_hom),
+        af_het: share(hit.ac_het),
+        max_heteroplasmy: hit.max_heteroplasmy,
+        note: 'ac_hom / af_hom count carriers with the variant in at least 95% of their mitochondrial copies (homoplasmic); ac_het / af_het those with it in 10-95% (heteroplasmic).'
+    };
+}
+
+// Fill the gnomAD card's lower section for a mitochondrial variant: the two
+// carrier frequencies, what they mean, and a link to gnomAD's own page.
+// `result` is fetchGnomadMitochondrial()'s answer, or null when gnomAD could
+// not be read.
+function renderGnomadMitochondrial(container, variantId, result) {
+    container.textContent = '';
+    const muted = (text) => {
+        const el = document.createElement('div');
+        el.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
+        el.textContent = text;
+        container.appendChild(el);
+    };
+    if (!result) {
+        muted('gnomAD\'s mitochondrial call set could not be read.');
+    } else if (result.status !== 'found') {
+        muted(`Not in gnomAD's mitochondrial call set (queried: ${variantId}).`);
+    } else {
+        const row = (label, count, share) => {
+            const el = document.createElement('div');
+            const part = (tag, text) => {
+                const node = document.createElement(tag);
+                node.textContent = text;
+                el.appendChild(node);
+            };
+            part('strong', `${label} AF:`);
+            part('span', ` ${share != null ? `${(share * 100).toFixed(4)}%` : 'N/A'} `);
+            part('strong', 'AC/AN:');
+            part('span', ` ${count != null ? count : '—'}/${result.an != null ? result.an : '—'}`);
+            container.appendChild(el);
+        };
+        row('Homoplasmic', result.ac_hom, result.af_hom);
+        row('Heteroplasmic', result.ac_het, result.af_het);
+        const highest = Number(result.max_heteroplasmy);
+        muted('Homoplasmic: in at least 95% of a carrier\'s mitochondrial copies; heteroplasmic: in 10–95%.'
+            + (highest > 0 ? ` Highest level seen: ${Number((highest * 100).toFixed(1))}%.` : ''));
+    }
+    const url = gnomadMitochondrialUrl(variantId);
+    if (url) {
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = 'View on gnomAD (mitochondrial)';
+        container.appendChild(link);
+    }
+}
+
 async function fetchGnomadConstraint(gene) {
     const query = `query($symbol: String!) {
         gene(gene_symbol: $symbol, reference_genome: GRCh37) {
             gnomad_constraint { pli oe_lof oe_lof_upper mis_z oe_mis syn_z }
         }
     }`;
-    const res = await fetchWithTimeout('https://gnomad.broadinstitute.org/api', {
+    const res = await fetchWithTimeout(GNOMAD_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
         body: JSON.stringify({ query, variables: { symbol: gene } })
@@ -6133,7 +6341,7 @@ function withoutUnusableBlocks(record) {
 // Resolve a reliable gene symbol from VEP consequences. Prefer explicit non-chromosome
 // symbols from VEP, then resolve Ensembl gene IDs (ENSG...) via lookup, and finally
 // fall back to transcript-gene mapping from the variant_recoder payload.
-async function resolveGeneSymbolFromVep(consequences, recoderData) {
+async function resolveGeneSymbolFromVep(consequences, recoderData, mostSevere = '') {
     if (!Array.isArray(consequences) || consequences.length === 0) return '';
 
     // Rank consequences so that a gene actually altered by the variant is preferred over a
@@ -6147,7 +6355,18 @@ async function resolveGeneSymbolFromVep(consequences, recoderData) {
     };
     const hasCodingEffect = (c) => Boolean(c?.hgvsp || c?.amino_acids || c?.protein_start != null || c?.hgvsc);
     const scoreConsequence = (c) => (hasCodingEffect(c) ? 2 : 0) + (isNeighbourOnly(c) ? 0 : 1);
-    const rankedConsequences = [...consequences].sort((a, b) => scoreConsequence(b) - scoreConsequence(a));
+    // Rows of equal standing — for a variant between genes, all of them — used to
+    // be taken in the order VEP lists them, which is transcript order. So
+    // m.16300A>C, 277 bp upstream of MT-TP, was labelled MT-ND4: a gene 4 kb away
+    // that it lies *downstream* of, beside the effect "upstream_gene_variant".
+    // The gene named is the one the reported effect is about, and of several
+    // such, the nearest (a row for a gene the variant lies in has no distance).
+    const carriesReportedEffect = (c) => (mostSevere && Array.isArray(c?.consequence_terms)
+        && c.consequence_terms.some(t => String(t) === mostSevere) ? 1 : 0);
+    const distanceOf = (c) => (Number.isFinite(Number(c?.distance)) ? Number(c.distance) : 0);
+    const rankedConsequences = [...consequences].sort((a, b) => scoreConsequence(b) - scoreConsequence(a)
+        || carriesReportedEffect(b) - carriesReportedEffect(a)
+        || distanceOf(a) - distanceOf(b));
 
     // 1) Prefer any direct gene_symbol that is not chromosome-like, from the highest-ranked
     // (variant-overlapping) consequences first.
@@ -8479,7 +8698,7 @@ const initVariantSearchUi = () => {
                             // which is what the Variant card, the transcript pairing
                             // below and every gene-level card need.
                             if (!annotation.dbnsfp && vepRes) {
-                                const vepGene = await resolveGeneSymbolFromVep(vepRes.consequences, recoderData);
+                                const vepGene = await resolveGeneSymbolFromVep(vepRes.consequences, recoderData, vepRes.mostSevere);
                                 if (vepGene && !isChromosomeLikeGeneSymbol(vepGene)) {
                                     annotation.dbnsfp = { genename: vepGene };
                                 }
@@ -8560,7 +8779,7 @@ const initVariantSearchUi = () => {
                                         if (!isGenomicVariant(gVariant) && vepRes.gVariant) {
                                             gVariant = vepRes.gVariant;
                                         }
-                                        let geneSym = await resolveGeneSymbolFromVep(vepConsequences, recoderData);
+                                        let geneSym = await resolveGeneSymbolFromVep(vepConsequences, recoderData, vepRes.mostSevere);
                                         // If upstream sources still do not provide a usable gene symbol,
                                         // then use the optional user hint as the final fallback.
                                         if ((!geneSym || isChromosomeLikeGeneSymbol(geneSym)) && geneHintGlobal) {
@@ -8844,10 +9063,22 @@ const initVariantSearchUi = () => {
                         relevant = paired.filter(t => labelled.has(t.gene.toUpperCase()));
                         if (!relevant.length) relevant = paired;
                     }
-                    if (relevant.length) transcriptsFromRecoder = relevant;
+                    // VEP answers from Ensembl's own transcript set when its RefSeq
+                    // one fails. Asked unprompted, that answer must not displace
+                    // RefSeq rows the record already has: during an Ensembl blip
+                    // "13 32906699 BRCA2 G GCA" came out on ENST00000544455.1
+                    // while the record's NM_000059.3 row went unused.
+                    const displacesRefSeq = unprompted && relevant.length > 0
+                        && relevant.every(t => /^ENS/i.test(t.transcript))
+                        && pairedAnnotationRows.some(a => /^N[MR]_/i.test(a.transcript));
+                    if (relevant.length && !displacesRefSeq) transcriptsFromRecoder = relevant;
                     if (unprompted) {
-                        LookupProgress.step('vep', relevant.length ? 'ok' : 'empty',
-                            relevant.length ? `${relevant.length} transcript${relevant.length === 1 ? '' : 's'}` : 'no transcript here');
+                        if (displacesRefSeq) {
+                            LookupProgress.step('vep', 'warn', 'RefSeq transcripts unavailable — the record\'s own are shown');
+                        } else {
+                            LookupProgress.step('vep', relevant.length ? 'ok' : 'empty',
+                                relevant.length ? `${relevant.length} transcript${relevant.length === 1 ? '' : 's'}` : 'no transcript here');
+                        }
                     }
                 } catch (err) {
                     // Keep nucleotide-only recoder rows when pairing is unavailable.
@@ -10105,6 +10336,9 @@ const initVariantSearchUi = () => {
                 // Build gnomAD link. Prefer raw token input so indels can
                 // still open a meaningful gnomAD variant/region page.
                 const gnomadLink = buildGnomadVariantUrl(rawInput, gVariant, annotation && annotation._id, annotation && annotation.vcf);
+                // A mitochondrial variant is in neither of the two data sets this
+                // card reads; gnomAD's mitochondrial call set takes the lower section.
+                const mitochondrialVariant = isMitochondrialChromosome(String(gVariant || '').split(':')[0]);
                 const card = document.createElement('div');
                 card.className = 'card';
                 const title = document.createElement('h3');
@@ -10140,7 +10374,7 @@ const initVariantSearchUi = () => {
                 if (!exomeStats && !genomeStats) {
                     const noV2 = document.createElement('div');
                     noV2.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
-                    noV2.textContent = 'No v2.1.1 data.';
+                    noV2.textContent = mitochondrialVariant ? 'gnomAD v2.1.1 has no mitochondrial variants.' : 'No v2.1.1 data.';
                     content.appendChild(noV2);
                 }
                 // Link to gnomAD v2. Rendered synchronously from whatever the notation
@@ -10151,10 +10385,11 @@ const initVariantSearchUi = () => {
                 gnomadLinkEl.rel = 'noopener noreferrer';
                 gnomadLinkEl.textContent = 'View on gnomAD (v2.1.1)';
                 gnomadLinkEl.href = gnomadLink || '';
-                if (!gnomadLink) gnomadLinkEl.style.display = 'none';
+                // (No v2 page exists for a mitochondrial variant; its link is below.)
+                if (!gnomadLink || mitochondrialVariant) gnomadLinkEl.style.display = 'none';
                 content.appendChild(gnomadLinkEl);
                 getResolvedVcfAlleles().then((alleles) => {
-                    if (!alleles) return;
+                    if (!alleles || mitochondrialVariant) return;
                     const upgraded = buildGnomadVariantUrl(rawInput, gVariant, annotation && annotation._id, annotation && annotation.vcf, alleles);
                     if (!upgraded) return;
                     gnomadLinkEl.href = upgraded;
@@ -10226,13 +10461,13 @@ const initVariantSearchUi = () => {
 
                 const v4Header = document.createElement('div');
                 v4Header.style.cssText = 'font-size:0.78rem;font-weight:600;color:#6b7280;margin-bottom:0.2rem;';
-                v4Header.textContent = 'v4.1 · GRCh38 (gnomAD API)';
+                v4Header.textContent = mitochondrialVariant ? 'Mitochondrial call set (gnomAD API)' : 'v4.1 · GRCh38 (gnomAD API)';
                 content.appendChild(v4Header);
 
                 const v4Section = document.createElement('div');
                 const v4Loading = document.createElement('div');
                 v4Loading.style.cssText = 'font-size:0.82rem;color:#9ca3af;';
-                v4Loading.textContent = 'Loading gnomAD v4.1…';
+                v4Loading.textContent = mitochondrialVariant ? 'Loading gnomAD mitochondrial data…' : 'Loading gnomAD v4.1…';
                 v4Section.appendChild(v4Loading);
                 content.appendChild(v4Section);
 
@@ -10265,7 +10500,17 @@ const initVariantSearchUi = () => {
                         // definition; say so rather than implying a lookup problem.
                         v4Loading.textContent = codonOnlyResolutionGlobal
                             ? 'gnomAD v4.1: needs a specific allele — protein notation resolves only to the codon.'
-                            : 'gnomAD v4.1: insufficient coordinate data.';
+                            : (mitochondrialVariant
+                                ? 'gnomAD mitochondrial call set: insufficient coordinate data.'
+                                : 'gnomAD v4.1: insufficient coordinate data.');
+                        return;
+                    }
+                    if (mitochondrialVariant) {
+                        // fetchGnomadV4 reads the mitochondrial call set for this
+                        // chromosome; null means gnomAD could not be asked.
+                        const mitochondrial = await fetchGnomadV4(chromCoord, pos37Coord, refCoord, altCoord);
+                        if (mitochondrial) aiReviewExtras.gnomad_v4 = mitochondrial;
+                        renderGnomadMitochondrial(v4Section, gnomadMitochondrialId(pos37Coord, refCoord, altCoord), mitochondrial);
                         return;
                     }
                     // The annotation usually already carries the GRCh38 start (or the
@@ -11531,10 +11776,12 @@ const initVariantSearchUi = () => {
             }
             resultSection.classList.remove('hidden');
         } catch (err) {
-            console.error(err);
             // A stale run's failure must not overwrite the status/progress panel
             // of a newer search that is already underway.
-            if (!isCurrentSearch()) return;
+            if (!isCurrentSearch()) {
+                console.error(err);
+                return;
+            }
             // A name that would not resolve may be one ClinVar lists the variant
             // under (see resolveClinvarOtherName). Asked once, and not when the
             // lookup failed because a service was down: then the name may be fine.
@@ -11552,6 +11799,8 @@ const initVariantSearchUi = () => {
                     LookupProgress.step('clinvarName', 'warn', 'could not be consulted');
                 }
             }
+            // Logged only now: a name ClinVar knew the variant by is not an error.
+            console.error(err);
             statusEl.textContent = 'Error: ' + err.message;
             LookupProgress.finish('fail', err.upstreamOutage ? 'Upstream service unavailable' : 'Lookup failed');
         }
@@ -11605,6 +11854,8 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         convertSpdiToMyVariant, convertHgvsgToMyVariant, recoderHostsFor,
         // the mitochondrial genome
         isMitochondrialAccession, mitochondrialToChr, withoutUnusableBlocks, normalizedGenomicId,
+        isMitochondrialChromosome, gnomadMitochondrialId, gnomadMitochondrialUrl, fetchGnomadMitochondrial,
+        resolveGeneSymbolFromVep, provablyDifferentAlleles, netLengthChange,
         getHitGenesUpper, buildSummary,
         // reference bases the input states; allele identity across spellings
         statedReferenceBases, verifyStatedReference,

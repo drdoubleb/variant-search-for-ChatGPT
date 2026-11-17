@@ -150,8 +150,23 @@ puts the record right for whatever the lookup was for:
   the ClinVar block belongs to another variant and is removed.
   `13 32906699 BRCA2 G GCA` is literally the allele MyVariant files ClinVar
   2505518 under, and is not that variant.
-- **Reference unreachable**: left as it was, and the panel says the id could not
-  be checked.
+- **Reference unreachable**: Ensembl's sequence endpoint is the one this
+  comparison depends on, and it does go down (it returned HTTP 500 for part of a
+  live run of these very cases). "Cannot tell" used to be the answer for every
+  pair, so `13 32906699 BRCA2 G GCA` was shown ClinVar 2505518 — *Likely
+  pathogenic* — after all, and `BRCA1 c.5266dup` came out as
+  `g.41209079_41209080dup`. Two things need no reference
+  (`provablyDifferentAlleles`), and between them they cover both ways MyVariant
+  mis-files a record:
+  - alleles that change the sequence length by different amounts differ — a
+    2-bp duplication is not a 1-bp one;
+  - an insertion slid *k* positions along a repeat has its bases rotated by *k*,
+    so `insCA` one position on is `insAC` if it is anything, never `insCA`.
+
+  Anything else — an insertion against the duplication it may be, two deletions
+  of one length — is still left as it was, and the panel says the id could not be
+  checked. The proof only ever says "different": on random repetitive sequence it
+  is checked never to fire for two spellings the reference calls one allele.
 
 A re-keyed record also takes its gene from ClinVar's preferred name. MyVariant
 keeps one of the genes ClinVar lists, and for EGFR exon 20 that is the antisense
@@ -282,6 +297,14 @@ transcript rows on "CHR16" — losing the protein change and the effect — and 
 "CHR16" to every gene-level source. When no gene column was pasted the gene now
 comes from VEP.
 
+For a variant that lies between genes VEP lists every gene within 5 kb, in
+transcript order, and the first used to be taken: `m.16300A>C`, 277 bp upstream
+of MT-TP, was labelled **MT-ND4** — 4 kb away, and a gene it lies *downstream*
+of — beside the effect `upstream_gene_variant`. The gene named is now one the
+reported effect is about, and of several, the nearest
+(`resolveGeneSymbolFromVep`). A gene the variant is actually in still comes
+before any neighbour.
+
 ### Mitochondrial variants
 
 `m.8993T>G` — MT-ATP6 p.Leu156Arg, NARP/Leigh syndrome — was shown as
@@ -312,6 +335,34 @@ Only the bare `m.` form and the rows used to work. ClinVar's own name for the
 variant, `NC_012920.1:m.8993T>G`, was read as the protein change `p.M.8993T>G`,
 and `chrM` — the hg19 name — was asked of MyVariant as such, a guaranteed miss
 that was recovered only when Ensembl answered and re-spelled it.
+
+**gnomAD.** gnomAD keeps mitochondrial variants in a call set of their own,
+counted by heteroplasmy, which neither half of the gnomAD card read. v2 has
+none, and the v4 proxy looks up nuclear variants only: asked about one on `M` it
+attempted a liftover, Ensembl rejected the chromosome name, and the card said
+
+> gnomAD v4.1 unavailable: the Ensembl liftover service is not responding, so
+> M:8993 could not be converted to GRCh38. This is usually temporary — try again
+> shortly.
+
+for every mitochondrial variant, every time (typed as `chrMT:g.…` the name was
+accepted and the answer was *"Not found in gnomAD v4.1"*, for m.1555A>G with its
+63 homoplasmic carriers) — beside a "View on gnomAD (v2.1.1)" link to a page
+reading *"Mitochondrial variants are not available in gnomAD v2"*. The card now
+reads the call set from gnomAD's own CORS-open API, the one gene constraint
+already comes from (`fetchGnomadMitochondrial`; no liftover — the sequence is the
+same in both builds):
+
+```
+Mitochondrial call set (gnomAD API)
+Homoplasmic AF: 0.1117%  AC/AN: 63/56401
+Heteroplasmic AF: 0.0195%  AC/AN: 11/56401
+Homoplasmic: in at least 95% of a carrier's mitochondrial copies; heteroplasmic: in 10–95%. Highest level seen: 100%.
+View on gnomAD (mitochondrial)
+```
+
+gnomAD not answering is reported as *could not be read*, never as *not in
+gnomAD*, and the AI review receives the same counts with what they mean.
 
 Two things found here apply to every chromosome:
 
@@ -366,7 +417,12 @@ not. VEP works from the allele alone and answers in a second or two, so it is
 now asked as soon as the allele is known, for every lookup; once it has
 answered, the recoder is not waited for. When the recoder contributed nothing,
 VEP is given 8 s from when it was asked (`API_TIMEOUT_MS.vepUnprompted`) and the
-result is shown without it after that.
+result is shown without it after that. VEP answers from Ensembl's own transcript
+set when its RefSeq one fails; asked unprompted, such an answer does not
+displace RefSeq rows the record already has (during an Ensembl blip
+`13 32906699 BRCA2 G GCA` came out on `ENST00000544455.1` while the record's
+`NM_000059.3` row went unused), and the panel says *"RefSeq transcripts
+unavailable — the record's own are shown"*.
 
 Without VEP the record's own rows are used, and there a bare `c.` from ClinVar's
 list no longer displaces snpEff's row for the same transcript: ClinVar lists the
@@ -523,7 +579,9 @@ survives, and MyVariant indexes only its normalised form — and fed into the
 existing candidate-conversion path as a recoder-shaped response with no
 transcript nomenclature. The progress panel says "variant placed by NCBI
 Variation Services — Ensembl had not answered" rather than pretending Ensembl
-did.
+did. Once NCBI's answer has been taken, Ensembl's remaining attempts are called
+off (`shouldStop` in `fetchWithRetry`): nothing reads their answer, and a
+service slow enough to be overtaken should not be asked three more times.
 
 The app previously made a single attempt behind a 6-7 second deadline, so a
 slow or unwell upstream produced:

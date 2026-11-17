@@ -183,6 +183,17 @@ assert.deepEqual(h.parseProteinResidueRange('p.Lys18del'), { start: 18, end: 18 
         assert(slow.asked.includes('ncbi'));
         assert(slow.ms < 105, `answered after the head start, without waiting for Ensembl (${slow.ms} ms)`);
         await new Promise(resolve => setTimeout(resolve, 90));
+        // Ensembl never answers. Once NCBI's answer has been taken nothing reads
+        // Ensembl's, so its remaining attempts are called off: asked once, not
+        // the four times (two per host) an unanswered lookup is allowed.
+        const hangs = (options) => new Promise((_, reject) => {
+            options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        });
+        const hung = await run(hangs);
+        assert.equal(hung.answer.__vsFallback, true);
+        // Past the first deadline (150 ms) and the longest backoff before a retry (520 ms).
+        await new Promise(resolve => setTimeout(resolve, 800));
+        assert.deepEqual(hung.asked.filter(source => source === 'ensembl'), ['ensembl'], 'Ensembl was not asked again');
         // Ensembl rejects the name at once: NCBI is asked straight away, and
         // when it has nothing either, it is Ensembl's reason that is reported.
         globalThis.fetch = (address) => Promise.resolve(String(address).includes('api.ncbi.nlm.nih.gov')

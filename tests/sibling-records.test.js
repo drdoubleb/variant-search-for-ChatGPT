@@ -340,4 +340,75 @@ const rawJson = page => JSON.parse(page.document.getElementById('rawOutput').tex
     console.log('ok sibling records: a substitution costs nothing extra');
 }
 
+// 10. Ensembl's sequence service down (it was, for part of the live run these
+//     scenarios come from). Whether two spellings are one allele is normally
+//     read off the reference; without it the answer used to be "cannot tell"
+//     for every pair, and scenario 6's neighbour was shown ClinVar 2505518 —
+//     "Likely pathogenic" — after all. Some pairs need no reference: insCA one
+//     position along would have to read insAC to be the same allele.
+{
+    const page = await runLookup(cassettes.brca2Neighbour, { without: [/\/sequence\/region\//] });
+    assertResolved(assert, page, 'BRCA2 c.1084_1085insCA, no reference');
+    assert.match(page.variant, /g\.: chr13:g\.32906699_32906700insCA/);
+    assert.doesNotMatch(page.clinvar, /2505518|Likely pathogenic/);
+    assert.match(page.clinvar, /Clinical significance: N\/A/);
+    assert.equal(rawJson(page).clinvar, undefined);
+    console.log('ok sibling records: no reference, and the neighbouring allele still does not inherit it');
+}
+
+// 11. The same outage, by name. MyVariant's id for ClinVar 17677 is a 2-bp
+//     duplication and ClinVar's own HGVS a 1-bp one: different alleles, whatever
+//     the reference holds. Was: "g.: chr17:g.41209079_41209080dup" with a
+//     warning that the id could not be checked.
+{
+    const page = await runLookup(cassettes.brca1Dup, { without: [/\/sequence\/region\//] });
+    assertResolved(assert, page, 'BRCA1 c.5266dup, no reference');
+    assert.match(page.variant, /g\.: chr17:g\.41209082dup/);
+    assert.doesNotMatch(page.variant, /41209079_41209080dup/);
+    assert.match(page.clinvar, /Variation ID: 17677/);
+    assert.match(page.panel, /ClinVar record found — allele chr17:g\.41209082dup from ClinVar's own HGVS \(MyVariant files it under chr17:g\.41209079_41209080dup\)/);
+    assert.doesNotMatch(page.panel, /could not be checked against/);
+    // What could not be done without the reference is still said.
+    assert.match(page.panel, /its other ids for this allele were not checked — reference sequence unavailable/);
+    console.log('ok sibling records: no reference, and ClinVar\'s own allele is still the one shown');
+}
+
+// 12. VEP's RefSeq transcript set failing while its Ensembl one answers (the
+//     same live run; the rows are Ensembl's, as recorded). VEP is asked here
+//     without being needed, so its answer must not displace the RefSeq row the
+//     record has: the Variant card came out on ENST00000544455.1.
+{
+    const row = (transcript_id, hgvsc, hgvsp, extra = {}) => ({ gene_symbol: 'BRCA2', gene_id: 'ENSG00000139618', transcript_id,
+        consequence_terms: ['frameshift_variant'], hgvsc, hgvsp, biotype: 'protein_coding', strand: 1, impact: 'HIGH', variant_allele: 'CA', ...extra });
+    const ensemblSet = [{ input: '13:g.32906699_32906700insCA', id: '13:g.32906699_32906700insCA', assembly_name: 'GRCh37',
+        seq_region_name: '13', start: 32906700, end: 32906699, strand: 1, allele_string: '-/CA', most_severe_consequence: 'frameshift_variant',
+        transcript_consequences: [
+            row('ENST00000380152', 'ENST00000380152.3:c.1084_1085insCA', 'ENSP00000369497.3:p.Asp362AlafsTer6'),
+            row('ENST00000530893', 'ENST00000530893.2:c.715_716insCA', 'ENSP00000435699.2:p.Asp239AlafsTer6'),
+            row('ENST00000544455', 'ENST00000544455.1:c.1084_1085insCA', 'ENSP00000439902.1:p.Asp362AlafsTer6', { canonical: 1 })
+        ] }];
+    const vep = [];
+    const page = await runLookup(cassettes.brca2Neighbour, {
+        route: (url, key, respond) => {
+            if (!/\/vep\/human\/hgvs\//.test(key)) return undefined;
+            vep.push(/refseq=1/.test(key) ? 'RefSeq' : 'Ensembl');
+            return /refseq=1/.test(key) ? respond({ error: 'Internal Server Error' }, 500) : respond(ensemblSet);
+        }
+    });
+    assertResolved(assert, page, 'BRCA2 c.1084_1085insCA, RefSeq VEP down');
+    assert.equal(vep.at(-1), 'Ensembl', 'VEP fell back to its own transcript set');
+    assert.match(page.variant, /Transcript: NM_000059\.3c\.: c\.1084_1085insCA/);
+    assert.doesNotMatch(page.variant, /Transcript: ENST/);
+    assert.match(page.panel, /Consequences · Ensembl VEPRefSeq transcripts unavailable — the record's own are shown/);
+    // Where the record has no transcript rows of its own, Ensembl's are the answer.
+    const dbsnpOnly = await runLookup(cassettes.rs80357906, {
+        route: (url, key, respond) => (/\/vep\/human\/hgvs\//.test(key) && /refseq=1/.test(key)
+            ? respond({ error: 'Internal Server Error' }, 500) : undefined),
+        without: [/\/sequence\/region\//]
+    });
+    assertResolved(assert, dbsnpOnly, 'rs80357906, RefSeq VEP down');
+    assert.doesNotMatch(dbsnpOnly.panel, /the record's own are shown/);
+    console.log('ok sibling records: an Ensembl-only VEP answer does not displace the record\'s RefSeq row');
+}
+
 console.log('Sibling-record tests passed');

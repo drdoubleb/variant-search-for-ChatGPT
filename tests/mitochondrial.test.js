@@ -180,4 +180,181 @@ console.log('ok mitochondrial lookup: m.8993T>G is MT-ATP6 p.Leu156Arg, in eleve
     console.log('ok snpEff rows: protein-structure contacts are not listed as transcripts');
 }
 
+// 7. gnomAD. Mitochondrial variants are in a call set of their own, counted by
+//    heteroplasmy, which neither half of the gnomAD card read: v2 has none, and
+//    the v4 proxy — nuclear variants only — answered every one of them with a
+//    liftover failure that the card reported as
+//
+//        gnomAD v4.1 unavailable: the Ensembl liftover service is not responding,
+//        so M:8993 could not be converted to GRCh38. This is usually temporary —
+//        try again shortly.
+//
+//    beside a "View on gnomAD (v2.1.1)" link to a page saying v2 has no
+//    mitochondrial variants. (The answers below are gnomAD's own, recorded.)
+{
+    const recorded = {
+        'M-1555-A-G': { data: { mitochondrial_variant: { variant_id: 'M-1555-A-G', an: 56401, ac_hom: 63, ac_het: 11, max_heteroplasmy: 1 } } },
+        'M-3243-A-G': { data: { mitochondrial_variant: { variant_id: 'M-3243-A-G', an: 56383, ac_hom: 0, ac_het: 6, max_heteroplasmy: 0.464 } } },
+        'M-8993-T-G': { data: { mitochondrial_variant: { variant_id: 'M-8993-T-G', an: 56433, ac_hom: 0, ac_het: 0, max_heteroplasmy: 0 } } }
+    };
+    const notFound = { errors: [{ message: 'Variant not found' }], data: { mitochondrial_variant: null } };
+    // gnomAD's API as a route for the replay harness; `asked` collects the ids.
+    const gnomad = (answer = (id, respond) => respond(recorded[id] || notFound)) => {
+        const asked = [];
+        const route = (url, key, respond, options) => {
+            if (url.hostname !== 'gnomad.broadinstitute.org') return undefined;
+            const body = JSON.parse(options.body);
+            if (!/mitochondrial_variant/.test(body.query)) return undefined;     // (gene constraint)
+            asked.push(body.variables.id);
+            return answer(body.variables.id, respond);
+        };
+        return { route, asked };
+    };
+    const gnomadLinks = page => [...page.document.querySelectorAll('.card')]
+        .filter(card => card.querySelector('h3')?.textContent === 'gnomAD')
+        .flatMap(card => [...card.querySelectorAll('a')])
+        .filter(a => !/display:\s*none/.test(a.getAttribute('style') || ''))
+        .map(a => a.getAttribute('href'));
+    const never = /liftover|v4\.1|try again|No v2\.1\.1 data/;
+
+    // m.1555A>G: 63 homoplasmic and 11 heteroplasmic carriers among 56,401.
+    {
+        const api = gnomad();
+        const page = await runLookup(cassettes.mt1555, { route: api.route });
+        assertResolved(assert, page, 'm.1555A>G');
+        assert.deepEqual(api.asked, ['M-1555-A-G'], 'asked once, under the position as it is: no liftover');
+        assert.deepEqual(page.api('gnomad-v4'), [], 'the nuclear-variant proxy is not asked');
+        assert.match(page.cards.gnomAD, /gnomAD v2\.1\.1 has no mitochondrial variants\./);
+        assert.match(page.cards.gnomAD, /Mitochondrial call set \(gnomAD API\)/);
+        assert.match(page.cards.gnomAD, /Homoplasmic AF: 0\.1117% AC\/AN: 63\/56401/);
+        assert.match(page.cards.gnomAD, /Heteroplasmic AF: 0\.0195% AC\/AN: 11\/56401/);
+        assert.match(page.cards.gnomAD, /Highest level seen: 100%\./);
+        assert.doesNotMatch(page.cards.gnomAD, never);
+        assert.deepEqual(gnomadLinks(page), ['https://gnomad.broadinstitute.org/variant/M-1555-A-G?dataset=gnomad_r4'],
+            'one link, to the page that exists');
+    }
+    // m.3243A>G: heteroplasmic only, at most 46.4 % of a carrier's copies.
+    {
+        const page = await runLookup(cassettes.mt3243, { route: gnomad().route });
+        assert.match(page.cards.gnomAD, /Homoplasmic AF: 0\.0000% AC\/AN: 0\/56383/);
+        assert.match(page.cards.gnomAD, /Heteroplasmic AF: 0\.0106% AC\/AN: 6\/56383/);
+        assert.match(page.cards.gnomAD, /Highest level seen: 46\.4%\./);
+    }
+    // m.8993T>G: listed, with no carrier at 10 % or more.
+    {
+        const page = await runLookup(cassettes.mt8993, { route: gnomad().route });
+        assert.match(page.cards.gnomAD, /Homoplasmic AF: 0\.0000% AC\/AN: 0\/56433Heteroplasmic AF: 0\.0000% AC\/AN: 0\/56433/);
+        assert.doesNotMatch(page.cards.gnomAD, /Highest level seen/);
+        assert.doesNotMatch(page.cards.gnomAD, never);
+    }
+    // m.3271del: gnomAD does not hold it. Asked under VCF alleles read off the reference.
+    {
+        const api = gnomad();
+        const page = await runLookup(cassettes.mt3271del, { route: api.route });
+        assert.deepEqual(api.asked, ['M-3270-CT-C']);
+        assert.match(page.cards.gnomAD, /Not in gnomAD's mitochondrial call set \(queried: M-3270-CT-C\)\./);
+        assert.deepEqual(gnomadLinks(page), ['https://gnomad.broadinstitute.org/variant/M-3270-CT-C?dataset=gnomad_r4']);
+    }
+    // gnomAD not answering is not "gnomAD does not have it".
+    for (const down of [(id, respond) => respond({ error: 'unavailable' }, 503),
+        (id, respond) => respond({ errors: [{ message: 'Internal server error' }], data: null })]) {
+        const page = await runLookup(cassettes.mt1555, { route: gnomad(down).route });
+        assertResolved(assert, page, 'm.1555A>G, gnomAD down');
+        assert.match(page.cards.gnomAD, /gnomAD's mitochondrial call set could not be read\./);
+        assert.doesNotMatch(page.cards.gnomAD, /Not in gnomAD|Homoplasmic AF/);
+        assert.deepEqual(gnomadLinks(page), ['https://gnomad.broadinstitute.org/variant/M-1555-A-G?dataset=gnomad_r4']);
+    }
+    // A nuclear variant's card is as it was: v2 link, and the proxy asked.
+    {
+        const api = gnomad();
+        const page = await runLookup(cassettes.brafV600E, { route: api.route });
+        assert.deepEqual(api.asked, []);
+        assert.equal(page.api('gnomad-v4').length, 1);
+        assert.match(page.cards.gnomAD, /v2\.1\.1 · GRCh37.*v4\.1 · GRCh38 \(gnomAD API\)/);
+        assert(gnomadLinks(page).some(href => /\/variant\/7-140453136-A-T\?dataset=gnomad_r2_1$/.test(href)));
+    }
+    console.log('ok mitochondrial lookup: gnomAD\'s mitochondrial call set, not a liftover error');
+
+    // The pieces.
+    for (const name of ['chrMT', 'MT', 'chrM', 'M', 'mt', 'chrm']) assert.equal(h.isMitochondrialChromosome(name), true, name);
+    for (const name of ['1', 'X', 'chrX', 'MTOR', 'chr17', '', null]) assert.equal(h.isMitochondrialChromosome(name), false, String(name));
+    assert.equal(h.gnomadMitochondrialId('8993', 't', 'g'), 'M-8993-T-G');
+    assert.equal(h.gnomadMitochondrialId(3270, 'CT', 'C'), 'M-3270-CT-C');
+    assert.equal(h.gnomadMitochondrialId(8993, 'T', '-'), '', 'no id without plain bases');
+    assert.equal(h.gnomadMitochondrialId('x', 'T', 'G'), '');
+    assert.equal(h.buildGnomadVariantUrl('', 'chrMT:g.8993T>G', '', null),
+        'https://gnomad.broadinstitute.org/variant/M-8993-T-G?dataset=gnomad_r4');
+    assert.equal(h.buildGnomadVariantUrl('', 'chrMT:g.3271del', '', null), '', 'no v2 region view for the mitochondrial genome');
+    assert.equal(h.buildGnomadVariantUrl('', 'chrMT:g.3271del', '', null, { chrom: 'MT', pos: '3270', ref: 'CT', alt: 'C' }),
+        'https://gnomad.broadinstitute.org/variant/M-3270-CT-C?dataset=gnomad_r4');
+    assert.equal(h.buildGnomadVariantUrl('', 'chr7:g.140453136A>T', '', null),
+        'https://gnomad.broadinstitute.org/variant/7-140453136-A-T?dataset=gnomad_r2_1');
+    const realFetch = globalThis.fetch;
+    try {
+        const sent = [];
+        const answerWith = (data, status = 200) => {
+            globalThis.fetch = async (url, options) => {
+                sent.push({ url: String(url), body: JSON.parse(options.body) });
+                return new Response(JSON.stringify(data), { status });
+            };
+        };
+        answerWith(recorded['M-1555-A-G']);
+        const found = await h.fetchGnomadMitochondrial(1555, 'A', 'G');
+        assert.equal(sent[0].url, 'https://gnomad.broadinstitute.org/api');
+        assert.deepEqual(sent[0].body.variables, { id: 'M-1555-A-G' });
+        assert.match(sent[0].body.query, /mitochondrial_variant\(variant_id: \$id, dataset: gnomad_r4\)/);
+        assert.equal(found.status, 'found');
+        assert.deepEqual([found.variant_id, found.an, found.ac_hom, found.ac_het, found.max_heteroplasmy], ['M-1555-A-G', 56401, 63, 11, 1]);
+        assert.equal(found.af_hom.toFixed(6), '0.001117');
+        assert.equal(found.af_het.toFixed(6), '0.000195');
+        assert.match(found.note, /95%.*homoplasmic.*10-95%.*heteroplasmic/, 'the AI review is told what the counts mean');
+        answerWith(notFound);
+        assert.deepEqual(await h.fetchGnomadMitochondrial(8993, 'T', 'A'),
+            { status: 'not_found', dataset: 'gnomAD mitochondrial call set', variant_id: 'M-8993-T-A' });
+        answerWith({ data: { mitochondrial_variant: null } });
+        assert.equal((await h.fetchGnomadMitochondrial(8993, 'T', 'A')).status, 'not_found');
+        answerWith({ errors: [{ message: 'Mitochondrial variants are not available for gnomAD v2' }], data: { mitochondrial_variant: null } });
+        await assert.rejects(h.fetchGnomadMitochondrial(8993, 'T', 'A'), /not available/, 'an error that is not "not found" is a failure');
+        answerWith({}, 502);
+        await assert.rejects(h.fetchGnomadMitochondrial(8993, 'T', 'A'), /502/);
+        sent.length = 0;
+        assert.equal(await h.fetchGnomadMitochondrial(8993, 'T', '-'), null);
+        assert.equal(sent.length, 0, 'nothing is asked without alleles');
+    } finally {
+        globalThis.fetch = realFetch;
+    }
+    console.log('ok gnomAD mitochondrial call set: found, not found, and could not be asked');
+}
+
+// 8. A variant between genes. m.16300A>C is in the control region, 277 bp
+//    upstream of MT-TP (VEP's rows below, as recorded). The gene shown was the
+//    first row's — MT-ND4, 4 kb away, which the variant lies *downstream* of —
+//    beside the effect "upstream_gene_variant".
+{
+    const row = (gene_symbol, term, distance) => ({ gene_symbol, consequence_terms: [term], distance });
+    const controlRegion = [
+        row('MT-ND4', 'downstream_gene_variant', 4163), row('MT-ND5', 'downstream_gene_variant', 2152),
+        row('MT-ND6', 'upstream_gene_variant', 1627), row('MT-CYB', 'downstream_gene_variant', 413),
+        row('MT-TH', 'downstream_gene_variant', 4094), row('MT-TS2', 'downstream_gene_variant', 4035),
+        row('MT-TL2', 'downstream_gene_variant', 3964), row('MT-TE', 'upstream_gene_variant', 1558),
+        row('MT-TT', 'downstream_gene_variant', 347), row('MT-TP', 'upstream_gene_variant', 277)
+    ];
+    assert.equal(await h.resolveGeneSymbolFromVep(controlRegion, null, 'upstream_gene_variant'), 'MT-TP',
+        'the nearest gene the reported effect is about');
+    assert.equal(await h.resolveGeneSymbolFromVep([...controlRegion].reverse(), null, 'upstream_gene_variant'), 'MT-TP',
+        'whatever order VEP lists them in');
+    // Without the effect to go by, the nearest gene of all.
+    assert.equal(await h.resolveGeneSymbolFromVep(controlRegion, null), 'MT-TP');
+    assert.equal(await h.resolveGeneSymbolFromVep(controlRegion.slice(0, 9), null), 'MT-TT');
+    // A gene the variant is in still comes before any neighbour, however near…
+    const within = { gene_symbol: 'PARP3', consequence_terms: ['inframe_deletion'], hgvsc: 'NM_005485.6:c.1_3del', hgvsp: 'NP_005476.4:p.Met1del' };
+    assert.equal(await h.resolveGeneSymbolFromVep([row('RRP9', 'upstream_gene_variant', 12), within], null, 'inframe_deletion'), 'PARP3');
+    // …and of two genes it is in, the one the reported effect belongs to.
+    const intronic = { gene_symbol: 'GENEB', consequence_terms: ['intron_variant'], hgvsc: 'NM_000002.1:c.100+20A>G' };
+    const missense = { gene_symbol: 'GENEA', consequence_terms: ['missense_variant'], hgvsc: 'NM_000001.1:c.5A>G', hgvsp: 'NP_000001.1:p.Lys2Arg' };
+    assert.equal(await h.resolveGeneSymbolFromVep([intronic, missense], null, 'missense_variant'), 'GENEA');
+    assert.equal(await h.resolveGeneSymbolFromVep([intronic, missense], null), 'GENEB', 'unchanged when the effect is not given');
+    console.log('ok gene from VEP: the gene the effect is about, nearest first');
+}
+
 console.log('Mitochondrial tests passed');
