@@ -135,8 +135,9 @@ const API_TIMEOUT_MS = {
     recoderHeadStart: 2500,
     vep: 20000,
     lookup: 4000,
-    // How long a result is held for the "(MANE Select)" label. The lookup is
-    // started as soon as the gene is known, so this is rarely waited out.
+    // How long a result is held for the "(MANE Select)" label. Both sources
+    // for it (maneSelectForLabel) are asked as soon as the gene is known, so
+    // this is rarely waited out.
     maneLabel: 4000,
     // How long a gene-symbol name waits to learn which transcript is the
     // gene's standard one before falling back to MyVariant's own ranking:
@@ -2389,13 +2390,16 @@ function clinicalTranscriptsFromReport(data, gene) {
     // ("TTN" brings TTR first): only the gene of that name counts.
     const product = [].concat(data?.reports || []).map(report => report?.product)
         .find(candidate => String(candidate?.symbol || '').toUpperCase() === wanted);
-    if (!product) return { select: '', plusClinical: [], refseqSelect: '' };
-    const tagged = category => [].concat(product.transcripts || [])
-        .filter(t => String(t?.select_category || '').toUpperCase() === category)
-        .map(t => String(t?.accession_version || ''))
-        .filter(accession => /^NM_\d+\.\d+$/.test(accession));
+    if (!product) return { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '' };
+    const rows = category => [].concat(product.transcripts || [])
+        .filter(t => String(t?.select_category || '').toUpperCase() === category
+            && /^NM_\d+\.\d+$/.test(String(t?.accession_version || '')));
+    const tagged = category => rows(category).map(t => String(t.accession_version));
     const select = tagged('MANE_SELECT')[0] || '';
-    return { select, plusClinical: tagged('MANE_PLUS_CLINICAL'), refseqSelect: select ? '' : (tagged('REFSEQ_SELECT')[0] || '') };
+    // MANE Select is one transcript with two names; NCBI gives Ensembl's too.
+    const ensembl = String((rows('MANE_SELECT')[0] || {}).ensembl_transcript || '');
+    return { select, selectEnsembl: /^ENST\d+(?:\.\d+)?$/.test(ensembl) ? ensembl : '',
+        plusClinical: tagged('MANE_PLUS_CLINICAL'), refseqSelect: select ? '' : (tagged('REFSEQ_SELECT')[0] || '') };
 }
 async function fetchClinicalTranscripts(gene) {
     const symbol = String(gene || '').trim().toUpperCase();
@@ -2419,6 +2423,35 @@ async function fetchClinicalTranscripts(gene) {
         clinicalTranscriptsCache.set(symbol, pending);
     }
     return clinicalTranscriptsCache.get(symbol);
+}
+
+/*
+ * The gene's MANE Select transcript for the "(MANE Select)" label on the
+ * Variant card, as [RefSeq accession, Ensembl accession]; [] when neither
+ * authority names one.
+ *
+ * Whichever answers first with one is taken. The label used to rest on
+ * Ensembl's record alone, and every result is held for it (maneLabel): on a
+ * day its gene lookup took 29 s, each lookup sat out those four seconds and
+ * then came without the label, while NCBI's list answered in 0.3 s.
+ */
+async function maneSelectForLabel(gene, fetchMane = fetchManeSelectAccessions, fetchClinical = fetchClinicalTranscripts) {
+    const named = (promise, read) => Promise.resolve().then(promise).then(read, () => []);
+    const sources = [
+        named(() => fetchMane(gene), list => (Array.isArray(list) ? list.filter(Boolean) : [])),
+        named(() => fetchClinical(gene), clinical => (clinical && clinical.select
+            ? [clinical.select, clinical.selectEnsembl].filter(Boolean) : []))
+    ];
+    return new Promise((resolve) => {
+        let pending = sources.length;
+        for (const source of sources) {
+            source.then((accessions) => {
+                pending -= 1;
+                if (accessions.length) resolve(accessions);
+                else if (!pending) resolve([]);
+            });
+        }
+    });
 }
 
 /*
@@ -8683,7 +8716,7 @@ const initVariantSearchUi = () => {
             fetchManeSelectAccessions(geneSymbolName.gene);
             fetchClinicalTranscripts(geneSymbolName.gene);
         }
-        else if (geneHintGlobal) fetchManeSelectAccessions(geneHintGlobal);
+        else if (geneHintGlobal) maneSelectForLabel(geneHintGlobal);
         const askRecoder = (asked) => {
             LookupProgress.step('recoder', 'running');
             return recoderTranscripts(asked);
@@ -9666,7 +9699,7 @@ const initVariantSearchUi = () => {
             // "(MANE Select)" label is usually ready by the time it is wanted.
             if (annotation && !geneHintGlobal) {
                 const labelled = Array.from(getHitGenesUpper(annotation))[0];
-                if (labelled) fetchManeSelectAccessions(labelled);
+                if (labelled) maneSelectForLabel(labelled);
             }
             const vepWanted = Boolean(annotation) && !codonOnlyResolutionGlobal && isGenomicVariant(gVariant);
             const vepAnswered = vepWanted
@@ -9839,7 +9872,7 @@ const initVariantSearchUi = () => {
                     || Array.from(getHitGenesUpper(annotation))[0] || parseMyVariantQueryIntent(query).gene;
                 let maneAccessions = [];
                 try {
-                    maneAccessions = await settledWithin(fetchManeSelectAccessions(gene), API_TIMEOUT_MS.maneLabel, 'MANE lookup slow');
+                    maneAccessions = await settledWithin(maneSelectForLabel(gene), API_TIMEOUT_MS.maneLabel, 'MANE lookup slow');
                 } catch {
                     // Unlabelled is the honest outcome; the lookup is left to finish
                     // and is cached for the next variant in this gene.
@@ -12744,7 +12777,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         // ClinVar matching + display
         complementBase, normalizeCdnaForMatch, findExactClinvarRegionMatch,
         parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars,
-        isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings,
+        isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,

@@ -110,16 +110,43 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
 // ── NCBI's list of a gene's MANE transcripts ───────────────────────────────
 {
     // (Trimmed from the live answers for MECP2, CDKN2A and "TTN".)
-    const report = (symbol, transcripts) => ({ product: { symbol, transcripts: transcripts.map(([accession_version, select_category]) => ({ accession_version, select_category })) } });
-    const mecp2 = { reports: [report('MECP2', [['NM_001110792.2', 'MANE_SELECT'], ['NM_004992.4', 'MANE_PLUS_CLINICAL'], ['NM_001316337.2'], ['XM_011531166.3']])] };
-    assert.deepEqual(h.clinicalTranscriptsFromReport(mecp2, 'mecp2'), { select: 'NM_001110792.2', plusClinical: ['NM_004992.4'], refseqSelect: '' });
-    const cdkn2a = { reports: [report('CDKN2A', [['NM_000077.6', 'REFSEQ_SELECT'], ['NM_058195.4', 'MANE_PLUS_CLINICAL']])] };
-    assert.deepEqual(h.clinicalTranscriptsFromReport(cdkn2a, 'CDKN2A'), { select: '', plusClinical: ['NM_058195.4'], refseqSelect: 'NM_000077.6' },
+    const report = (symbol, transcripts) => ({ product: { symbol, transcripts: transcripts.map(([accession_version, select_category, ensembl_transcript]) => ({ accession_version, select_category, ensembl_transcript })) } });
+    // MANE Select is one transcript with two names; NCBI gives Ensembl's as well.
+    const mecp2 = { reports: [report('MECP2', [['NM_001110792.2', 'MANE_SELECT', 'ENST00000453960.7'], ['NM_004992.4', 'MANE_PLUS_CLINICAL', 'ENST00000303391.11'], ['NM_001316337.2'], ['XM_011531166.3']])] };
+    assert.deepEqual(h.clinicalTranscriptsFromReport(mecp2, 'mecp2'),
+        { select: 'NM_001110792.2', selectEnsembl: 'ENST00000453960.7', plusClinical: ['NM_004992.4'], refseqSelect: '' });
+    const cdkn2a = { reports: [report('CDKN2A', [['NM_000077.6', 'REFSEQ_SELECT'], ['NM_058195.4', 'MANE_PLUS_CLINICAL', 'ENST00000579755.2']])] };
+    assert.deepEqual(h.clinicalTranscriptsFromReport(cdkn2a, 'CDKN2A'), { select: '', selectEnsembl: '', plusClinical: ['NM_058195.4'], refseqSelect: 'NM_000077.6' },
         'RefSeq Select is not MANE Select, and is kept apart');
     // A symbol search also returns genes that have the symbol as an alias.
-    const ttn = { reports: [report('TTR', [['NM_000371.4', 'MANE_SELECT']]), report('TTN', [['NM_001267550.2', 'MANE_SELECT']])] };
-    assert.deepEqual(h.clinicalTranscriptsFromReport(ttn, 'TTN'), { select: 'NM_001267550.2', plusClinical: [], refseqSelect: '' });
-    assert.deepEqual(h.clinicalTranscriptsFromReport({}, 'NOSUCHGENE'), { select: '', plusClinical: [], refseqSelect: '' });
+    const ttn = { reports: [report('TTR', [['NM_000371.4', 'MANE_SELECT', 'ENST00000237014.8']]), report('TTN', [['NM_001267550.2', 'MANE_SELECT']])] };
+    assert.deepEqual(h.clinicalTranscriptsFromReport(ttn, 'TTN'), { select: 'NM_001267550.2', selectEnsembl: '', plusClinical: [], refseqSelect: '' });
+    assert.deepEqual(h.clinicalTranscriptsFromReport({}, 'NOSUCHGENE'), { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '' });
+    assert.equal(h.clinicalTranscriptsFromReport({ reports: [report('X1', [['NM_1.1', 'MANE_SELECT', '<img onerror=x>']])] }, 'X1').selectEnsembl, '',
+        'only an Ensembl transcript id is taken for one');
+
+    // ── The "(MANE Select)" label: whichever authority names it first ──────
+    {
+        const after = (ms, value) => () => new Promise(resolve => setTimeout(() => resolve(value), ms));
+        const never = () => new Promise(() => {});
+        const ncbi = { select: 'NM_004333.6', selectEnsembl: 'ENST00000646891.2', plusClinical: ['NM_001374258.1'], refseqSelect: '' };
+        // Ensembl's gene lookup not answering (29 s on the day this was written):
+        // NCBI's list names the transcript, under both its names.
+        let started = Date.now();
+        assert.deepEqual(await h.maneSelectForLabel('BRAF', never, after(5, ncbi)), ['NM_004333.6', 'ENST00000646891.2']);
+        assert(Date.now() - started < 500, 'without waiting for Ensembl');
+        // Ensembl first: its answer, as before.
+        assert.deepEqual(await h.maneSelectForLabel('BRAF', after(5, ['NM_004333.6', 'ENST00000646891.2']), never), ['NM_004333.6', 'ENST00000646891.2']);
+        assert.deepEqual(await h.maneSelectForLabel('BRAF', after(1, ['NM_004333.6']), after(40, { ...ncbi, select: 'NM_9.9' })), ['NM_004333.6']);
+        // One source having nothing is not the answer while the other may have something.
+        assert.deepEqual(await h.maneSelectForLabel('BRAF', after(1, []), after(30, ncbi)), ['NM_004333.6', 'ENST00000646891.2']);
+        assert.deepEqual(await h.maneSelectForLabel('BRAF', after(30, ['NM_004333.6']), after(1, null)), ['NM_004333.6'], 'NCBI could not be asked');
+        assert.deepEqual(await h.maneSelectForLabel('CDKN2A', after(30, ['NM_000077.5']), after(1, { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: 'NM_000077.6' })),
+            ['NM_000077.5'], 'RefSeq Select is not MANE Select');
+        // Neither names one: no label, once both have said so.
+        assert.deepEqual(await h.maneSelectForLabel('X', after(5, []), after(10, null)), []);
+        assert.deepEqual(await h.maneSelectForLabel('X', () => { throw new Error('down'); }, () => Promise.reject(new Error('down'))), []);
+    }
 
     const realFetch = globalThis.fetch;
     const urls = [];
@@ -129,7 +156,8 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
         return new Response(JSON.stringify(mecp2), { status });
     };
     try {
-        assert.deepEqual(await h.fetchClinicalTranscripts('mecp2'), { select: 'NM_001110792.2', plusClinical: ['NM_004992.4'], refseqSelect: '' });
+        assert.deepEqual(await h.fetchClinicalTranscripts('mecp2'),
+            { select: 'NM_001110792.2', selectEnsembl: 'ENST00000453960.7', plusClinical: ['NM_004992.4'], refseqSelect: '' });
         assert.deepEqual(urls, ['https://api.ncbi.nlm.nih.gov/datasets/v2/gene/symbol/MECP2/taxon/9606/product_report']);
         await h.fetchClinicalTranscripts('MECP2');
         assert.equal(urls.length, 1, 'cached per gene');
@@ -589,6 +617,45 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     assert.equal(recoderQueries(never).filter(q => /^NM_000059:/.test(q)).length > 0, true, 'the version-less name was tried');
     assert.equal(never.hidden, true);
     console.log('ok accession name: a version newer than GRCh37\'s annotation is read on the version it has');
+}
+
+// 17. The "(MANE Select)" label when Ensembl's gene lookup does not answer. It
+//     took 29 s on the day this was written; every result is held up to 4 s
+//     for the label, so each lookup sat those out and then came without it.
+//     NCBI's list of the gene's MANE transcripts names the same transcript.
+{
+    const cassette = cassettes.kras35;
+    const labelled = /Transcript: NM_004985\.5 \(MANE Select\)c\.: c\.35G>A/;
+    // Ensembl's lookup failing outright: the label comes from NCBI's list.
+    const failing = await runLookup(cassette, { without: [/rest\.ensembl\.org\/lookup/] });
+    assertResolved(assert, failing, 'KRAS c.35G>A, Ensembl lookup down');
+    assert.match(failing.variant, labelled);
+    // Ensembl's lookup not answering at all, with the page's waits at their
+    // real length: the result is not held for it.
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const started = Date.now();
+    const pending = runLookup(cassette, {
+        timerCap: 6000,
+        route: async (url, key, respond) => {
+            if (!/rest\.ensembl\.org\/lookup/.test(key)) return undefined;
+            await held;
+            return respond({ error: 'Service Unavailable' }, 503);
+        }
+    });
+    const page = await Promise.race([pending, new Promise(resolve => setTimeout(() => resolve(null), 3000))]);
+    const took = Date.now() - started;
+    release();
+    assert(page, 'the lookup finished while Ensembl\'s gene lookup had still not answered');
+    assert(took < 2500, `without sitting out the 4 s the label is allowed (${took} ms)`);
+    assertResolved(assert, page, 'KRAS c.35G>A, Ensembl lookup not answering');
+    assert.match(page.variant, labelled);
+    // And either source alone is enough; with neither there is no label.
+    assert.match((await runLookup(cassette, { without: [/datasets/] })).variant, labelled);
+    const neither = await runLookup(cassette, { without: [/rest\.ensembl\.org\/lookup/, /datasets/] });
+    assertResolved(assert, neither, 'KRAS c.35G>A, no MANE source');
+    assert.match(neither.variant, /Transcript: NM_004985\.5c\.: c\.35G>A/);
+    console.log('ok MANE label: from whichever of Ensembl and NCBI names the transcript first');
 }
 
 console.log('Gene-symbol name tests passed');

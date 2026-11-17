@@ -296,6 +296,15 @@ Three sources answer that question:
   TP53, PTEN, EGFR, KRAS, CDKN2A, MUTYH, TTN and others — it was the MANE
   Select, version included, in all 20.
 
+The **"(MANE Select)" label** on the Variant card — for every lookup, not only
+gene-symbol names — is taken from whichever of the first two names the
+transcript first (`maneSelectForLabel`; NCBI's list gives it under both its
+names, RefSeq's and Ensembl's). Every result is held up to 4 s for that label,
+and it used to rest on Ensembl's record alone: during the final live run for
+this change Ensembl's gene lookup was taking 29 s, so each of 52 lookups sat
+those four seconds out and then came without the label, while NCBI's list
+answered in 0.3 s.
+
 **MANE Select alone is not enough**, which this rule got wrong at first (found in
 review, before it was released). For some sixty genes clinical reports count on
 a second transcript, and for exactly those MANE names it: MANE Plus Clinical.
