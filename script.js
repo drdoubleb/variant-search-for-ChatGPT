@@ -8113,6 +8113,13 @@ const initVariantSearchUi = () => {
                 // scaffold accessions carry no chromosomal coordinate to remap;
                 // the recoder resolves them on their own terms. Note it and move on.
                 LookupProgress.step('liftover', 'warn', 'no chromosomal coordinate to remap — input left as-is');
+            } else if (assembly === 'GRCh38' && isMitochondrialChromosome(query.split(':')[0])) {
+                // The mitochondrial genome is one sequence in both assemblies, so
+                // there is nothing to convert. Every spelling of a mitochondrial
+                // variant is read as "chrMT:g.…" by now, which sent it to
+                // Ensembl's assembly map all the same — a round trip for the
+                // answer "8993", and a failed lookup whenever that service was down.
+                LookupProgress.step('liftover', 'empty', 'not needed — the mitochondrial sequence is the same in both assemblies');
             } else if (assembly === 'GRCh38') {
                 const grch38Query = query;
                 LookupProgress.step('liftover', 'running');

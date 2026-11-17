@@ -180,6 +180,21 @@ console.log('ok mitochondrial lookup: m.8993T>G is MT-ATP6 p.Leu156Arg, in eleve
     console.log('ok snpEff rows: protein-structure contacts are not listed as transcripts');
 }
 
+// 6b. The GRCh38 box ticked. The mitochondrial genome is one sequence in both
+//     assemblies, so there is nothing to convert; but every spelling is read as
+//     "chrMT:g.…" by now, and that was sent to Ensembl's assembly map all the
+//     same — failing the lookup ("could not map chrMT:g.8993T>G (GRCh38) to
+//     GRCh37") whenever the map was down, as it is in this recording.
+for (const typed of ['M 8993 T G', 'chrMT:g.8993T>G', 'NC_012920.1:m.8993T>G', 'm.8993T>G']) {
+    const page = await runLookup(cassettes.mt8993, { input: typed, grch38: true });
+    assertResolved(assert, page, `${typed}, GRCh38 box ticked`);
+    assert.deepEqual(asked(page, /\/map\//), [], `${typed}: the assembly map is not asked`);
+    assert.match(page.variant, /g\.: chrMT:g\.8993T>G/, typed);
+    assert.match(page.variant, /c\.: c\.467T>Gp\.: p\.Leu156Arg/, typed);
+    assert.match(page.panel, /Map GRCh38 → GRCh37 · Ensemblnot needed — the mitochondrial sequence is the same in both assemblies/, typed);
+}
+console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks nothing');
+
 // 7. gnomAD. Mitochondrial variants are in a call set of their own, counted by
 //    heteroplasmy, which neither half of the gnomAD card read: v2 has none, and
 //    the v4 proxy — nuclear variants only — answered every one of them with a

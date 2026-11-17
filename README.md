@@ -353,6 +353,11 @@ variant, `NC_012920.1:m.8993T>G`, was read as the protein change `p.M.8993T>G`,
 and `chrM` — the hg19 name — was asked of MyVariant as such, a guaranteed miss
 that was recovered only when Ensembl answered and re-spelled it.
 
+The GRCh38 box makes no difference to a mitochondrial variant — the sequence is
+the same in both assemblies — and none is asked for: it used to be sent to
+Ensembl's assembly map all the same, which failed the lookup (*"could not map
+chrMT:g.8993T>G (GRCh38) to GRCh37"*) whenever that service was down.
+
 **gnomAD.** gnomAD keeps mitochondrial variants in a call set of their own,
 counted by heteroplasmy, which neither half of the gnomAD card read. v2 has
 none, and the v4 proxy looks up nuclear variants only: asked about one on `M` it
