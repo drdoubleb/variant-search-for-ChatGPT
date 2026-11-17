@@ -145,6 +145,14 @@ const API_TIMEOUT_MS = {
     maneBeforeClinvar: 3000,
     maneForName: 10000,
     clinvarNaming: 6000,
+    // NCBI's list of a gene's MANE transcripts (Select and Plus Clinical). It
+    // answers in 0.2-0.6 s; a name waits this long for it, counted from when
+    // the question was put, before going on with MANE Select alone.
+    clinicalTranscripts: 6000,
+    clinicalForName: 2500,
+    // ...and how long a finished result is held for it, to say which
+    // transcript a name was read on. (Asked at the start; rarely waited out.)
+    nameNote: 1500,
     liftover: 4000,
     cosmic: 2500,
     cosmicMeta: 1500,
@@ -245,6 +253,18 @@ function referenceBaseRejection(err) {
     return m ? { actual: m[2].toUpperCase(), stated: m[1].toUpperCase() } : null;
 }
 
+// The other thing a nomenclature service says about a name it has read: that
+// it does not have that VERSION of the transcript. GRCh37's annotation is
+// frozen and RefSeq is not — "NM_000077.6" (CDKN2A's current record) answers
+//   Unable to parse HGVS notation …: Could not get a Transcript object for 'NM_000077.6'
+// while NM_000077.5 and a bare NM_000077 resolve. Returns the versioned
+// accession, '' for any other failure.
+function unknownTranscriptVersion(err) {
+    if (!err || err.status !== 400) return '';
+    const m = String(err.message || '').match(/Could not get a Transcript object for '(N[MR]_\d+\.\d+)'/);
+    return m ? m[1] : '';
+}
+
 // RefSeq transcripts on which the substitution `change` ("c.512T>G") names the
 // right reference base, judged from MyVariant's records of OTHER changes at the
 // same position ("NM_001304717.5:c.512T>C" shows c.512 is T there). Used only
@@ -254,6 +274,7 @@ function transcriptsWithReferenceBase(hits, change, except = '') {
     if (!m) return [];
     const stem = m[1].toLowerCase();
     const bare = accession => String(accession || '').replace(/\.\d+$/, '').toUpperCase();
+    const excluded = new Set([].concat(except || []).map(bare));
     const found = new Map();
     for (const hit of hits || []) {
         const values = [].concat(hit?.clinvar?.hgvs?.coding || []);
@@ -262,7 +283,7 @@ function transcriptsWithReferenceBase(hits, change, except = '') {
         }
         for (const value of values) {
             const { transcript, change: other } = splitTranscriptHgvs(value);
-            if (!/^NM_\d+/i.test(transcript) || bare(transcript) === bare(except)) continue;
+            if (!/^NM_\d+/i.test(transcript) || excluded.has(bare(transcript))) continue;
             if (!String(other).toLowerCase().startsWith(`${stem}>`)) continue;
             // Keep the newest version seen of each transcript.
             const version = Number((transcript.match(/\.(\d+)$/) || [])[1] || 0);
@@ -270,7 +291,11 @@ function transcriptsWithReferenceBase(hits, change, except = '') {
             if (!known || version > known.version) found.set(bare(transcript), { accession: transcript, version });
         }
     }
-    return Array.from(found.values()).map(entry => entry.accession);
+    // Oldest accession first: where a gene's variants were long counted on one
+    // transcript, it is the low-numbered one (MECP2's NM_004992, not
+    // NM_001316337) — and the list is cut short when it is shown.
+    const number = accession => Number((accession.match(/^NM_0*(\d+)/i) || [])[1] || Infinity);
+    return Array.from(found.values()).map(entry => entry.accession).sort((a, b) => number(a) - number(b));
 }
 
 /*
@@ -2336,27 +2361,250 @@ function clinvarNamingTranscript(hits, gene) {
 }
 
 /*
- * The RefSeq transcript a coding change named on `gene` is counted on:
- * { accession, basis } or null when neither source can say in time.
+ * The transcripts clinical reporting counts a gene's variants on.
  *
- * Ensembl's MANE record is the authority and is preferred whenever it answers
- * within a few seconds. ClinVar's naming transcript stands in when it does
- * not, and after that MANE gets the rest of the time allowed.
+ * MANE Select is one transcript per gene, and for some sixty genes it is not
+ * the one the clinic counts on. MECP2 is reported on NM_004992 — T158M is
+ * c.473C>T there and c.509C>T on MANE Select — NF1 on NM_000267, MUTYH on
+ * NM_001128425. For exactly those genes MANE names a second transcript, MANE
+ * Plus Clinical, and a coding name typed on the gene symbol may be counted on
+ * either. NCBI's Datasets API lists both for a gene in one request of a few
+ * tenths of a second (Ensembl's equivalent took 18 s for TTN and failed for
+ * CDKN2A when measured).
+ *
+ * Resolves to { select: 'NM_…' | '', plusClinical: ['NM_…', …], refseqSelect }
+ * — all empty for a gene NCBI does not know — or null when NCBI could not be
+ * asked (which is not cached, and not tried again for a minute).
+ *
+ * `refseqSelect` is RefSeq's own pick, given where the gene has no transcript
+ * tagged MANE Select. For CDKN2A, whose RefSeq record has moved a version on
+ * from the one MANE was built with, that is all NCBI lists: the same
+ * transcript, and enough to tell it from the Plus Clinical one.
+ */
+const clinicalTranscriptsCache = new Map();
+const clinicalTranscriptsFailedAt = new Map();
+function clinicalTranscriptsFromReport(data, gene) {
+    const wanted = String(gene || '').toUpperCase();
+    // A symbol search also returns genes that merely have it as an alias
+    // ("TTN" brings TTR first): only the gene of that name counts.
+    const product = [].concat(data?.reports || []).map(report => report?.product)
+        .find(candidate => String(candidate?.symbol || '').toUpperCase() === wanted);
+    if (!product) return { select: '', plusClinical: [], refseqSelect: '' };
+    const tagged = category => [].concat(product.transcripts || [])
+        .filter(t => String(t?.select_category || '').toUpperCase() === category)
+        .map(t => String(t?.accession_version || ''))
+        .filter(accession => /^NM_\d+\.\d+$/.test(accession));
+    const select = tagged('MANE_SELECT')[0] || '';
+    return { select, plusClinical: tagged('MANE_PLUS_CLINICAL'), refseqSelect: select ? '' : (tagged('REFSEQ_SELECT')[0] || '') };
+}
+async function fetchClinicalTranscripts(gene) {
+    const symbol = String(gene || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9-]*$/.test(symbol) || isChromosomeLikeGeneSymbol(symbol)) return null;
+    if (Date.now() - (clinicalTranscriptsFailedAt.get(symbol) || 0) < MANE_RETRY_AFTER_MS) return null;
+    if (!clinicalTranscriptsCache.has(symbol)) {
+        if (clinicalTranscriptsCache.size >= 128) clinicalTranscriptsCache.delete(clinicalTranscriptsCache.keys().next().value);
+        const pending = (async () => {
+            try {
+                const response = await fetchWithTimeout(
+                    `https://api.ncbi.nlm.nih.gov/datasets/v2/gene/symbol/${encodeURIComponent(symbol)}/taxon/9606/product_report`,
+                    { headers: { Accept: 'application/json' } }, API_TIMEOUT_MS.clinicalTranscripts);
+                if (!response.ok) throw new Error('NCBI Datasets unavailable');
+                return clinicalTranscriptsFromReport(await response.json(), symbol);
+            } catch {
+                clinicalTranscriptsCache.delete(symbol);
+                clinicalTranscriptsFailedAt.set(symbol, Date.now());
+                return null;
+            }
+        })();
+        clinicalTranscriptsCache.set(symbol, pending);
+    }
+    return clinicalTranscriptsCache.get(symbol);
+}
+
+/*
+ * The RefSeq transcript a coding change named on `gene` is counted on:
+ * { accession, basis, plusClinical } or null when no source can say in time.
+ *
+ * MANE Select has two authorities, Ensembl's record and NCBI's, and whichever
+ * names it within a few seconds is taken. ClinVar's naming transcript stands
+ * in when neither does, and after that they get the rest of the time allowed.
+ *
+ * `plusClinical` lists the gene's MANE Plus Clinical transcripts (see
+ * fetchClinicalTranscripts): an array when NCBI has said — empty for most
+ * genes — and null when it has not, which is not the same thing.
  */
 async function standardTranscriptForGene(gene, fetchMane = fetchManeSelectAccessions, fetchNaming = fetchClinvarNamingTranscript,
-    timing = { maneAlone: API_TIMEOUT_MS.maneBeforeClinvar, total: API_TIMEOUT_MS.maneForName }) {
+    timing = { maneAlone: API_TIMEOUT_MS.maneBeforeClinvar, total: API_TIMEOUT_MS.maneForName, clinical: API_TIMEOUT_MS.clinicalForName },
+    fetchClinical = fetchClinicalTranscripts) {
     const refseq = list => (list || []).find(a => /^NM_\d+\.\d+$/.test(a)) || '';
-    const mane = Promise.resolve().then(() => fetchMane(gene)).then(refseq, () => '');
+    const fromEnsembl = Promise.resolve().then(() => fetchMane(gene)).then(refseq, () => '');
+    const clinical = Promise.resolve().then(() => fetchClinical(gene)).catch(() => null);
+    const fromNcbi = clinical.then(answer => (answer && answer.select) || '');
+    // The first of the two to name a transcript; '' once both have said none.
+    const mane = new Promise((resolve) => {
+        let left = 2;
+        for (const source of [fromEnsembl, fromNcbi]) {
+            source.then((accession) => {
+                left -= 1;
+                if (accession || left === 0) resolve(accession || '');
+            });
+        }
+    });
     const naming = Promise.resolve().then(() => fetchNaming(gene)).catch(() => '');
     const within = (promise, ms) => settledWithin(promise, ms, 'slow').catch(() => '');
     const started = Date.now();
     const left = () => Math.max(0, timing.total - (Date.now() - started));
-    const authoritative = await within(mane, timing.maneAlone);
-    if (authoritative) return { accession: authoritative, basis: `the MANE Select transcript of ${gene}` };
-    const named = await within(naming, left());
-    if (named) return { accession: named, basis: `the transcript ClinVar names ${gene} variants on` };
-    const late = await within(mane, left());
-    return late ? { accession: late, basis: `the MANE Select transcript of ${gene}` } : null;
+    const settle = async () => {
+        const authoritative = await within(mane, timing.maneAlone);
+        if (authoritative) return { accession: authoritative, basis: `the MANE Select transcript of ${gene}` };
+        const named = await within(naming, left());
+        if (named) return { accession: named, basis: `the transcript ClinVar names ${gene} variants on` };
+        const late = await within(mane, left());
+        if (late) return { accession: late, basis: `the MANE Select transcript of ${gene}` };
+        // Nobody named a MANE Select transcript. RefSeq's own pick, if NCBI gave one.
+        const listed = await within(clinical, 0);
+        return listed && listed.refseqSelect
+            ? { accession: listed.refseqSelect, basis: `the RefSeq Select transcript of ${gene}` }
+            : null;
+    };
+    const standard = await settle();
+    if (!standard) return null;
+    // NCBI was asked at the start; if it has not answered within its own
+    // allowance by now, the name goes on without knowing.
+    const allowance = Math.max(0, (timing.clinical ?? timing.maneAlone) - (Date.now() - started));
+    const answer = await settledWithin(clinical, allowance, 'slow').catch(() => null);
+    const bare = accession => String(accession).replace(/\.\d+$/, '');
+    return {
+        ...standard,
+        plusClinical: answer ? answer.plusClinical.filter(accession => bare(accession) !== bare(standard.accession)) : null
+    };
+}
+
+/*
+ * Which transcript a coding name typed on a gene symbol is read on. `hits` is
+ * what MyVariant holds under the name, on any transcript, best claim first;
+ * `standard` is standardTranscriptForGene()'s answer.
+ *
+ * A name a record carries on one of the gene's clinical transcripts is that
+ * variant: MANE Select first, then MANE Plus Clinical. "MECP2 c.473C>T" is on
+ * no record on MANE Select — the base there is not even C — and is T158M on
+ * the Plus Clinical transcript; "NF1 c.6789_6792del" is a well-known
+ * pathogenic deletion on NM_000267 and, read on MANE Select, four other bases
+ * nobody has reported. With no record on any of them the name is read on MANE
+ * Select, and the Plus Clinical transcripts are what to try if it does not
+ * fit there.
+ *
+ * When NCBI has not said whether the gene has a Plus Clinical transcript
+ * (`plusClinical` null) and no record carries the name on MANE Select, a
+ * record that carries it on another transcript is all there is to go by, and
+ * is taken — the oldest transcript first, as before this rule existed.
+ *
+ * Returns { accession, basis, hit, alternatives, untried }:
+ *   hit           the record that is this change on that transcript, or null
+ *   alternatives  other transcripts on which the name is, or would be, another
+ *                 variant, for the card to offer:
+ *                 [{ accession, kind: 'select' | 'plus' | 'listed', known }]
+ *   untried       Plus Clinical transcripts to fall back on (no record anywhere)
+ */
+function chooseNameReading(hits, gene, change, standard) {
+    const bare = accession => String(accession || '').replace(/\.\d+$/, '');
+    const pool = hits || [];
+    const recordOn = accession => pool.find(candidate => hitMatchesVariantQuery(candidate, `${bare(accession)}:${change}`)) || null;
+    const readings = [{ accession: standard.accession, basis: standard.basis, kind: 'select' }]
+        .concat((standard.plusClinical || []).map(accession => (
+            { accession, basis: `a MANE Plus Clinical transcript of ${gene}`, kind: 'plus' })))
+        .map(reading => ({ ...reading, hit: recordOn(reading.accession) }));
+    // The best-claimed record that carries the name on some other transcript.
+    const clinical = new Set(readings.map(reading => bare(reading.accession)));
+    let listed = null;
+    for (const hit of pool) {
+        if (readings.some(reading => reading.hit === hit)) continue;
+        const accession = transcriptsNamingChange(hit, change).find(candidate => !clinical.has(bare(candidate)));
+        if (accession) {
+            listed = { accession, kind: 'listed', hit,
+                basis: `a transcript ClinVar lists this name on (whether ${gene} is reported on it could not be learned)` };
+            break;
+        }
+    }
+    let chosen = readings.find(reading => reading.hit) || null;
+    if (!chosen && standard.plusClinical === null && listed) chosen = listed;
+    if (!chosen) chosen = readings[0];
+    const sameVariant = other => Boolean(chosen.hit && other.hit && normalizedGenomicId(chosen.hit._id) === normalizedGenomicId(other.hit._id));
+    // What else the name could have been. MANE Select is always worth naming
+    // when the name was read elsewhere; a Plus Clinical transcript when a
+    // record shows the name on it; and a record on some further transcript
+    // only when no record backs the reading chosen — once the name is a known
+    // variant on a transcript the gene is reported on, its namesakes on
+    // minor isoforms are noise ("MECP2 c.473C>T" is also a benign variant on
+    // NM_001316337, which is where the old hint used to send people).
+    const alternatives = readings.concat(listed && !chosen.hit ? [listed] : [])
+        .filter(other => other !== chosen && !sameVariant(other))
+        .filter(other => other.kind === 'select' || other.hit)
+        .map(other => ({ accession: other.accession, kind: other.kind, known: Boolean(other.hit) }));
+    return {
+        accession: chosen.accession,
+        basis: chosen.basis,
+        hit: chosen.hit,
+        alternatives,
+        untried: chosen.hit ? [] : readings.slice(1).map(reading => reading.accession)
+    };
+}
+
+// The RefSeq transcripts on which a record carries exactly this coding change,
+// oldest accession first ("NM_004992.4" before "NM_001316337.2").
+function transcriptsNamingChange(hit, change) {
+    const wanted = String(change || '').toLowerCase();
+    const values = [].concat(hit?.clinvar?.hgvs?.coding || []);
+    for (const ann of [].concat(hit?.snpeff?.ann || [])) {
+        if (ann?.feature_id && ann?.hgvs_c) values.push(`${ann.feature_id}:${ann.hgvs_c}`);
+    }
+    const number = accession => Number((accession.match(/^NM_0*(\d+)/i) || [])[1] || Infinity);
+    const found = new Map();
+    for (const value of values) {
+        const h = splitTranscriptHgvs(value);
+        if (!/^NM_\d+/i.test(h.transcript) || h.change.toLowerCase() !== wanted) continue;
+        const key = h.transcript.replace(/\.\d+$/, '').toUpperCase();
+        const version = Number((h.transcript.match(/\.(\d+)$/) || [])[1] || 0);
+        if (!found.has(key) || version > found.get(key).version) found.set(key, { accession: h.transcript, version });
+    }
+    return Array.from(found.values()).map(entry => entry.accession).sort((a, b) => number(a) - number(b));
+}
+
+/*
+ * What the Variant card says about the transcript a gene-symbol coding name
+ * was read on, when that needs saying — which is whenever it is not simply
+ * "MANE Select, and nothing else to choose from":
+ *
+ *   { text, links: [{ variant, lead }] }   or null when nothing needs saying
+ *
+ * `text` states the reading; each link offers another one ("lead" is the
+ * sentence that introduces it). `reading` is { typed, change, accession, basis,
+ * select, alternatives, rejected } as the lookup records it.
+ */
+function nameReadingNote(reading) {
+    if (!reading || !reading.accession) return null;
+    const bare = accession => String(accession || '').replace(/\.\d+$/, '');
+    const onSelect = !reading.select || bare(reading.accession) === bare(reading.select);
+    const rejected = reading.rejected || [];
+    const alternatives = (reading.alternatives || []).filter(other => bare(other.accession) !== bare(reading.accession));
+    if (onSelect && !alternatives.length && !rejected.length) return null;
+    let text = `${reading.typed} is read on ${reading.accession}, ${reading.basis}`;
+    if (rejected.length) {
+        // Tried where it did not fit: nothing else to offer.
+        text += `: it is not a change on ${rejected
+            .map(r => `${r.accession}, ${r.basis} (${r.actual} there, not ${r.stated})`).join(', nor on ')}.`;
+        return { text, links: [] };
+    }
+    return {
+        text: `${text}.`,
+        links: alternatives.map(other => ({
+            variant: `${other.accession}:${reading.change}`,
+            lead: other.kind === 'select'
+                ? 'If the MANE Select transcript was meant, look up'
+                : `Counted on ${other.kind === 'plus' ? 'the MANE Plus Clinical transcript' : 'another transcript'}`
+                    + ' the same name is another variant, which ClinVar lists:'
+        }))
+    };
 }
 
 // The coding substitution a query names ("c.512T>G"), when no transcript row
@@ -2529,15 +2777,20 @@ function selectTranscriptForQuery(candidates, query = '') {
     if (!candidates.length) return 0;
     const intent = parseMyVariantQueryIntent(query);
     const accession = /^(?:NM_|NR_|ENST|LRG_)/i.test(intent.gene) ? intent.gene : '';
-    const exact = candidates.findIndex(t => (!accession || sameTranscript(accession, t.transcript))
-        && intent.cdnaTarget && t.cDNA.toLowerCase() === intent.cdnaTarget);
-    if (exact >= 0) {
-        // Multiple transcripts can have the same c. change. Honour an explicit
-        // accession; otherwise prefer MANE/canonical among those exact matches.
+    // Multiple transcripts can have the same c. change. Honour an explicit
+    // accession; otherwise prefer MANE/canonical among those exact matches.
+    //
+    // The accession is matched with its version first, then without: the rows
+    // are GRCh37 annotation and can be a version behind the one asked for. A
+    // name read on NM_000267.4 (NF1's MANE Plus Clinical transcript) has its
+    // row under NM_000267.3 — the same change on the same transcript — and
+    // used to be shown instead on MANE Select, under another c. name than the
+    // one typed.
+    for (const wanted of [accession, accession.replace(/\.\d+$/, '')]) {
         const matches = candidates.map((t, i) => ({ ...t, originalIndex: i }))
-            .filter(t => (!accession || sameTranscript(accession, t.transcript))
-                && t.cDNA.toLowerCase() === intent.cdnaTarget);
-        return matches[selectCanonicalTranscript(matches)].originalIndex;
+            .filter(t => (!wanted || sameTranscript(wanted, t.transcript))
+                && intent.cdnaTarget && t.cDNA.toLowerCase() === intent.cdnaTarget);
+        if (matches.length) return matches[selectCanonicalTranscript(matches)].originalIndex;
     }
     const protein = intent.proteinTarget?.triple || intent.proteinTarget?.single;
     return selectCanonicalTranscript(candidates, protein);
@@ -6841,6 +7094,17 @@ function variantNameRank(hit, identifier) {
     return [named ? 1 : 0, Number.isFinite(lowestNm) ? 1 : 0, Number.isFinite(lowestNm) ? -lowestNm : 0];
 }
 
+// The transcript of ClinVar's preferred name for a hit, when that name is the
+// coding change given: "NM_058195.4(CDKN2A):c.3G>C (p.Met1?)" → "NM_058195.4".
+function clinvarNamedTranscript(hit, change) {
+    const wanted = normalizeCdnaForMatch(change);
+    for (const rcv of [].concat(hit?.clinvar?.rcv || [])) {
+        const m = String(rcv?.preferred_name || '').match(/^(N[MR]_\d+\.\d+)\([^)]*\):\s*([cn]\.[^\s()]+)/);
+        if (m && normalizeCdnaForMatch(m[2]) === wanted) return m[1];
+    }
+    return '';
+}
+
 // Every hit that is the variant `identifier` names, strongest claim first.
 function rankMyVariantHits(hits, identifier, expectedGenomic = '') {
     const matches = (hits || []).filter(hit => hitMatchesVariantQuery(hit, identifier, expectedGenomic));
@@ -7479,10 +7743,20 @@ const initVariantSearchUi = () => {
 
     // Monotonic search counter, shared across submits, for the overlapping-search guard.
     let searchSeq = 0;
-    // `renamed` is set when the lookup is being run again for a variant ClinVar
-    // lists the typed name under: { query, gene, name, title, id }.
-    const runLookup = async (e, renamed = null) => {
+    // `rerun` is set when the lookup runs itself again for something it has
+    // worked out about the name typed:
+    //   { rawInput, tumorType, grch38,   what the first pass read off the form
+    //     query, gene,                   what to look up this time
+    //     otherName: { name, title, id } the variant ClinVar lists the name under
+    //     readOn: { … } }                the transcript the name is now read on
+    // The form is NOT read again: by then the user may have typed the next
+    // variant into it, and a second pass that picked that up showed one
+    // variant's ClinVar record beside another's coordinates.
+    const runLookup = async (e, rerun = null) => {
         if (e) e.preventDefault();
+        const renamed = rerun && rerun.otherName
+            ? { ...rerun.otherName, query: rerun.query, gene: rerun.gene }
+            : null;
         // Guard against overlapping searches. Each submit takes the next sequence
         // number; any render/append that runs after a newer submit started is stale and
         // bails via isCurrentSearch(). Without this, a slow earlier search can resolve
@@ -7505,14 +7779,20 @@ const initVariantSearchUi = () => {
         // consumer (buildVariantCoordinateTuple and friends) re-parses rawInput
         // preferentially, and letting them read the original hg38 tokens would
         // pair GRCh38 positions with GRCh37 annotations.
-        let rawInput = input.value.trim();
-        const tumorType = tumorTypeInput ? tumorTypeInput.value.trim() : '';
-        const grch38Checked = Boolean(grch38Toggle && grch38Toggle.checked);
+        let rawInput = rerun ? rerun.rawInput : input.value.trim();
+        const tumorType = rerun ? rerun.tumorType : (tumorTypeInput ? tumorTypeInput.value.trim() : '');
+        const grch38Checked = rerun ? rerun.grch38 : Boolean(grch38Toggle && grch38Toggle.checked);
+        // What this lookup was given, for a pass that runs it again.
+        const submitted = { rawInput, tumorType, grch38: grch38Checked };
+        const rerunWith = fields => ({ ...submitted, otherName: rerun ? rerun.otherName || null : null, readOn: null,
+            versionDropped: rerun ? rerun.versionDropped || '' : '', ...fields });
         // Update the URL with the raw submitted value so inbound/outbound links can
         // preserve flexible user-entered formats (HGVS g./c./p., space-separated tokens, etc.).
-        syncVariantInUrl(rawInput);
-        syncTumorTypeInUrl(tumorType);
-        syncAssemblyInUrl(grch38Checked);
+        if (!rerun) {
+            syncVariantInUrl(rawInput);
+            syncTumorTypeInUrl(tumorType);
+            syncAssemblyInUrl(grch38Checked);
+        }
         let query = rawInput;
 
         // Detect gene-only or gene+descriptor input before normalisation.
@@ -7689,11 +7969,12 @@ const initVariantSearchUi = () => {
             return { gene: m[1].toUpperCase(), name: m[2] };
         })();
         // A name that is not HGVS at all: nothing to ask Ensembl or MyVariant.
-        const unreadableName = !renamed && /^[A-Za-z][A-Za-z0-9-]*:\d/.test(query) && !isGenomicVariant(query);
-        if (renamed) {
-            // Running again for the variant ClinVar lists the typed name under.
-            query = renamed.query;
-            geneHintGlobal = renamed.gene;
+        const unreadableName = !rerun && /^[A-Za-z][A-Za-z0-9-]*:\d/.test(query) && !isGenomicVariant(query);
+        if (rerun) {
+            // Running again: for the variant ClinVar lists the typed name
+            // under, or for the name read on another transcript of the gene.
+            query = rerun.query;
+            if (rerun.gene) geneHintGlobal = rerun.gene;
         }
         // Log normalized query for debugging
         console.log('[DEBUG] Normalized query:', query);
@@ -7715,6 +7996,16 @@ const initVariantSearchUi = () => {
         if (renamed) {
             LookupProgress.step('clinvarName', 'ok',
                 `"${renamed.name}" is another name for ${renamed.title} (Variation ${renamed.id})`);
+        }
+        if (rerun && rerun.versionDropped) {
+            LookupProgress.note('parse', `${rerun.versionDropped} is a newer version than GRCh37's annotation has `
+                + '— read on the version it does have');
+        }
+        if (rerun && rerun.readOn) {
+            const reading = rerun.readOn;
+            LookupProgress.note('parse', (reading.rejected || [])
+                .map(r => `not a change on ${r.accession} (${r.actual} there, not ${r.stated})`)
+                .concat(`on ${reading.accession}, ${reading.basis}`).join(' · '));
         }
         if (query !== rawInput) {
             LookupProgress.resolved({ input: rawInput, genomic: isGenomicVariant(query) ? query : '', gene: geneHintGlobal });
@@ -8185,7 +8476,10 @@ const initVariantSearchUi = () => {
         // settles which transcript the name is read on (below), and asks about
         // that — or not at all, when MyVariant already holds the variant.
         const geneSymbolName = geneSymbolCodingName(query);
-        if (geneSymbolName) fetchManeSelectAccessions(geneSymbolName.gene);
+        if (geneSymbolName) {
+            fetchManeSelectAccessions(geneSymbolName.gene);
+            fetchClinicalTranscripts(geneSymbolName.gene);
+        }
         else if (geneHintGlobal) fetchManeSelectAccessions(geneHintGlobal);
         const askRecoder = (asked) => {
             LookupProgress.step('recoder', 'running');
@@ -8333,8 +8627,11 @@ const initVariantSearchUi = () => {
             let transcriptUnsettled = false;
             // How a gene-symbol coding name was read ({ typed, accession, basis }),
             // and everything MyVariant returned for the name as typed.
-            let nameReadOn = null;
+            let nameReadOn = rerun && rerun.readOn ? { ...rerun.readOn } : null;
             let nameSearchHits = [];
+            // A gene-symbol name that ClinVar's own name for a variant settled:
+            // { typed, gene, change, accession } — the transcript of that name.
+            let nameSettledByClinvar = null;
             const adoptNamedHit = async (hit) => {
                 const record = await fetchMyVariant(hit._id);
                 const reconciled = await reconcileClinvarAllele(record, recordFoundThroughClinvar(record, query));
@@ -8395,38 +8692,70 @@ const initVariantSearchUi = () => {
             if (!annotation && looksLikeNonGenomic && (isProteinVariant || /c\./i.test(query))) {
                 try {
                     // Try direct search using the query as provided (e.g. "BRAF:p.Val600Glu").
-                    let named = await searchMyVariant(query);
-                    if (!named.length && query.includes(':')) {
-                        // Replace colons with spaces for free‑text lookup (e.g. "BRAF p.Val600Glu").
-                        named = await searchMyVariant(query.replace(/:/g, ' '));
+                    // MyVariant not answering must not skip what follows: a name
+                    // on a gene symbol still has to be read on one of the gene's
+                    // own transcripts, not handed to Ensembl as typed — which is
+                    // what a failed search used to lead to, without a word.
+                    let named = [];
+                    try {
+                        named = await searchMyVariant(query);
+                        if (!named.length && query.includes(':')) {
+                            // Replace colons with spaces for free‑text lookup (e.g. "BRAF p.Val600Glu").
+                            named = await searchMyVariant(query.replace(/:/g, ' '));
+                        }
+                    } catch (searchErr) {
+                        console.log('[DEBUG] Direct MyVariant search error:', searchErr);
+                        named = [];
                     }
+                    if (!isCurrentSearch()) return;
                     nameSearchHits = named.raw || [];
                     let hit = named[0] || null;
                     /*
-                     * "GENE c.X" is c.X on the gene's standard transcript — its MANE
-                     * Select. When ClinVar itself names a hit that way the matter is
-                     * settled (variantNameRank). Otherwise MyVariant's hits are c.X
-                     * on SOME transcript, and with no hit at all Ensembl would be
-                     * left to choose one: either way the answer used to depend on
-                     * which transcript happened to come first. So ask which one is
-                     * standard and read the name on it — from here on the lookup is
-                     * for "NM_…:c.X", which every later step treats exactly.
+                     * "GENE c.X" does not say which transcript c.X is counted on.
+                     * When ClinVar itself names a hit that way the matter is settled
+                     * (variantNameRank). Otherwise MyVariant's hits are c.X on SOME
+                     * transcript, and with no hit at all Ensembl would be left to
+                     * choose one. So ask which transcripts the gene is reported on
+                     * — MANE Select, and MANE Plus Clinical where there is one —
+                     * and read the name on the first of those a record carries it
+                     * on (chooseNameReading). From here on the lookup is for
+                     * "NM_…:c.X", which every later step treats exactly.
                      * If that cannot be learned in time, the old ranking stands.
                      */
-                    if (geneSymbolName && !(hit && variantNameRank(hit, query)[0] === 1)) {
+                    if (geneSymbolName && hit && variantNameRank(hit, query)[0] === 1) {
+                        // Settled by ClinVar's own name for the variant. Which
+                        // transcript that name is on is kept for the card: where
+                        // it is not MANE Select, the card says so.
+                        nameSettledByClinvar = {
+                            typed: `${geneSymbolName.gene} ${geneSymbolName.change}`,
+                            gene: geneSymbolName.gene,
+                            change: geneSymbolName.change,
+                            accession: clinvarNamedTranscript(hit, geneSymbolName.change)
+                        };
+                    } else if (geneSymbolName) {
                         const standard = await standardTranscriptForGene(geneSymbolName.gene);
                         if (!isCurrentSearch()) return;
                         if (standard) {
-                            // A MyVariant hit counts only if it is this change on that
-                            // transcript — in any version: snpEff's rows lag ClinVar's.
-                            const onStandard = `${standard.accession.replace(/\.\d+$/, '')}:${geneSymbolName.change}`;
-                            hit = named.find(candidate => hitMatchesVariantQuery(candidate, onStandard)) || null;
-                            nameReadOn = { typed: `${geneSymbolName.gene} ${geneSymbolName.change}`, ...standard };
+                            // A MyVariant hit counts only if it is this change on the
+                            // transcript chosen — in any version: snpEff's rows lag ClinVar's.
+                            const reading = chooseNameReading(named, geneSymbolName.gene, geneSymbolName.change, standard);
+                            hit = reading.hit;
+                            nameReadOn = {
+                                typed: `${geneSymbolName.gene} ${geneSymbolName.change}`,
+                                gene: geneSymbolName.gene,
+                                change: geneSymbolName.change,
+                                accession: reading.accession,
+                                basis: reading.basis,
+                                select: standard.accession,
+                                alternatives: reading.alternatives,
+                                untried: reading.untried,
+                                rejected: []
+                            };
                             // (gVariant still holds the name as typed until something resolves.)
-                            if (gVariant === query) gVariant = `${standard.accession}:${geneSymbolName.change}`;
-                            query = `${standard.accession}:${geneSymbolName.change}`;
+                            if (gVariant === query) gVariant = `${reading.accession}:${geneSymbolName.change}`;
+                            query = `${reading.accession}:${geneSymbolName.change}`;
                             if (!geneHintGlobal) geneHintGlobal = geneSymbolName.gene;
-                            LookupProgress.note('parse', `on ${standard.accession}, ${standard.basis}`);
+                            LookupProgress.note('parse', `on ${reading.accession}, ${reading.basis}`);
                         } else {
                             // Said, not hidden: what follows is the old behaviour.
                             transcriptUnsettled = true;
@@ -8892,6 +9221,25 @@ const initVariantSearchUi = () => {
                                     const wrongBase = lastRecoderResult.query === query ? referenceBaseRejection(lastRecoderResult.error) : null;
                                     if (wrongBase) {
                                         const where = (query.match(/^[^:]+/) || [''])[0];
+                                        const change = query.slice(query.indexOf(':') + 1);
+                                        // Not a change on this transcript — but the gene has
+                                        // another the clinic counts on: read the name there.
+                                        if (nameReadOn && nameReadOn.untried && nameReadOn.untried.length) {
+                                            const [next, ...rest] = nameReadOn.untried;
+                                            return runLookup(null, rerunWith({
+                                                query: `${next}:${change}`,
+                                                gene: nameReadOn.gene,
+                                                readOn: {
+                                                    ...nameReadOn,
+                                                    accession: next,
+                                                    basis: `a MANE Plus Clinical transcript of ${nameReadOn.gene}`,
+                                                    alternatives: [],
+                                                    untried: rest,
+                                                    rejected: nameReadOn.rejected.concat({ accession: nameReadOn.accession,
+                                                        basis: nameReadOn.basis, actual: wrongBase.actual, stated: wrongBase.stated })
+                                                }
+                                            }));
+                                        }
                                         LookupProgress.step('recoder', 'fail', `${where} has ${wrongBase.actual} there, not ${wrongBase.stated}`);
                                         if (LookupProgress.stateOf('vep') === 'fail') LookupProgress.step('vep', 'empty', 'not asked further — the name does not fit');
                                         let message = nameReadOn
@@ -8899,16 +9247,32 @@ const initVariantSearchUi = () => {
                                                 + `the reference base at that position is ${wrongBase.actual}, not ${wrongBase.stated}.`
                                             : `${query} names a reference base that is not there: ${where} has ${wrongBase.actual} at that position, not ${wrongBase.stated}.`;
                                         if (nameReadOn) {
-                                            const change = query.slice(query.indexOf(':') + 1);
-                                            const elsewhere = transcriptsWithReferenceBase(nameSearchHits, change, nameReadOn.accession);
+                                            for (const earlier of nameReadOn.rejected || []) {
+                                                message += ` Nor on ${earlier.accession}, ${earlier.basis} (${earlier.actual} there).`;
+                                            }
+                                            const tried = [nameReadOn.accession].concat((nameReadOn.rejected || []).map(r => r.accession));
+                                            const elsewhere = transcriptsWithReferenceBase(nameSearchHits, change, tried);
                                             message += ' The name may be counted on another transcript — enter it with that transcript\'s accession'
                                                 + (elsewhere.length
-                                                    ? ` (${elsewhere.slice(0, 2).map(acc => `${acc}:${change}`).join(' or ')} — the base there is ${wrongBase.stated}).`
+                                                    ? ` (${elsewhere.slice(0, 3).map(acc => `${acc}:${change}`).join(' or ')} — the base there is ${wrongBase.stated}).`
                                                     : ' (NM_…:c.…).');
                                         } else {
                                             message += ' Check the position, the base and the transcript version.';
                                         }
                                         throw new Error(message);
+                                    }
+                                    // A transcript version newer than GRCh37's annotation, which
+                                    // NCBI could not place on GRCh37 either. Ensembl reads the
+                                    // accession without its version as the one it has: look that
+                                    // up, and say so. (Once: the second pass does not come here.)
+                                    const tooNew = lastRecoderResult.query === query ? unknownTranscriptVersion(lastRecoderResult.error) : '';
+                                    if (tooNew && query.startsWith(`${tooNew}:`) && !(rerun && rerun.versionDropped)) {
+                                        return runLookup(null, rerunWith({
+                                            query: query.replace(tooNew, tooNew.replace(/\.\d+$/, '')),
+                                            gene: geneHintGlobal || '',
+                                            readOn: nameReadOn,
+                                            versionDropped: tooNew
+                                        }));
                                     }
                                     // Nothing resolved. Which message is correct depends entirely on
                                     // *why* nothing resolved, so ask the progress panel rather than
@@ -8949,7 +9313,8 @@ const initVariantSearchUi = () => {
                         const known = await resolveClinvarOtherName(typedName.gene, typedName.name);
                         if (!isCurrentSearch()) return;
                         if (known) {
-                            return runLookup(null, { query: known.hgvs, gene: typedName.gene, name: typedName.name, title: known.title, id: known.id });
+                            return runLookup(null, rerunWith({ query: known.hgvs, gene: typedName.gene,
+                                otherName: { name: typedName.name, title: known.title, id: known.id } }));
                         }
                         LookupProgress.step('clinvarName', known === null ? 'empty' : 'warn', known === null
                             ? `no single ${typedName.gene} variant listed under "${typedName.name}"`
@@ -9181,6 +9546,33 @@ const initVariantSearchUi = () => {
                 }
                 transcriptsFromRecoder = markManeTranscripts(transcriptsFromRecoder, maneAccessions);
                 if (!isCurrentSearch()) return;
+                // A name ClinVar's own name for a variant settled is not thereby on
+                // MANE Select: "CDKN2A c.3G>C" is ClinVar's name for a p14ARF variant
+                // on NM_058195.4, and on NM_000077 it is p16's start codon. Where
+                // the two differ the card says which was read, and offers the other.
+                if (nameSettledByClinvar && nameSettledByClinvar.accession && !nameReadOn) {
+                    const bare = accession => String(accession || '').replace(/\.\d+$/, '');
+                    let clinical = null;
+                    try {
+                        clinical = await settledWithin(fetchClinicalTranscripts(nameSettledByClinvar.gene), API_TIMEOUT_MS.nameNote, 'slow');
+                    } catch {
+                        // Not known in time: the Transcript line still says where it was read.
+                    }
+                    if (!isCurrentSearch()) return;
+                    const select = (clinical && (clinical.select || clinical.refseqSelect))
+                        || maneAccessions.find(a => /^NM_\d+\.\d+$/.test(a)) || '';
+                    if (select && bare(select) !== bare(nameSettledByClinvar.accession)) {
+                        const plus = Boolean(clinical && clinical.plusClinical.some(a => bare(a) === bare(nameSettledByClinvar.accession)));
+                        nameReadOn = {
+                            ...nameSettledByClinvar,
+                            basis: `the transcript ClinVar names this variant on${plus ? ` (a MANE Plus Clinical transcript of ${nameSettledByClinvar.gene})` : ''}`,
+                            select,
+                            alternatives: [{ accession: select, kind: 'select', known: false }],
+                            untried: [],
+                            rejected: []
+                        };
+                    }
+                }
             }
             // Display annotation
             statusEl.textContent = 'Annotation retrieved';
@@ -9424,6 +9816,24 @@ const initVariantSearchUi = () => {
                         });
                         rsNote.appendChild(document.createTextNode('.'));
                         content.appendChild(rsNote);
+                    }
+                    // Which transcript a gene-symbol name was read on, when there was
+                    // more than one it could have been (see nameReadingNote).
+                    const readingNote = nameReadingNote(nameReadOn);
+                    if (readingNote) {
+                        const note = document.createElement('span');
+                        note.className = 'name-reading-note';
+                        note.style.cssText = 'font-size:0.78rem;color:#1e3a8a;background:#dbeafe;padding:3px 6px;border-radius:4px;';
+                        note.appendChild(document.createTextNode(readingNote.text));
+                        for (const other of readingNote.links) {
+                            note.appendChild(document.createTextNode(` ${other.lead} `));
+                            const link = document.createElement('a');
+                            link.setAttribute('href', `?variant=${encodeURIComponent(other.variant)}`);
+                            link.textContent = other.variant;
+                            note.appendChild(link);
+                            note.appendChild(document.createTextNode('.'));
+                        }
+                        content.appendChild(note);
                     }
                     if (renamed) {
                         // The name typed is not on the page anywhere else: say what
@@ -11869,7 +12279,8 @@ const initVariantSearchUi = () => {
                 const known = await resolveClinvarOtherName(typedName.gene, typedName.name);
                 if (!isCurrentSearch()) return;
                 if (known) {
-                    return runLookup(null, { query: known.hgvs, gene: typedName.gene, name: typedName.name, title: known.title, id: known.id });
+                    return runLookup(null, rerunWith({ query: known.hgvs, gene: typedName.gene,
+                        otherName: { name: typedName.name, title: known.title, id: known.id } }));
                 }
                 if (known === null) {
                     LookupProgress.step('clinvarName', 'empty', `no single ${typedName.gene} variant listed under "${typedName.name}"`);
@@ -11935,6 +12346,8 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         isMitochondrialAccession, mitochondrialToChr, withoutUnusableBlocks, normalizedGenomicId,
         isMitochondrialChromosome, gnomadMitochondrialId, gnomadMitochondrialUrl, fetchGnomadMitochondrial,
         resolveGeneSymbolFromVep, provablyDifferentAlleles, netLengthChange, leftAlignedVcfBlock,
+        clinicalTranscriptsFromReport, fetchClinicalTranscripts, chooseNameReading, nameReadingNote, clinvarNamedTranscript,
+        transcriptsNamingChange, selectTranscriptForQuery, unknownTranscriptVersion,
         getHitGenesUpper, buildSummary,
         // reference bases the input states; allele identity across spellings
         statedReferenceBases, verifyStatedReference,

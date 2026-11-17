@@ -263,7 +263,8 @@ change matched on, then the existing ClinVar-presence tie-break. It is a
 preference rather than a filter, an explicit accession is honoured as before,
 and protein names are ranked the same way.
 
-**A coding name on a gene symbol is read on the gene's MANE Select transcript.**
+**A coding name on a gene symbol is read on a transcript the gene is reported
+on: MANE Select, or — where the gene has one — MANE Plus Clinical.**
 When ClinVar itself names a hit `GENE c.X` that is the end of it, and Ensembl's
 recoder is not asked at all (it does not answer `BRCA1:c.5266dup` within a
 minute). Otherwise the ranking above was only a fallback — and with no hit at
@@ -274,30 +275,88 @@ all the name went to Ensembl, which picks a transcript of its own:
 | before | `chr10:g.89720934T>G`, which is **c.1026+59T>G — an intron** — on every RefSeq transcript of PTEN, presented as the answer |
 | now | *PTEN c.512T>G is not a change on NM_000314.8, the MANE Select transcript of PTEN: the reference base at that position is A, not T. The name may be counted on another transcript — enter it with that transcript's accession (NM_001304717.5:c.512T>G — the base there is T).* |
 
-So the lookup first settles which transcript is standard
+So the lookup first settles which transcripts the gene is reported on
 (`standardTranscriptForGene`) and from there on is for `NM_…:c.X`, which every
 later step treats exactly; the progress panel says `read as
 BRCA2:c.1083_1084insCA · on NM_000059.4, the MANE Select transcript of BRCA2`.
-Two sources answer that question:
+Three sources answer that question:
 
-- **Ensembl's MANE record**, the authority. It is now fetched as two small
-  requests — the gene, for its canonical transcript, then that one transcript.
-  The single "expanded" request used before is 236 KB for BRCA1 and 818 KB for
-  TTN, took 18 s and 13 s when measured, and so missed its 4 s deadline for
-  exactly the large, much-studied genes: that is also why "(MANE Select)" was
-  so often missing from the Variant card.
+- **NCBI's list of the gene's MANE transcripts** (`fetchClinicalTranscripts`,
+  the Datasets API): MANE Select *and* MANE Plus Clinical in one request of a
+  few tenths of a second, 39 KB compressed for BRCA1.
+- **Ensembl's MANE record**, the other authority for MANE Select. It is now
+  fetched as two small requests — the gene, for its canonical transcript, then
+  that one transcript. The single "expanded" request used before is 236 KB for
+  BRCA1 and 818 KB for TTN, took 18 s and 13 s when measured, and so missed its
+  4 s deadline for exactly the large, much-studied genes: that is also why
+  "(MANE Select)" was so often missing from the Variant card.
 - **The transcript ClinVar names the gene's variants on**
-  (`fetchClinvarNamingTranscript`, a 0.3 s MyVariant query), used when Ensembl
-  has not answered in 3 s. Checked against MANE for 20 genes — BRCA1/2, TP53,
-  PTEN, EGFR, KRAS, CDKN2A, MUTYH, TTN and others — it was the MANE Select,
-  version included, in all 20.
+  (`fetchClinvarNamingTranscript`, a 0.3 s MyVariant query), used when neither
+  has named MANE Select in 3 s. Checked against MANE for 20 genes — BRCA1/2,
+  TP53, PTEN, EGFR, KRAS, CDKN2A, MUTYH, TTN and others — it was the MANE
+  Select, version included, in all 20.
+
+**MANE Select alone is not enough**, which this rule got wrong at first (found in
+review, before it was released). For some sixty genes clinical reports count on
+a second transcript, and for exactly those MANE names it: MANE Plus Clinical.
+MECP2 is reported on NM_004992, NF1 on NM_000267, MUTYH on NM_001128425 — and
+the names in every clinic letter are in that numbering:
+
+| Typed | read on MANE Select alone | now (`chooseNameReading`) |
+| --- | --- | --- |
+| `MECP2 c.473C>T` (T158M, ClinVar 11811) | refused — *"the reference base at that position is G"* — with a hint that led to a benign variant on a third transcript | NM_004992.4 · p.Thr158Met · ClinVar 11811 |
+| `NF1 c.6789_6792del` (ClinVar 216866, Pathogenic) | `chr17:g.29665127_29665130del` — four other bases nobody has reported — "Clinical significance: N/A", *Variant resolved* | `chr17:g.29665752_29665755del` · ClinVar 216866 |
+| `MUTYH c.536A>G` (Y179C) | refused; before that, shown as p.Glu179Gly (ClinVar 533304), the same name on the lowest-numbered transcript | NM_001128425.2 · p.Tyr179Cys · ClinVar 5293 |
+
+A deletion or duplication names no bases, so it "fits" on any transcript: only
+a record can say which one is meant. The rule is therefore:
+
+1. A record that carries the name on **MANE Select** is the variant.
+2. Failing that, a record that carries it on a **MANE Plus Clinical**
+   transcript is.
+3. With no record on either, the name is read on MANE Select — and if it turns
+   out not to be a change there (a substitution naming a base that is not
+   there), on the Plus Clinical transcript: `MECP2 c.474G>C`, which no record
+   carries, is `p.Thr158=` on NM_004992.4.
+
+Whenever that leaves something to choose, the Variant card says which
+transcript the name was read on and links the other reading:
+
+> MECP2 c.473C>T is read on NM_004992.4, a MANE Plus Clinical transcript of
+> MECP2. If the MANE Select transcript was meant, look up
+> NM_001110792.2:c.473C>T.
+
+The same note appears when ClinVar's own name for a variant is on a transcript
+other than MANE Select — `CDKN2A c.3G>C` is ClinVar's name for a p14ARF variant
+on NM_058195.4, and on NM_000077 it is p16's start codon. The row shown on the
+card is the transcript the name was read on, in whichever version GRCh37's
+annotation carries (`NM_000267.3` for a name read on `NM_000267.4`).
+
+If NCBI's list cannot be had, whether the gene has a second clinical transcript
+is *unknown*, which is not the same as none: a record that carries the name on
+another transcript is then taken, the oldest transcript first, as before this
+rule existed — and the card says how little that rests on.
 
 When a service *rejects* the name (HTTP 400: it read it and said no) that is
 reported as what it is. A reference base that is not there used to come out as
 "Ensembl failed. Please retry in a moment."; it now names the base that is
 there, for a gene-symbol name and for an accession typed with the wrong base
 alike, and suggests transcripts on which MyVariant's other records show the
-stated base to be right.
+stated base to be right — the oldest accession first, since where a gene's
+variants were long counted on one transcript it is the low-numbered one.
+
+A failed MyVariant name search no longer skips any of this: the name used to be
+handed to Ensembl as typed in that case, and came back as the intron variant
+above with no warning.
+
+One more rejection is not the name's fault at all: **a transcript version newer
+than GRCh37's annotation.** That annotation is frozen and RefSeq is not —
+`NM_000077.6:c.3G>C` (CDKN2A's current record) answers *"Could not get a
+Transcript object for 'NM_000077.6'"*, NCBI has no GRCh37 placement for it yet,
+and the page said "Lookup could not complete … Please retry in a moment."
+Ensembl reads the accession without its version as the one it has, so that is
+looked up instead, and the panel says so: *"NM_000077.6 is a newer version than
+GRCh37's annotation has — read on the version it does have"* (`NM_000077.5`).
 
 If neither source can say which transcript is standard, the old behaviour is all
 that is left — and is said: the panel warns that the name was read on whichever

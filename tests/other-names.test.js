@@ -295,4 +295,59 @@ console.log('ok other names: 5382insC, c.5382insC and the protein-level frameshi
     console.log('ok other names: not consulted for a name that resolves');
 }
 
+// 8. The lookup runs itself again for the variant ClinVar names — and must run
+//    for what was SUBMITTED. It used to read the form a second time: with the
+//    next variant already typed into the box while ClinVar was being asked, the
+//    page showed BRCA1 c.5266dup and ClinVar 17677 beside
+//    "VCF (hg19): 7-140453136-A-T", and sent that position to gnomAD and SpliceAI.
+{
+    const page = await runLookup(cassettes.brca1OtherNames, {
+        route: (url, key, respond, options, { document }) => {
+            // The user types on while the names are being looked up.
+            if (/\/api\/clinvar-protein/.test(key) && /retmax=25/.test(key)) {
+                document.getElementById('variantInput').value = '7 140453136 A T';
+                document.getElementById('tumorTypeInput').value = 'melanoma';
+            }
+            return undefined;
+        }
+    });
+    assertResolved(assert, page, 'BRCA1 5382insC, box edited meanwhile');
+    assert.match(page.variant, /g\.: chr17:g\.41209082dup/);
+    assert.match(page.variant, /VCF \(hg19\): 17-41209079-T-TG/);
+    assert.match(page.clinvar, /Variation ID: 17677/);
+    assert.match(page.panel, /You entered\s*BRCA1 5382insC/);
+    assert.doesNotMatch(everywhere(page), /140453136/, 'nothing about the variant that was only typed');
+    assert.doesNotMatch(page.requests.join('\n'), /melanoma/i, 'nor the tumour type that was only typed');
+    assert.equal(nameSearches(page).length, 1);
+    console.log('ok other names: the second pass is for what was submitted, not for what is in the box by then');
+}
+
+// 9. The second pass failing ends the matter: ClinVar's names are not asked
+//    again, and the error is the second pass's own.
+{
+    const page = await runLookup(cassettes.brca1OtherNames, { without: [/ensembl\.org/, /myvariant\.info/, /api\.ncbi\.nlm\.nih\.gov\/variation/] });
+    assert.match(page.status, /^Error: Lookup could not complete: .*did not respond/);
+    assert.equal(nameSearches(page).length, 1, 'asked once, on the first pass');
+    assert.match(page.panel, /Other names · ClinVar"5382insC" is another name for NM_007294\.4\(BRCA1\):c\.5266dup/);
+    // The same when the second pass fails for a reason of its own rather than
+    // an outage — the case in which the first pass DOES go to ClinVar's names.
+    let asks = 0;
+    const rejected = await runLookup(cassettes.brca1OtherNames, {
+        route: (url, key, respond) => {
+            // (Were the second pass to ask again, each answer would start a third:
+            // cut that short so this fails rather than hangs.)
+            if (/\/api\/clinvar-protein/.test(key) && /retmax=25/.test(key) && ++asks > 3) return respond({ error: 'asked again' }, 500);
+            // Every service answers — that it has nothing, or will not read the name.
+            if (/variant_recoder|\/vep\/|api\.ncbi\.nlm\.nih\.gov\/variation/.test(key)) return respond({ error: 'Unable to parse HGVS notation' }, 400);
+            if (/myvariant\.info\/v1\/query/.test(key)) return respond({ total: 0, hits: [] });
+            if (/myvariant\.info\/v1\/variant/.test(key)) return respond({ success: false, error: 'Not Found.' }, 404);
+            return undefined;
+        }
+    });
+    assert.match(rejected.status, /^Error: /);
+    assert.doesNotMatch(rejected.status, /did not respond/, 'not an outage this time');
+    assert.equal(nameSearches(rejected).length, 1, 'asked once: the second pass does not ask again');
+    console.log('ok other names: a failed second pass is reported, not retried');
+}
+
 console.log('Other-name tests passed');
