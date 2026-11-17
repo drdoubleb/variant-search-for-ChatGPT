@@ -5408,17 +5408,21 @@ function renderGnomadMitochondrial(container, variantId, result) {
     } else if (result.status !== 'found') {
         muted(`Not in gnomAD's mitochondrial call set (queried: ${variantId}).`);
     } else {
+        // "Homoplasmic AF: 0.1117% AC/AN: 63/56401" on one line, as the rows of
+        // the other two sections are. (Plain text between the labels: the card's
+        // stylesheet puts a <span> on a line of its own.)
         const row = (label, count, share) => {
             const el = document.createElement('div');
-            const part = (tag, text) => {
-                const node = document.createElement(tag);
+            const strong = (text) => {
+                const node = document.createElement('strong');
                 node.textContent = text;
                 el.appendChild(node);
             };
-            part('strong', `${label} AF:`);
-            part('span', ` ${share != null ? `${(share * 100).toFixed(4)}%` : 'N/A'} `);
-            part('strong', 'AC/AN:');
-            part('span', ` ${count != null ? count : '—'}/${result.an != null ? result.an : '—'}`);
+            const plain = (text) => el.appendChild(document.createTextNode(text));
+            strong(`${label} AF:`);
+            plain(` ${share != null ? `${(share * 100).toFixed(4)}%` : 'N/A'} `);
+            strong('AC/AN:');
+            plain(` ${count != null ? count : '—'}/${result.an != null ? result.an : '—'}`);
             container.appendChild(el);
         };
         row('Homoplasmic', result.ac_hom, result.af_hom);
