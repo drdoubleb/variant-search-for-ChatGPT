@@ -8731,6 +8731,9 @@ const initVariantSearchUi = () => {
         // failure emptied the rows altogether. After this point the recoder's
         // outcome is only reported.
         let transcriptRowsSettled = false;
+        // Set when the recoder's answer is no longer wanted at all: ClinVar has
+        // said which variants a protein-level name could be (see namesAhead).
+        let recoderSetAside = false;
         // An rsID or a name comes back from the recoder as several alleles, and
         // the rows getTranscriptsList returns are the FIRST one's. That is put
         // right once, further down, for the allele the lookup settled on — but
@@ -8744,11 +8747,12 @@ const initVariantSearchUi = () => {
             // Guard the shared state: a stale search's late-resolving recoder must
             // not overwrite the transcripts or progress panel of a newer search.
             if (!isCurrentSearch()) return list;
-            if (transcriptRowsSettled) {
+            if (transcriptRowsSettled || recoderSetAside) {
                 // Not a warning: this is how most lookups end now, and nothing
                 // was lost. The grey "contributed nothing" state says that.
-                LookupProgress.stepUnlessFailed('recoder', 'empty',
-                    'answered after the result was ready — not needed: the variant was resolved without it');
+                LookupProgress.stepUnlessFailed('recoder', 'empty', recoderSetAside
+                    ? 'answered after ClinVar had said which variants the name could be — not needed'
+                    : 'answered after the result was ready — not needed: the variant was resolved without it');
                 return list;
             }
             if (rowsForChosenAllele) list = rowsForChosenAllele(list, asked);
@@ -8776,6 +8780,9 @@ const initVariantSearchUi = () => {
         let transcriptsPromise = geneSymbolName || unreadableName ? Promise.resolve([]) : askRecoder(query);
         // Set once ClinVar's other names have been consulted for this lookup.
         let otherNameAsked = false;
+        // ...and, where they were asked while Ensembl was still working, the
+        // answer on its way, until some step has looked at it.
+        let namesAhead = null;
         // The variants ClinVar has for the typed name, where they are several
         // and it does not say which: { how: 'several' | 'described', variants }.
         let nameShared = null;
@@ -9098,17 +9105,47 @@ const initVariantSearchUi = () => {
                 } else {
                     statusEl.textContent = 'Recoder fallback…';
                 }
+                /*
+                 * A protein-level name that is not a substitution — a deletion,
+                 * a duplication, a frameshift — is the kind Ensembl takes
+                 * longest over (a minute, when it does not answer at all), and
+                 * the kind where what it gives is only ITS allele for the
+                 * protein change. ClinVar's names are asked meanwhile:
+                 *   - one variant is known by the name: that settles it, and
+                 *     the wait is over ("CFTR F508del" took 32 s on a slow day
+                 *     for Ensembl, 30 of them waiting for an allele that was
+                 *     then set aside);
+                 *   - several are: none of them is Ensembl's to choose, so its
+                 *     answer is not waited for either ("EGFR p.Glu746_Ala750del",
+                 *     three variants, took 55-59 s to say so);
+                 *   - none is, or ClinVar cannot say: Ensembl's answer is what
+                 *     there is, and it is waited for as before.
+                 */
+                const namedIndel = Boolean(typedName) && isProteinVariant && !/c\./i.test(query) && !rerun
+                    && !otherNameAsked && !parseProteinChange(query);
+                if (namedIndel) {
+                    namesAhead = consultOtherNames();
+                    const ahead = await Promise.race([namesAhead, transcriptsPromise.then(() => null)]);
+                    if (!isCurrentSearch()) return;
+                    if (ahead && ahead.known) return runLookup(null, forOtherName(ahead.known));
+                    if (ahead && (ahead.told.outcome === 'several' || ahead.told.outcome === 'described')) {
+                        recoderSetAside = true;
+                        LookupProgress.stepUnlessFailed('recoder', 'empty', 'not waited for — ClinVar lists the variants this name could be');
+                    }
+                }
                 // Nothing resolved without the recoder, so now its answer is genuinely
                 // needed — wait for the in-flight call (this also guarantees
                 // lastRecoderResult below reflects this query's attempt).
-                await transcriptsPromise;
+                if (!recoderSetAside) await transcriptsPromise;
                 refuseStatedReferenceMismatch();
                 // getTranscriptsList already asked the recoder for this exact query at
                 // the start of the lookup (and fetchWithRetry exhausted its retries if
                 // Ensembl was unwell) — reuse that answer instead of a second 12s-class
                 // round trip. A cached failure stays a failure: recoderData remains
                 // null and the free-text MyVariant fallback below takes over.
-                if (lastRecoderResult.query === query) {
+                if (recoderSetAside) {
+                    // (recoderData stays empty: the codon is where this goes.)
+                } else if (lastRecoderResult.query === query) {
                     recoderData = lastRecoderResult.data;
                     if (!recoderData && lastRecoderResult.error) {
                         console.warn('Variant recoder failed earlier in this lookup; skipping retry', lastRecoderResult.error);
@@ -9249,12 +9286,14 @@ const initVariantSearchUi = () => {
                     // (TTT removed); the variant known as F508del is
                     // c.1521_1523del (CTT) — a different allele, the same protein,
                     // and the one with the record. ClinVar's names say which.
-                    // Asked unless the allele is a single base with a record: a
-                    // substitution MyVariant holds is what a substitution's name
-                    // means, and that is most lookups.
-                    const chosenCandidate = selectedAnn ? selectedVar : uniqueCandidates[0];
-                    if (proteinOnly && !otherNameAsked && (!firstAnn || !isSingleBaseChange(chosenCandidate))) {
-                        const { known, told } = await consultOtherNames();
+                    // For a deletion, duplication or frameshift they were asked
+                    // while Ensembl was working (namesAhead). For a substitution
+                    // they are asked when MyVariant holds no record for what
+                    // Ensembl gave: an allele on record is what a substitution's
+                    // name means, and that is most lookups.
+                    if (proteinOnly && (namesAhead || (!otherNameAsked && !firstAnn))) {
+                        const { known, told } = await (namesAhead || consultOtherNames());
+                        namesAhead = null;
                         if (!isCurrentSearch()) return;
                         // (MyVariant gives a record's ClinVar block as one object, or as several.)
                         const inHand = [].concat((selectedAnn && selectedAnn.clinvar) || []).map(block => String((block && block.variant_id) || ''));
@@ -9262,14 +9301,23 @@ const initVariantSearchUi = () => {
                         if (known) LookupProgress.step('clinvarName', 'ok', `ClinVar knows this variant as "${typedName.name}"`);
                         else otherNamesSettledNothing(known, told);
                     }
-                    const reading = !proteinOnly ? 'allele' : proteinNameReading({
+                    // Several variants ClinVar knows by the name, or with that
+                    // protein change: which of them Ensembl happens to give is
+                    // not the user's choice. The codon, with each a link.
+                    const reading = !proteinOnly ? 'allele' : nameShared ? 'shared' : proteinNameReading({
                         typedX,
                         alleles: selectRecoderAlleles(recoderData, query).length,
                         candidates: uniqueCandidates,
                         onRecord: Boolean(firstAnn),
                         recordsKnown: candidateRecordsKnown
                     });
-                    if (selectedAnn) {
+                    if (reading === 'shared') {
+                        LookupProgress.step('recoder', 'empty', 'its allele is one of several ClinVar has for this name — not shown as the variant');
+                        recoderSetAside = true;
+                        recoderData = null;
+                        transcriptsFromRecoder = [];
+                        candidateVariants = [];
+                    } else if (selectedAnn) {
                         gVariant = selectedVar;
                         annotation = selectedAnn;
                         console.log('[DEBUG] Selected candidate variant after scanning:', gVariant);
@@ -9628,8 +9676,9 @@ const initVariantSearchUi = () => {
                     // determine the allele, but ClinVar may list exactly one
                     // variant of the gene under it (p.Gln1756ProfsTer74 is 5382insC
                     // and nothing else). Then that variant is what was meant.
-                    if (!renamed && typedName && !otherNameAsked) {
-                        const { known, told } = await consultOtherNames();
+                    if (!renamed && typedName && (namesAhead || !otherNameAsked)) {
+                        const { known, told } = await (namesAhead || consultOtherNames());
+                        namesAhead = null;
                         if (!isCurrentSearch()) return;
                         if (known) return runLookup(null, forOtherName(known));
                         otherNamesSettledNothing(known, told);
@@ -9697,6 +9746,17 @@ const initVariantSearchUi = () => {
             // ever stood in until VEP's arrived.
             // The MANE lookup for the record's gene starts here too, so the
             // "(MANE Select)" label is usually ready by the time it is wanted.
+            // Names asked ahead that no step above has looked at (a route that
+            // needed neither the candidates nor the codon): they still count.
+            if (namesAhead) {
+                const { known, told } = await namesAhead;
+                namesAhead = null;
+                if (!isCurrentSearch()) return;
+                const inHand = [].concat((annotation && annotation.clinvar) || []).map(block => String((block && block.variant_id) || ''));
+                if (known && !inHand.includes(known.id)) return runLookup(null, forOtherName(known));
+                if (known) LookupProgress.step('clinvarName', 'ok', `ClinVar knows this variant as "${typedName.name}"`);
+                else otherNamesSettledNothing(known, told);
+            }
             if (annotation && !geneHintGlobal) {
                 const labelled = Array.from(getHitGenesUpper(annotation))[0];
                 if (labelled) maneSelectForLabel(labelled);
@@ -9709,11 +9769,14 @@ const initVariantSearchUi = () => {
             // what it knows about it (see gatherAlleleRecords). Collect the rest
             // while the wait below runs.
             const siblingRecords = vepWanted ? gatherAlleleRecords(annotation, gVariant) : null;
-            await Promise.race([
-                transcriptsPromise,
-                vepAnswered,
-                new Promise((resolve) => setTimeout(resolve, 6000))
-            ]);
+            // (Not for a recoder whose answer was set aside: nothing is taken from it.)
+            if (!recoderSetAside) {
+                await Promise.race([
+                    transcriptsPromise,
+                    vepAnswered,
+                    new Promise((resolve) => setTimeout(resolve, 6000))
+                ]);
+            }
             if (siblingRecords) {
                 let gathered = null;
                 try {
@@ -12685,8 +12748,9 @@ const initVariantSearchUi = () => {
             // A name that would not resolve may be one ClinVar lists the variant
             // under (see resolveClinvarOtherName). Asked once, and not when the
             // lookup failed because a service was down: then the name may be fine.
-            if (!renamed && typedName && !otherNameAsked && !err.upstreamOutage) {
-                const { known, told } = await consultOtherNames();
+            if (!renamed && typedName && (namesAhead || (!otherNameAsked && !err.upstreamOutage))) {
+                const { known, told } = await (namesAhead || consultOtherNames());
+                namesAhead = null;
                 if (!isCurrentSearch()) return;
                 if (known) return runLookup(null, forOtherName(known));
                 // What ClinVar lists is said only where ClinVar said it (see

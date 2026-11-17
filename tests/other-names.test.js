@@ -638,24 +638,116 @@ console.log('ok other names: 5382insC, c.5382insC and the protein-level frameshi
 }
 
 // 13. Where the name is nobody's and several variants have the protein change,
-//     Ensembl's allele is still what is shown — and the card says there are
-//     others, with each a click away. (Here: ClinVar's CFTR answer with the
-//     names taken off the founder variant, which leaves two that are described
-//     as p.Phe508del and none that is called F508del.)
-{
-    const answer = structuredClone(cassettes.cftrF508delName.api['clinvar-protein?gene=CFTR&change=F508del&retmax=200']);
-    for (const variant of answer.variants) if (variant.variationCount === 1) variant.aliases = [];
-    const page = await runLookup(cassettes.cftrF508delName, { backend: { 'clinvar-protein': () => answer } });
-    assertResolved(assert, page, 'CFTR F508del, a name of no variant');
-    assert.match(page.variant, /c\.: c\.1522_1524del/, 'the allele Ensembl gives');
-    assert.match(page.panel, /Other names · ClinVar\s*not a name ClinVar lists; 2 CFTR variants have this protein change — it does not say which/);
+//     none of them is shown as the variant — not the one Ensembl happens to
+//     give for it either, which is what the page used to show: the codon, and
+//     each variant a click away. (Here: ClinVar's CFTR answer with the names
+//     taken off the founder variant, which leaves two that are described as
+//     p.Phe508del and none that is called F508del. Live, this is
+//     "EGFR p.Glu746_Ala750del": three variants, and Ensembl gives the second
+//     most common of them.)
+const sharedAnswer = structuredClone(cassettes.cftrF508delName.api['clinvar-protein?gene=CFTR&change=F508del&retmax=200']);
+for (const variant of sharedAnswer.variants) if (variant.variationCount === 1) variant.aliases = [];
+const sharedNote = '2 CFTR variants in ClinVar have the protein change "F508del", and the name does not say which: '
+    + 'NM_000492.4:c.1522_1524del, NM_000492.3:c.1521_1523del.';
+const assertShared = (page, label) => {
+    assertResolved(assert, page, label);
+    assert.match(page.variant, /Codon region \(hg19\): chr7:g\.117199647_117199649/, label);
+    assert.doesNotMatch(page.variant, /c\.: c\.15\d\d_15\d\ddel|g\.: chr7/, `${label}: no allele is shown as the variant`);
+    assert.match(page.panel, /Other names · ClinVar\s*not a name ClinVar lists; 2 CFTR variants have this protein change — it does not say which/, label);
     const note = page.document.querySelector('.protein-change-shared-note');
-    assert.equal(note.textContent, '2 CFTR variants in ClinVar have the protein change "F508del", none of them the allele Ensembl gives for it, '
-        + 'which is what is shown: NM_000492.4:c.1522_1524del, NM_000492.3:c.1521_1523del.');
+    assert.equal(note.textContent, sharedNote, label);
     assert.deepEqual([...note.querySelectorAll('a')].map(a => decodeURIComponent(a.getAttribute('href'))),
-        ['?variant=NM_000492.4:c.1522_1524del', '?variant=NM_000492.3:c.1521_1523del']);
-    assert.equal(page.document.querySelector('.other-name-note'), null);
-    console.log('ok other names: a protein change several variants share is said to be shared');
+        ['?variant=NM_000492.4:c.1522_1524del', '?variant=NM_000492.3:c.1521_1523del'], label);
+    assert.equal(page.document.querySelector('.other-name-note'), null, label);
+    assert.equal(nameSearches(page).length, 1, `${label}: ClinVar's names are consulted once`);
+};
+{
+    const page = await runLookup(cassettes.cftrF508delName, { backend: { 'clinvar-protein': () => sharedAnswer } });
+    assertShared(page, 'CFTR F508del, a name of no variant');
+    assert.match(page.panel, /Resolve nomenclature · Ensembl\s*(?:its allele is one of several ClinVar has for this name — not shown as the variant|not waited for — ClinVar lists the variants this name could be)/);
+    console.log('ok other names: a protein change several variants share is the codon, with each of them offered');
+}
+
+// 13a. ClinVar's names are asked while Ensembl is still working, and settle the
+//      matter without it. A protein-level deletion is what Ensembl takes
+//      longest over: on a day it was slow, "CFTR F508del" took 32 s — 30 of
+//      them waiting for an allele that was then set aside — and
+//      "EGFR p.Glu746_Ala750del" 55 to 59 s. Here the recoder's answer is held
+//      back, with the page's waits at their real length.
+{
+    const heldRecoder = () => {
+        let release;
+        const held = new Promise((resolve) => { release = resolve; });
+        let asked = 0;
+        const route = async (url, key, respond) => {
+            if (!/variant_recoder\/human\/CFTR:p\.F508del/.test(key)) return undefined;
+            asked += 1;
+            await held;
+            const recorded = cassettes.cftrF508delName.responses[key];
+            return recorded ? respond(recorded.body, recorded.status) : respond({ error: 'Service Unavailable' }, 503);
+        };
+        return { route, release, asked: () => asked };
+    };
+    const within = async (lookup, ms) => Promise.race([lookup, new Promise(resolve => setTimeout(() => resolve(null), ms))]);
+
+    // One variant goes by the name: shown at once.
+    let recoder = heldRecoder();
+    let started = Date.now();
+    let page = await within(runLookup(cassettes.cftrF508delName, { timerCap: 6000, route: recoder.route }), 4000);
+    let took = Date.now() - started;
+    assert(page, 'the lookup finished while Ensembl had still not answered for the name');
+    assert(recoder.asked() >= 1, 'which it had been asked');
+    assert(took < 3500, `in ${took} ms`);
+    assertResolved(assert, page, 'CFTR F508del, recoder not answering');
+    assert.match(page.variant, /c\.: c\.1521_1523del/);
+    assert.match(page.clinvar, /Variation ID: 7105/);
+    assert.equal(nameSearches(page).length, 1);
+    recoder.release();
+
+    // Several have the protein change: the codon and the links, at once.
+    recoder = heldRecoder();
+    started = Date.now();
+    page = await within(runLookup(cassettes.cftrF508delName, { timerCap: 6000, route: recoder.route, backend: { 'clinvar-protein': () => sharedAnswer } }), 4000);
+    took = Date.now() - started;
+    assert(page, 'the lookup finished while Ensembl had still not answered for the name');
+    assert(took < 3500, `in ${took} ms`);
+    assertShared(page, 'CFTR F508del, a name of no variant, recoder not answering');
+    assert.match(page.panel, /Resolve nomenclature · Ensembl\s*not waited for — ClinVar lists the variants this name could be/);
+    recoder.release();
+
+    // ...and its answer arriving afterwards — here while the codon is being
+    // located — is not taken up: no rows of its allele, and no "13 transcripts".
+    {
+        const tick = () => new Promise(resolve => setTimeout(resolve, 1));
+        let codonAsked = false;
+        let recoderAnswered = false;
+        page = await runLookup(cassettes.cftrF508delName, {
+            settleMs: 300,
+            route: async (url, key) => {
+                if (/variant_recoder\/human\/CFTR:p\.F508del/.test(key)) {
+                    for (let i = 0; i < 3000 && !codonAsked; i++) await tick();
+                    setTimeout(() => { recoderAnswered = true; }, 20);
+                } else if (/\/map\/translation\//.test(key)) {
+                    codonAsked = true;
+                    for (let i = 0; i < 3000 && !recoderAnswered; i++) await tick();
+                }
+                return undefined;
+            },
+            backend: { 'clinvar-protein': () => sharedAnswer }
+        });
+        assert(recoderAnswered, 'the recoder answered while the lookup was still running');
+        assertShared(page, 'CFTR F508del, a name of no variant, recoder answering late');
+        assert.match(page.panel, /Resolve nomenclature · Ensembl\s*answered after ClinVar had said which variants the name could be — not needed/);
+    }
+
+    // ClinVar having nothing to say, Ensembl's answer is waited for as before.
+    const nothing = { variants: [], total: 0, notFound: ['F508del'] };
+    page = await runLookup(cassettes.cftrF508delName, { backend: { 'clinvar-protein': () => nothing } });
+    assertResolved(assert, page, 'CFTR F508del, unknown to ClinVar');
+    assert.match(page.variant, /c\.: c\.1522_1524del/, 'the allele Ensembl gives');
+    assert.match(page.panel, /Other names · ClinVar\s*no CFTR variant listed under "F508del"/);
+    assert.equal(page.document.querySelector('.protein-change-shared-note'), null);
+    console.log('ok other names: ClinVar\'s names settle a protein-level name without waiting for Ensembl');
 }
 
 // 13b. The allele in hand can be the very one ClinVar knows by the name. Then

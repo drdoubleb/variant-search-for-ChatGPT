@@ -1166,7 +1166,8 @@ reason and pointing at c./g. notation, instead of the previous bare
 
 Before settling for the codon — or for an allele of Ensembl's that is not a
 single-base change on record — the name is looked up among ClinVar's other names
-(next section): `BRCA1 p.Gln1756ProfsTer74` is one ClinVar variant and nothing
+(next section; for a deletion, duplication or frameshift, while Ensembl is still
+working): `BRCA1 p.Gln1756ProfsTer74` is one ClinVar variant and nothing
 else, so it resolves to that variant, not to a region; `CFTR F508del` is
 c.1521_1523del, not the c.1522_1524del Ensembl gives for that protein change. (The region it used to
 get was wrong as well: "Ter74", the distance to the new stop, was read as a
@@ -1228,13 +1229,27 @@ not a single-base change MyVariant holds. Ensembl answers `p.Phe508del` with
 c.1522_1524del — TTT removed — which is a real variant (rs121909001), so it
 was shown, record and all. The variant everyone means by F508del is
 c.1521_1523del (CTT): another allele, the same protein. ClinVar lists
-"F508del" as a name of that one only. Where the name is nobody's and several
-variants have the protein change, Ensembl's allele is still what is shown and
-the card says so: *3 EGFR variants in ClinVar have the protein change
-"p.Glu746_Ala750del". Shown is the one Ensembl gives for it; the others are
-NM_005228.5:c.2235_2249del, NM_005228.5:c.2232_2249delinsAAA.* A substitution
-MyVariant holds (`BRAF V600E`, `TP53 R213X`) is what a substitution's name
-means, and ClinVar is not asked.
+"F508del" as a name of that one only. A substitution MyVariant holds
+(`BRAF V600E`, `TP53 R213X`) is what a substitution's name means, and ClinVar
+is not asked.
+
+For a protein-level name that is not a substitution — a deletion, a
+duplication, a frameshift — ClinVar is asked **while Ensembl is still
+working**, because those are the names Ensembl takes longest over (a minute
+when it does not answer at all) and the ones where what it gives is only its
+own allele for the protein change:
+
+| ClinVar says | then | measured on a day Ensembl was slow |
+| --- | --- | --- |
+| one variant goes by the name, or alone has that protein change | that variant, at once | `CFTR F508del`: 32 s → 5.5 s |
+| several do | none of them is Ensembl's to choose either: the codon, with each variant a link, and Ensembl's answer is not waited for | `EGFR p.Glu746_Ala750del` (three variants — Ensembl gives the second most common): 55–59 s → 10–15 s |
+| none does, or it cannot say | Ensembl's answer is what there is, and is waited for as before | |
+
+The second row used to show Ensembl's allele as the variant, with nothing to
+say there were others; the card now reads *3 EGFR variants in ClinVar have the
+protein change "p.Glu746_Ala750del", and the name does not say which:
+NM_005228.5:c.2236_2250del, NM_005228.5:c.2235_2249del,
+NM_005228.5:c.2232_2249delinsAAA.*
 
 **What ClinVar is asked, and what its answer is taken to show.** Three faults
 here were found in review; each had the page say *"ClinVar lists no … variant
