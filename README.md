@@ -231,6 +231,49 @@ change matched on, then the existing ClinVar-presence tie-break. It is a
 preference rather than a filter, an explicit accession is honoured as before,
 and protein names are ranked the same way.
 
+**A coding name on a gene symbol is read on the gene's MANE Select transcript.**
+When ClinVar itself names a hit `GENE c.X` that is the end of it, and Ensembl's
+recoder is not asked at all (it does not answer `BRCA1:c.5266dup` within a
+minute). Otherwise the ranking above was only a fallback — and with no hit at
+all the name went to Ensembl, which picks a transcript of its own:
+
+| `PTEN c.512T>G` | |
+| --- | --- |
+| before | `chr10:g.89720934T>G`, which is **c.1026+59T>G — an intron** — on every RefSeq transcript of PTEN, presented as the answer |
+| now | *PTEN c.512T>G is not a change on NM_000314.8, the MANE Select transcript of PTEN: the reference base at that position is A, not T. The name may be counted on another transcript — enter it with that transcript's accession (NM_001304717.5:c.512T>G — the base there is T).* |
+
+So the lookup first settles which transcript is standard
+(`standardTranscriptForGene`) and from there on is for `NM_…:c.X`, which every
+later step treats exactly; the progress panel says `read as
+BRCA2:c.1083_1084insCA · on NM_000059.4, the MANE Select transcript of BRCA2`.
+Two sources answer that question:
+
+- **Ensembl's MANE record**, the authority. It is now fetched as two small
+  requests — the gene, for its canonical transcript, then that one transcript.
+  The single "expanded" request used before is 236 KB for BRCA1 and 818 KB for
+  TTN, took 18 s and 13 s when measured, and so missed its 4 s deadline for
+  exactly the large, much-studied genes: that is also why "(MANE Select)" was
+  so often missing from the Variant card.
+- **The transcript ClinVar names the gene's variants on**
+  (`fetchClinvarNamingTranscript`, a 0.3 s MyVariant query), used when Ensembl
+  has not answered in 3 s. Checked against MANE for 20 genes — BRCA1/2, TP53,
+  PTEN, EGFR, KRAS, CDKN2A, MUTYH, TTN and others — it was the MANE Select,
+  version included, in all 20.
+
+When a service *rejects* the name (HTTP 400: it read it and said no) that is
+reported as what it is. A reference base that is not there used to come out as
+"Ensembl failed. Please retry in a moment."; it now names the base that is
+there, for a gene-symbol name and for an accession typed with the wrong base
+alike, and suggests transcripts on which MyVariant's other records show the
+stated base to be right.
+
+If neither source can say which transcript is standard, the old behaviour is all
+that is left — and is said: the panel warns that the name was read on whichever
+transcript matched first, and a typed substitution that is on none of the
+transcripts shown gets a note beside the `c.` line.
+
+See `tests/gene-symbol-name.test.js`.
+
 ### A genomic query names no gene
 
 What precedes `:g.` is a chromosome or an accession. Reading it as a symbol

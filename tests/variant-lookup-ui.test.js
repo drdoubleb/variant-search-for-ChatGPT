@@ -51,7 +51,15 @@ async function lookup(input, { vepDown = false, maneDown = false, extended = fal
             result[0].G.input = decodeURIComponent(url.pathname.split('/').at(-1));
             return response(result);
         }
-        if (url.pathname.includes('/lookup/symbol/')) return maneDown || braf ? response({},404) : response(fixture.mane);
+        // The MANE lookup is two requests: the gene (for its canonical
+        // transcript), then that transcript with its MANE record.
+        const maneTranscript = (fixture.mane.Transcript || []).find(t => [].concat(t.MANE || []).some(m => m.type === 'MANE_Select'));
+        if (url.pathname.includes('/lookup/symbol/')) {
+            return maneDown || braf || !maneTranscript ? response({},404) : response({ canonical_transcript: `${maneTranscript.id}.1` });
+        }
+        if (url.pathname.includes('/lookup/id/') && maneTranscript && url.pathname.endsWith(`/${maneTranscript.id}`)) {
+            return maneDown || braf ? response({},404) : response(maneTranscript);
+        }
         if (url.pathname.includes('/vep/')) return vepDown ? response({},400) : response(fixture.vep);
         if (url.pathname === '/api/clinvar-region') {
             assert.equal(url.searchParams.get('pos'), '89624219', 'region must retain original locus');

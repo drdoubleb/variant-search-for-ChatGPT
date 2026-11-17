@@ -375,7 +375,16 @@ async function lookup(input, fx, {
             if (Number(end) - Number(start) > 250) return response('Service Unavailable', 503);
             return response(referenceSlice(fx.reference, Number(start), Number(end)));
         }
-        if (path.includes('/lookup/symbol/')) return response(fx.mane);
+        // The MANE lookup is two requests: the gene (for its canonical
+        // transcript), then that transcript with its MANE record. Both are
+        // answered from the one gene record these fixtures hold.
+        const maneTranscript = (fx.mane.Transcript || []).find(t => [].concat(t.MANE || []).some(m => m.type === 'MANE_Select'));
+        if (path.includes('/lookup/symbol/')) {
+            return maneTranscript ? response({ canonical_transcript: `${maneTranscript.id}.1` }) : response({}, 404);
+        }
+        if (path.includes('/lookup/id/')) {
+            return maneTranscript && path.endsWith(`/${maneTranscript.id}`) ? response(maneTranscript) : response({}, 404);
+        }
         // Evidence cards fail soft; they have no say in which variant this is.
         return response({}, 404);
     };

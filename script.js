@@ -128,6 +128,16 @@ const API_TIMEOUT_MS = {
     variationServices: 8000,
     vep: 20000,
     lookup: 4000,
+    // How long a result is held for the "(MANE Select)" label. The lookup is
+    // started as soon as the gene is known, so this is rarely waited out.
+    maneLabel: 4000,
+    // How long a gene-symbol name waits to learn which transcript is the
+    // gene's standard one before falling back to MyVariant's own ranking:
+    // Ensembl's MANE record alone for the first part, then ClinVar's naming
+    // transcript (via MyVariant) as well.
+    maneBeforeClinvar: 3000,
+    maneForName: 10000,
+    clinvarNaming: 6000,
     liftover: 4000,
     cosmic: 2500,
     cosmicMeta: 1500,
@@ -204,6 +214,56 @@ function describeUpstreamFailure(err) {
     const m = msg.match(/\((\d{3})\)/);
     if (m) return `HTTP ${m[1]}`;
     return msg.length > 60 ? `${msg.slice(0, 57)}…` : msg;
+}
+
+/*
+ * A nomenclature service that answers 400 has read the name and rejected it:
+ * that is a statement about the input, not a failure to answer. The common
+ * one is a substitution naming a reference base that is not there —
+ *
+ *   Ensembl: Reference allele extracted from NM_000314.8:89711894-89711894 (A)
+ *            does not match reference allele given by HGVS notation … (T)
+ *   NCBI:    The submitted reference allele (T) does not agree with the
+ *            actual reference sequence (A).
+ *
+ * — which used to be reported as "Ensembl failed. Please retry in a moment."
+ * Returns { actual, stated } for that case, null for anything else.
+ */
+function referenceBaseRejection(err) {
+    if (!err || err.status !== 400) return null;
+    const text = String(err.message || '');
+    let m = text.match(/Reference allele extracted from \S+ \(([ACGTN-]+)\) does not match reference allele given by HGVS notation .*?\(([ACGTN-]+)\)/i);
+    if (m) return { actual: m[1].toUpperCase(), stated: m[2].toUpperCase() };
+    m = text.match(/submitted reference allele \(([ACGTN-]+)\) does not agree with the actual reference sequence \(([ACGTN-]+)\)/i);
+    return m ? { actual: m[2].toUpperCase(), stated: m[1].toUpperCase() } : null;
+}
+
+// RefSeq transcripts on which the substitution `change` ("c.512T>G") names the
+// right reference base, judged from MyVariant's records of OTHER changes at the
+// same position ("NM_001304717.5:c.512T>C" shows c.512 is T there). Used only
+// to suggest how a name might have been meant; `except` is left out.
+function transcriptsWithReferenceBase(hits, change, except = '') {
+    const m = String(change || '').match(/^(c\.[*-]?\d+(?:[+-]\d+)?[ACGT])>[ACGT]$/i);
+    if (!m) return [];
+    const stem = m[1].toLowerCase();
+    const bare = accession => String(accession || '').replace(/\.\d+$/, '').toUpperCase();
+    const found = new Map();
+    for (const hit of hits || []) {
+        const values = [].concat(hit?.clinvar?.hgvs?.coding || []);
+        for (const ann of [].concat(hit?.snpeff?.ann || [])) {
+            if (ann?.feature_id && ann?.hgvs_c) values.push(`${ann.feature_id}:${ann.hgvs_c}`);
+        }
+        for (const value of values) {
+            const { transcript, change: other } = splitTranscriptHgvs(value);
+            if (!/^NM_\d+/i.test(transcript) || bare(transcript) === bare(except)) continue;
+            if (!String(other).toLowerCase().startsWith(`${stem}>`)) continue;
+            // Keep the newest version seen of each transcript.
+            const version = Number((transcript.match(/\.(\d+)$/) || [])[1] || 0);
+            const known = found.get(bare(transcript));
+            if (!known || version > known.version) found.set(bare(transcript), { accession: transcript, version });
+        }
+    }
+    return Array.from(found.values()).map(entry => entry.accession);
 }
 
 /*
@@ -2048,6 +2108,8 @@ function transcriptsFromVep(consequences) {
 // is one example). MANE is transcript metadata from the current gene record;
 // no variant coordinates are transferred from that GRCh38 lookup.
 const maneTranscriptCache = new Map();
+const maneLookupFailedAt = new Map();
+const MANE_RETRY_AFTER_MS = 60000;
 function maneSelectAccessions(geneRecord) {
     const accessions = [];
     for (const transcript of geneRecord?.Transcript || []) {
@@ -2060,25 +2122,149 @@ function maneSelectAccessions(geneRecord) {
     return accessions;
 }
 
+/*
+ * The gene's MANE Select transcript as [RefSeq accession, Ensembl accession];
+ * [] when it has none or Ensembl cannot be asked. Cached per gene.
+ *
+ * Two small requests: the gene, for its canonical transcript (which is the
+ * MANE Select where there is one), then that one transcript with its MANE
+ * record. This used to be a single request for the gene "expanded" — every
+ * transcript with every exon — which is 236 KB for BRCA1 and 818 KB for TTN,
+ * took 18 s and 13 s when measured, and so ran into its 4 s deadline for
+ * exactly the large, much-studied genes; the page then showed no "(MANE
+ * Select)" and fell back to choosing a transcript by accession number.
+ */
 async function fetchManeSelectAccessions(gene) {
     const symbol = String(gene || '').trim().toUpperCase();
     if (!/^[A-Z][A-Z0-9-]*$/.test(symbol) || isChromosomeLikeGeneSymbol(symbol)) return [];
+    // A lookup that has just failed is not started again straight away: the
+    // result page asks for the label seconds after the name resolution did,
+    // and waiting a second time on the same slow Ensembl only delays it.
+    if (Date.now() - (maneLookupFailedAt.get(symbol) || 0) < MANE_RETRY_AFTER_MS) return [];
     if (!maneTranscriptCache.has(symbol)) {
         if (maneTranscriptCache.size >= 128) maneTranscriptCache.delete(maneTranscriptCache.keys().next().value);
+        const lookup = async (path) => {
+            // Each caller decides how long it will wait; the requests themselves
+            // get Ensembl's slower pace (1.5-6 s for these was measured), so a
+            // late answer still lands in the cache.
+            const response = await fetchWithTimeout(`https://rest.ensembl.org/lookup/${path}content-type=application/json`,
+                { headers: { Accept: 'application/json' } }, API_TIMEOUT_MS.ensemblLookup);
+            if (!response.ok) throw new Error('MANE lookup unavailable');
+            return response.json();
+        };
         const pending = (async () => {
             try {
-                const url = `https://rest.ensembl.org/lookup/symbol/homo_sapiens/${encodeURIComponent(symbol)}?expand=1&mane=1&content-type=application/json`;
-                const response = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } }, API_TIMEOUT_MS.lookup);
-                if (!response.ok) throw new Error('MANE lookup unavailable');
-                return maneSelectAccessions(await response.json());
+                const geneRecord = await lookup(`symbol/homo_sapiens/${encodeURIComponent(symbol)}?`);
+                const canonical = String(geneRecord?.canonical_transcript || '').replace(/\.\d+$/, '');
+                if (!/^ENST\d+$/.test(canonical)) return [];
+                return maneSelectAccessions({ Transcript: [await lookup(`id/${canonical}?expand=1&mane=1&`)] });
             } catch {
                 maneTranscriptCache.delete(symbol);
+                maneLookupFailedAt.set(symbol, Date.now());
                 return [];
             }
         })();
         maneTranscriptCache.set(symbol, pending);
     }
     return maneTranscriptCache.get(symbol);
+}
+
+/*
+ * The transcript ClinVar names a gene's variants on, e.g. "NM_000314.8" — read
+ * off the preferred names of the first ClinVar records MyVariant returns for
+ * the gene. '' when they do not agree clearly enough to say.
+ *
+ * ClinVar names variants on MANE Select, so this is a second way to learn a
+ * gene's standard transcript, from a service that answers in a fraction of a
+ * second when Ensembl is taking several. Checked for 20 genes (BRCA1/2, TP53,
+ * PTEN, EGFR, KRAS, CDKN2A, MUTYH, TTN, ...): the most used accession was the
+ * MANE Select, version included, in all 20; the closest runner-up was KRAS4A
+ * at 8 names to 17.
+ */
+async function fetchClinvarNamingTranscript(gene) {
+    const symbol = String(gene || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9-]*$/.test(symbol)) return '';
+    try {
+        const q = `clinvar.gene.symbol:${symbol} AND _exists_:clinvar.rcv.preferred_name`;
+        const url = `https://myvariant.info/v1/query?q=${encodeURIComponent(q)}&fields=clinvar.rcv.preferred_name&size=25`;
+        const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.clinvarNaming);
+        if (!response.ok) return '';
+        return clinvarNamingTranscript((await response.json())?.hits, symbol);
+    } catch {
+        return '';
+    }
+}
+
+// The plurality accession among the records' preferred names for `gene`, when
+// at least five records are named and three in five of them agree.
+function clinvarNamingTranscript(hits, gene) {
+    const counts = new Map();
+    let named = 0;
+    for (const hit of hits || []) {
+        const accessions = new Set();
+        for (const clinvar of [].concat(hit?.clinvar || [])) {
+            for (const rcv of [].concat(clinvar?.rcv || [])) {
+                const m = String(rcv?.preferred_name || '').match(/^(NM_\d+\.\d+)\(([A-Za-z0-9-]+)\):/);
+                if (m && m[2].toUpperCase() === String(gene).toUpperCase()) accessions.add(m[1]);
+            }
+        }
+        if (accessions.size) named += 1;
+        for (const accession of accessions) counts.set(accession, (counts.get(accession) || 0) + 1);
+    }
+    const [top] = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+    return top && named >= 5 && top[1] / named >= 0.6 ? top[0] : '';
+}
+
+/*
+ * The RefSeq transcript a coding change named on `gene` is counted on:
+ * { accession, basis } or null when neither source can say in time.
+ *
+ * Ensembl's MANE record is the authority and is preferred whenever it answers
+ * within a few seconds. ClinVar's naming transcript stands in when it does
+ * not, and after that MANE gets the rest of the time allowed.
+ */
+async function standardTranscriptForGene(gene, fetchMane = fetchManeSelectAccessions, fetchNaming = fetchClinvarNamingTranscript,
+    timing = { maneAlone: API_TIMEOUT_MS.maneBeforeClinvar, total: API_TIMEOUT_MS.maneForName }) {
+    const refseq = list => (list || []).find(a => /^NM_\d+\.\d+$/.test(a)) || '';
+    const mane = Promise.resolve().then(() => fetchMane(gene)).then(refseq, () => '');
+    const naming = Promise.resolve().then(() => fetchNaming(gene)).catch(() => '');
+    const within = (promise, ms) => settledWithin(promise, ms, 'slow').catch(() => '');
+    const started = Date.now();
+    const left = () => Math.max(0, timing.total - (Date.now() - started));
+    const authoritative = await within(mane, timing.maneAlone);
+    if (authoritative) return { accession: authoritative, basis: `the MANE Select transcript of ${gene}` };
+    const named = await within(naming, left());
+    if (named) return { accession: named, basis: `the transcript ClinVar names ${gene} variants on` };
+    const late = await within(mane, left());
+    return late ? { accession: late, basis: `the MANE Select transcript of ${gene}` } : null;
+}
+
+// The coding substitution a query names ("c.512T>G"), when no transcript row
+// shows the variant as that change; '' otherwise. Only for names counted on
+// RefSeq transcripts — a gene symbol or an NM_/NR_ accession — because those
+// are the rows listed, and only for substitutions, which have one spelling
+// (an indel may legitimately come back re-spelled).
+function codingSubstitutionNotShown(query, typedCdna, rows) {
+    const subject = String(query || '').split(/[:\s]/)[0];
+    if (!/^(?:N[MR]_\d+|[A-Za-z][A-Za-z0-9-]*)$/.test(subject.replace(/\.\d+$/, '')) || /^ENS|^LRG/i.test(subject)) return '';
+    if (isGenomicVariant(query)) return '';
+    const typed = normalizeCdnaForMatch(typedCdna);
+    if (!/^c\.[*-]?\d+(?:[+-]\d+)?[acgt]>[acgt]$/.test(typed) || !(rows || []).length) return '';
+    if (rows.some(row => normalizeCdnaForMatch(row.cDNA) === typed)) return '';
+    const m = typed.match(/^(c\.[*-]?\d+(?:[+-]\d+)?)([acgt])>([acgt])$/);
+    return `${m[1]}${m[2].toUpperCase()}>${m[3].toUpperCase()}`;
+}
+
+// "BRCA1:c.5266dup" → { gene: 'BRCA1', change: 'c.5266dup' }: a coding change
+// named on a gene symbol, which does not say which transcript it is counted
+// on. Null for anything that does (an accession) or is not a c. change.
+function geneSymbolCodingName(query) {
+    const m = String(query || '').trim().match(/^([A-Za-z][A-Za-z0-9-]{0,19})\s*[:\s]\s*(c\.\S+)$/);
+    if (!m) return null;
+    const gene = m[1].toUpperCase();
+    // (RefSeq and LRG accessions carry an underscore and never get this far.)
+    if (/^ENS[GPT]\d/.test(gene) || isChromosomeLikeGeneSymbol(gene)) return null;
+    return { gene, change: m[2] };
 }
 
 function markManeTranscripts(transcripts, accessions) {
@@ -6312,7 +6498,10 @@ async function searchMyVariant(identifier, expectedGenomic = '') {
         throw err;
     }
     const data = await response.json();
-    return rankMyVariantHits(data?.hits, identifier, expectedGenomic);
+    const matches = rankMyVariantHits(data?.hits, identifier, expectedGenomic);
+    // Everything the search returned, matching or not (see transcriptsWithReferenceBase).
+    matches.raw = Array.isArray(data?.hits) ? data.hits : [];
+    return matches;
 }
 
 // Build summary table rows from annotation object.
@@ -7540,7 +7729,6 @@ const initVariantSearchUi = () => {
         // The variant_recoder can still return useful transcript annotations for complex
         // genomic variants that MyVariant.info does not index (e.g. delins).  If this
         // request fails, transcriptsFromRecoder will remain an empty array.
-        LookupProgress.step('recoder', 'running');
         // Start the recoder WITHOUT awaiting it. The whole pipeline used to block
         // on this call before even trying the direct MyVariant search — during an
         // Ensembl outage that meant ~37s of retries/timeouts in front of a result
@@ -7550,7 +7738,20 @@ const initVariantSearchUi = () => {
         // was resolved without it (so a healthy Ensembl still contributes RefSeq
         // transcript nomenclature, but a sick one cannot hold the page hostage).
         transcriptsFromRecoder = [];
-        const transcriptsPromise = getTranscriptsList(query).then((list) => {
+        // A coding change named on a gene symbol does not say which transcript it
+        // is counted on. Ensembl, asked "PTEN:c.512T>G", picks one itself and
+        // warns that it did, and it does not answer "BRCA1:c.5266dup" within a
+        // minute. So for those the recoder is not asked here: the lookup first
+        // settles which transcript the name is read on (below), and asks about
+        // that — or not at all, when MyVariant already holds the variant.
+        const geneSymbolName = geneSymbolCodingName(query);
+        if (geneSymbolName) fetchManeSelectAccessions(geneSymbolName.gene);
+        else if (geneHintGlobal) fetchManeSelectAccessions(geneHintGlobal);
+        const askRecoder = (asked) => {
+            LookupProgress.step('recoder', 'running');
+            return recoderTranscripts(asked);
+        };
+        const recoderTranscripts = (asked) => getTranscriptsList(asked).then((list) => {
             // Guard the shared state: a stale search's late-resolving recoder must
             // not overwrite the transcripts or progress panel of a newer search.
             if (!isCurrentSearch()) return list;
@@ -7575,6 +7776,7 @@ const initVariantSearchUi = () => {
             if (recoderErr && recoderErr.retryable) LookupProgress.markUpstreamOutage('recoder');
             return [];
         });
+        let transcriptsPromise = geneSymbolName ? Promise.resolve([]) : askRecoder(query);
         if (!query) return;
         statusEl.textContent = 'Processing...';
         resultSection.classList.add('hidden');
@@ -7663,6 +7865,12 @@ const initVariantSearchUi = () => {
             // The alleles MyVariant files under the rsID that was looked up, the
             // one shown first.
             let rsidAlleles = [];
+            // A gene-symbol coding name whose transcript could not be settled.
+            let transcriptUnsettled = false;
+            // How a gene-symbol coding name was read ({ typed, accession, basis }),
+            // and everything MyVariant returned for the name as typed.
+            let nameReadOn = null;
+            let nameSearchHits = [];
             const adoptNamedHit = async (hit) => {
                 const record = await fetchMyVariant(hit._id);
                 const reconciled = await reconcileClinvarAllele(record, recordFoundThroughClinvar(record, query));
@@ -7723,11 +7931,44 @@ const initVariantSearchUi = () => {
             if (!annotation && looksLikeNonGenomic && (isProteinVariant || /c\./i.test(query))) {
                 try {
                     // Try direct search using the query as provided (e.g. "BRAF:p.Val600Glu").
-                    let hit = await queryMyVariantById(query);
-                    if (!hit && query.includes(':')) {
+                    let named = await searchMyVariant(query);
+                    if (!named.length && query.includes(':')) {
                         // Replace colons with spaces for free‑text lookup (e.g. "BRAF p.Val600Glu").
-                        const altQuery = query.replace(/:/g, ' ');
-                        hit = await queryMyVariantById(altQuery);
+                        named = await searchMyVariant(query.replace(/:/g, ' '));
+                    }
+                    nameSearchHits = named.raw || [];
+                    let hit = named[0] || null;
+                    /*
+                     * "GENE c.X" is c.X on the gene's standard transcript — its MANE
+                     * Select. When ClinVar itself names a hit that way the matter is
+                     * settled (variantNameRank). Otherwise MyVariant's hits are c.X
+                     * on SOME transcript, and with no hit at all Ensembl would be
+                     * left to choose one: either way the answer used to depend on
+                     * which transcript happened to come first. So ask which one is
+                     * standard and read the name on it — from here on the lookup is
+                     * for "NM_…:c.X", which every later step treats exactly.
+                     * If that cannot be learned in time, the old ranking stands.
+                     */
+                    if (geneSymbolName && !(hit && variantNameRank(hit, query)[0] === 1)) {
+                        const standard = await standardTranscriptForGene(geneSymbolName.gene);
+                        if (!isCurrentSearch()) return;
+                        if (standard) {
+                            // A MyVariant hit counts only if it is this change on that
+                            // transcript — in any version: snpEff's rows lag ClinVar's.
+                            const onStandard = `${standard.accession.replace(/\.\d+$/, '')}:${geneSymbolName.change}`;
+                            hit = named.find(candidate => hitMatchesVariantQuery(candidate, onStandard)) || null;
+                            nameReadOn = { typed: `${geneSymbolName.gene} ${geneSymbolName.change}`, ...standard };
+                            // (gVariant still holds the name as typed until something resolves.)
+                            if (gVariant === query) gVariant = `${standard.accession}:${geneSymbolName.change}`;
+                            query = `${standard.accession}:${geneSymbolName.change}`;
+                            if (!geneHintGlobal) geneHintGlobal = geneSymbolName.gene;
+                            LookupProgress.note('parse', `on ${standard.accession}, ${standard.basis}`);
+                        } else {
+                            // Said, not hidden: what follows is the old behaviour.
+                            transcriptUnsettled = true;
+                            LookupProgress.step('parse', 'warn', `read as ${query} — could not learn which transcript is `
+                                + `${geneSymbolName.gene}'s standard one, so the name is read on whichever matches first`);
+                        }
                     }
                     if (hit && hit._id) {
                         console.log('[DEBUG] Direct MyVariant search hit', hit._id);
@@ -7740,6 +7981,9 @@ const initVariantSearchUi = () => {
                 } catch (directErr) {
                     console.log('[DEBUG] Direct MyVariant search error:', directErr);
                 }
+                // Now it is known what to ask the recoder — and whether to: a
+                // variant MyVariant holds gets its transcripts from VEP.
+                if (geneSymbolName && !annotation) transcriptsPromise = askRecoder(query);
             }
 
             // An rsID is looked up in MyVariant first. It says at once which alleles
@@ -8180,6 +8424,28 @@ const initVariantSearchUi = () => {
                                     if (vepErr && vepErr.retryable) LookupProgress.markUpstreamOutage('vep');
                                 }
                                 if (!altFound) {
+                                    // The name itself was rejected: say what is wrong with it.
+                                    const wrongBase = lastRecoderResult.query === query ? referenceBaseRejection(lastRecoderResult.error) : null;
+                                    if (wrongBase) {
+                                        const where = (query.match(/^[^:]+/) || [''])[0];
+                                        LookupProgress.step('recoder', 'fail', `${where} has ${wrongBase.actual} there, not ${wrongBase.stated}`);
+                                        if (LookupProgress.stateOf('vep') === 'fail') LookupProgress.step('vep', 'empty', 'not asked further — the name does not fit');
+                                        let message = nameReadOn
+                                            ? `${nameReadOn.typed} is not a change on ${nameReadOn.accession}, ${nameReadOn.basis}: `
+                                                + `the reference base at that position is ${wrongBase.actual}, not ${wrongBase.stated}.`
+                                            : `${query} names a reference base that is not there: ${where} has ${wrongBase.actual} at that position, not ${wrongBase.stated}.`;
+                                        if (nameReadOn) {
+                                            const change = query.slice(query.indexOf(':') + 1);
+                                            const elsewhere = transcriptsWithReferenceBase(nameSearchHits, change, nameReadOn.accession);
+                                            message += ' The name may be counted on another transcript — enter it with that transcript\'s accession'
+                                                + (elsewhere.length
+                                                    ? ` (${elsewhere.slice(0, 2).map(acc => `${acc}:${change}`).join(' or ')} — the base there is ${wrongBase.stated}).`
+                                                    : ' (NM_…:c.…).');
+                                        } else {
+                                            message += ' Check the position, the base and the transcript version.';
+                                        }
+                                        throw new Error(message);
+                                    }
                                     // Nothing resolved. Which message is correct depends entirely on
                                     // *why* nothing resolved, so ask the progress panel rather than
                                     // assuming the user mistyped a coordinate: an Ensembl 503 used to
@@ -8257,6 +8523,12 @@ const initVariantSearchUi = () => {
             // (the call is memoised) rather than after this wait — and once it has
             // answered there is nothing left to wait for: the recoder's rows only
             // ever stood in until VEP's arrived.
+            // The MANE lookup for the record's gene starts here too, so the
+            // "(MANE Select)" label is usually ready by the time it is wanted.
+            if (annotation && !geneHintGlobal) {
+                const labelled = Array.from(getHitGenesUpper(annotation))[0];
+                if (labelled) fetchManeSelectAccessions(labelled);
+            }
             const vepWanted = Boolean(annotation) && !codonOnlyResolutionGlobal && isGenomicVariant(gVariant);
             const vepAnswered = vepWanted
                 ? fetchLookupVep(gVariant).then(() => true, () => new Promise(() => {}))
@@ -8403,7 +8675,14 @@ const initVariantSearchUi = () => {
             if (transcriptsFromRecoder.length && !codonOnlyResolutionGlobal) {
                 const gene = geneHintGlobal || transcriptsFromRecoder.find(t => t.gene)?.gene
                     || Array.from(getHitGenesUpper(annotation))[0] || parseMyVariantQueryIntent(query).gene;
-                transcriptsFromRecoder = markManeTranscripts(transcriptsFromRecoder, await fetchManeSelectAccessions(gene));
+                let maneAccessions = [];
+                try {
+                    maneAccessions = await settledWithin(fetchManeSelectAccessions(gene), API_TIMEOUT_MS.maneLabel, 'MANE lookup slow');
+                } catch {
+                    // Unlabelled is the honest outcome; the lookup is left to finish
+                    // and is cached for the next variant in this gene.
+                }
+                transcriptsFromRecoder = markManeTranscripts(transcriptsFromRecoder, maneAccessions);
                 if (!isCurrentSearch()) return;
             }
             // Display annotation
@@ -8687,6 +8966,21 @@ const initVariantSearchUi = () => {
                         + (selectedTranscript.maneSelect ? ' (MANE Select)' : '')));
                 }
                 content.appendChild(makeLine('c.', canonicalCVal));
+                // What was typed has to be what is shown. A substitution has one
+                // spelling, so a typed "c.512T>G" that is on none of the
+                // transcripts listed means the name was read on some other one
+                // (Ensembl, left to pick, resolved "PTEN:c.512T>G" to a variant
+                // that is c.1026+59T>G on every RefSeq transcript of PTEN).
+                const typedCoding = codingSubstitutionNotShown(query, targetCdnaGlobal, transcriptsList);
+                if (typedCoding) {
+                    const mismatch = document.createElement('span');
+                    mismatch.className = 'coding-name-note';
+                    mismatch.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                    mismatch.textContent = `${typedCoding} was entered, but this variant is ${typedCoding} on none of the transcripts `
+                        + 'shown here: the name was read on a different transcript. Check that this is the variant you mean, '
+                        + 'or enter it with its transcript (NM_…:c.…).';
+                    content.appendChild(mismatch);
+                }
                 content.appendChild(makeLine('p.', formatProteinDisplayWithSingleLetter(canonicalProtVal)));
                 content.appendChild(makeLine('Effect', effect));
                 const ucscUrl = buildUcscHg19Url(rawInput, gVariant, annotation);
@@ -11121,7 +11415,9 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         settledWithin,
         selectRecoderAlleles, recoderTranscriptsForGenomic, assertResolvedVariantIdentity, fetchMyVariant,
         transcriptsFromRecoderAllele, transcriptsFromVep, buildTranscriptDisplay,
-        maneSelectAccessions, markManeTranscripts,
+        maneSelectAccessions, markManeTranscripts, fetchManeSelectAccessions, geneSymbolCodingName,
+        clinvarNamingTranscript, fetchClinvarNamingTranscript, standardTranscriptForGene, codingSubstitutionNotShown,
+        referenceBaseRejection, transcriptsWithReferenceBase,
         buildCanonicalFromAnnotation, selectCanonicalTranscript, transcriptEffect,
         // HTML/URL escaping
         escapeHtml, safeUrl,
