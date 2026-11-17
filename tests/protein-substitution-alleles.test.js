@@ -140,6 +140,13 @@ const hit = (id, genename, aa, transcriptid) => ({ _id: id, dbnsfp: { genename, 
     // CDKN2A's exon 2 is read in two frames throughout (p16 and p14ARF).
     assert.deepEqual(listed('CDKN2A P 114', 'L'), { alleles: ['chr9:g.21971017G>A'], residueKnown: true });
     assert.deepEqual(listed('CDKN2A P 114', 'S'), { alleles: ['chr9:g.21971018G>A'], residueKnown: true });
+    // (Both of its frames are on standard transcripts — p16's and p14ARF's —
+    // so a residue pieced together from the two would count: that record is
+    // P114S in one and A128V in the other, and there is no "P128".)
+    const twoFrames = residues['CDKN2A P 114'].hits.find(record => record._id === 'chr9:g.21971018G>A');
+    assert.deepEqual(twoFrames.dbnsfp.aa.map(aa => `${aa.ref}${[].concat(aa.pos)[0]}${aa.alt}`), ['A128V', 'P114S']);
+    assert.deepEqual(h.proteinSubstitutionAlleles(residues['CDKN2A P 114'].hits, 'CDKN2A', { ref: 'P', pos: 128, alt: 'S' }, STANDARD.CDKN2A),
+        { alleles: [], residueKnown: false, codon: null });
     // A record that names no transcript and fits no codon placed is not counted in.
     const kras = ['KRAS', 'KRAS'];
     const gly12 = codonpos => ({ codonpos: [codonpos, codonpos], pos: [12, 12], ref: 'G', refcodon: ['GGT', 'GGT'] });
