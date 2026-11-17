@@ -155,6 +155,10 @@ const API_TIMEOUT_MS = {
     // VEP asked while the rest of the result is ready to show (the recoder gave
     // no transcripts to pair): it gets this long from when it was asked.
     vepUnprompted: 8000,
+    // The same allele's other MyVariant records (a short reference read and one
+    // batch request, normally under a second). They add to a result that is
+    // already complete, so it is not held for them longer than this.
+    siblingRecords: 6000,
     ensemblLookup: 10000
 };
 
@@ -533,6 +537,14 @@ const LookupProgress = (() => {
         stateOf(key) {
             const step = steps.get(key);
             return step ? step.state : null;
+        },
+        // Add to what a step already says, keeping its state and timing.
+        note(key, text) {
+            const step = steps.get(key);
+            if (!active || !step || !text) return;
+            step.detail = step.detail ? `${step.detail} · ${text}` : text;
+            steps.set(key, step);
+            renderStep(key);
         },
         attempt(key, attempt, attempts) {
             if (!active) return;
@@ -1364,6 +1376,248 @@ async function reconcileClinvarAllele(record, foundThroughClinvar, compare = com
     return { record: hasContent ? rest : null, status: 'clinvar-dropped', clinvarAllele };
 }
 
+/*
+ * ── One allele, several MyVariant ids ───────────────────────────────────────
+ *
+ * MyVariant keys a record by the spelling its source used, and its sources
+ * spell an indel in a repeat differently. One allele is therefore several
+ * records, each holding only what one family of sources knew about it:
+ *
+ *   BRCA1 c.5266dup (5382insC)
+ *     chr17:g.41209082dup              dbSNP: rs80357906              3'-most (HGVS)
+ *     chr17:g.41209079_41209080insG    gnomAD, ExAC, snpEff, vcf      left-aligned (VCF)
+ *     chr17:g.41209079_41209080dup     ClinVar: 17677                 MyVariant's own
+ *   CFTR F508del
+ *     chr7:g.117199645_117199647del    ClinVar, gnomAD, ExAC, snpEff  left-aligned
+ *     chr7:g.117199646_117199648del    dbSNP: rs113993960             3'-most
+ *
+ * A lookup showed whichever record it happened to land on: no ClinVar entry
+ * for rs80357906, no population frequency for "BRCA1 c.5266dup", no rsID for
+ * F508del.
+ *
+ * The spellings are not guessed at. An indel can sit anywhere along the repeat
+ * it lies in; the reference says how far it slides, and the two ends are the
+ * left-aligned and the 3'-most placement. ClinVar's records get ids of
+ * MyVariant's own making on top of those — the LEFT-aligned position carrying
+ * ClinVar's un-shifted bases, or the word "dup" — which read literally are
+ * other alleles (see reconcileClinvarAllele). Measured over ClinVar records in
+ * BRCA1, BRCA2, TP53, MLH1 and APC: 80 of 80 duplications are filed as
+ * "g.<left>_<left+1>dup" and 49 of 49 mis-filed insertions as
+ * "g.<left>_<left+1>ins<3'-most bases>".
+ *
+ * Nothing is merged on the strength of a spelling. Each record found is
+ * applied to the reference and must come out as the allele being looked up;
+ * for a ClinVar block it is ClinVar's own HGVS inside the block that must,
+ * whatever the id says.
+ */
+
+// Reference fetched either side of an indel to see how far it slides. The
+// longest slide in the survey above was 14 bases.
+const SIBLING_REFERENCE_PAD = 150;
+// Wider events are structural; no source files those under several spellings.
+const MAX_SIBLING_EVENT = 1000;
+
+// The two ends of the stretch an insertion or deletion can slide along,
+// { kind: 'ins', left: { pos, seq }, right: { pos, seq } } (inserted between
+// pos and pos+1) or { kind: 'del', left: { start, end }, right: { start, end } }.
+// `complete` is false when the slide ran off the window. Null for anything
+// that is not an insertion, duplication or deletion the window can hold.
+function indelPlacements(genomic, windowStart, seq) {
+    const desc = parseGenomicHgvs(genomic);
+    if (!desc || !['ins', 'dup', 'del'].includes(desc.type)) return null;
+    // Refuses a description that does not fit the window or its own bases.
+    if (applyGenomicHgvsToReference(desc, windowStart, seq) === null) return null;
+    const anchored = vcfAllelesFromGenomicHgvs(desc, windowStart, seq);
+    if (!anchored) return null;
+    const base = p => seq[p - windowStart];
+    let complete = true;
+    if (desc.type === 'del') {
+        const length = anchored.ref.length - 1;
+        let start = anchored.pos + 1;
+        while (base(start - 1) !== undefined && base(start - 1) === base(start + length - 1)) start -= 1;
+        if (base(start - 1) === undefined) complete = false;
+        const left = { start, end: start + length - 1 };
+        start = anchored.pos + 1;
+        while (base(start + length) !== undefined && base(start + length) === base(start)) start += 1;
+        if (base(start + length) === undefined) complete = false;
+        return { kind: 'del', chrom: desc.chrom, left, right: { start, end: start + length - 1 }, complete };
+    }
+    let pos = anchored.pos;
+    let bases = anchored.alt.slice(1);
+    while (base(pos) !== undefined && base(pos) === bases[bases.length - 1]) {
+        bases = bases[bases.length - 1] + bases.slice(0, -1);
+        pos -= 1;
+    }
+    if (base(pos) === undefined) complete = false;
+    const left = { pos, seq: bases };
+    pos = anchored.pos;
+    bases = anchored.alt.slice(1);
+    while (base(pos + 1) !== undefined && base(pos + 1) === bases[0]) {
+        bases = bases.slice(1) + bases[0];
+        pos += 1;
+    }
+    if (base(pos + 1) === undefined) complete = false;
+    return { kind: 'ins', chrom: desc.chrom, left, right: { pos, seq: bases }, complete };
+}
+
+// Every id MyVariant may file the allele `genomic` under, in the order their
+// blocks are preferred: the real spellings first, then the two ids that only
+// ever carry a ClinVar block.
+function siblingIdCandidates(genomic, windowStart, seq) {
+    const placed = indelPlacements(genomic, windowStart, seq);
+    if (!placed) return [];
+    const { chrom, left, right } = placed;
+    const ids = [];
+    if (placed.kind === 'del') {
+        const del = ({ start, end }) => (start === end ? `${chrom}:g.${start}del` : `${chrom}:g.${start}_${end}del`);
+        ids.push(del(left), del(right));
+    } else {
+        const ins = (pos, bases) => `${chrom}:g.${pos}_${pos + 1}ins${bases}`;
+        ids.push(ins(left.pos, left.seq), ins(right.pos, right.seq));
+        // HGVS calls an insertion that repeats the bases before it a duplication.
+        const length = right.seq.length;
+        if (seq.slice(right.pos - length + 1 - windowStart, right.pos + 1 - windowStart) === right.seq) {
+            ids.push(length === 1 ? `${chrom}:g.${right.pos}dup` : `${chrom}:g.${right.pos - length + 1}_${right.pos}dup`);
+        }
+        ids.push(ins(left.pos, right.seq), `${chrom}:g.${left.pos}_${left.pos + 1}dup`);
+    }
+    const seen = new Set();
+    return ids.filter((id) => {
+        const key = normalizedGenomicId(id);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+// Positional bookkeeping every record carries; it describes the id, not the
+// allele, and is never a reason to say a record "holds something".
+const RECORD_BOOKKEEPING = new Set(['chrom', 'hg19', 'hg38', 'observed', 'query']);
+
+// The blocks of `record` that are about the allele `genomic`.
+function blocksForAllele(record, genomic, windowStart, seq) {
+    const literal = sameGenomicAllele(record?._id, genomic, windowStart, seq) === true;
+    const blocks = {};
+    for (const [key, value] of Object.entries(record || {})) {
+        if (key.startsWith('_') || RECORD_BOOKKEEPING.has(key)) continue;
+        if (key !== 'clinvar') {
+            // vcf, snpEff, frequencies, dbSNP: computed from the id, or joined on it.
+            if (literal) blocks[key] = value;
+            continue;
+        }
+        // ClinVar's block came with the ClinVar variant, so its own HGVS decides;
+        // one that gives no GRCh37 HGVS is taken at its id's word.
+        const kept = [].concat(value || []).filter((entry) => {
+            const described = clinvarGenomicAllele({ clinvar: entry });
+            return described ? sameGenomicAllele(described, genomic, windowStart, seq) === true : literal;
+        });
+        if (kept.length) blocks.clinvar = Array.isArray(value) ? kept : kept[0];
+    }
+    return blocks;
+}
+
+// "chr17:g.41209079_41209080insG (gnomAD, ExAC, snpEff, vcf), chr17:g.… (ClinVar)"
+function describeSiblingBlocks(added) {
+    const label = key => ({
+        clinvar: 'ClinVar', dbsnp: 'dbSNP', snpeff: 'snpEff', cadd: 'CADD', dbnsfp: 'dbNSFP', cosmic: 'COSMIC',
+        gnomad_exome: 'gnomAD', gnomad_genome: 'gnomAD', exac: 'ExAC', exac_nontcga: 'ExAC'
+    })[key] || key;
+    return Object.entries(added || {})
+        .map(([id, keys]) => `${id} (${Array.from(new Set(keys.map(label))).join(', ')})`)
+        .join(', ');
+}
+
+// MyVariant's records for several ids in one request (a form-encoded POST: no
+// CORS preflight). Ids it does not hold are left out.
+async function fetchMyVariantRecords(ids) {
+    if (!ids.length) return [];
+    const response = await fetchWithTimeout('https://myvariant.info/v1/variant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `ids=${encodeURIComponent(ids.join(','))}`
+    }, API_TIMEOUT_MS.myvariant);
+    if (!response.ok) {
+        const err = new Error(`MyVariant.info batch request failed (${response.status})`);
+        err.status = response.status;
+        throw err;
+    }
+    const data = await response.json();
+    return (Array.isArray(data) ? data : []).filter(r => r && r._id && !r.notfound).map(withoutUnusableBlocks);
+}
+
+/*
+ * `primary` — the record the lookup has (null when MyVariant holds none under
+ * the id asked for) — with every block MyVariant files for the same allele
+ * under another id added. Returns { record, status, added, asked, detail }:
+ *
+ *   'not-needed'  not an indel: one spelling, one record
+ *   'none'        the other ids hold nothing more for this allele
+ *   'merged'      `added` maps each contributing id to the blocks taken from it
+ *   'unverified'  could not be checked (reference or MyVariant unavailable)
+ *
+ * A block the primary already has is never replaced. Never throws.
+ * `fetchReference` and `fetchRecords` are injectable for the test suite.
+ */
+async function gatherAlleleRecords(primary, genomic, fetchReference = fetchIdentityReference, fetchRecords = fetchMyVariantRecords) {
+    const result = { record: primary, status: 'not-needed', added: {}, asked: [], detail: '' };
+    const desc = parseGenomicHgvs(genomic);
+    if (!desc || !['ins', 'dup', 'del'].includes(desc.type) || desc.end - desc.start > MAX_SIBLING_EVENT) return result;
+    const windowStart = Math.max(1, desc.start - SIBLING_REFERENCE_PAD);
+    let seq = null;
+    try {
+        seq = await fetchReference(desc.chrom, windowStart, desc.end + SIBLING_REFERENCE_PAD);
+    } catch (err) {
+        console.warn('Reference sequence unavailable for sibling ids', err);
+    }
+    if (!seq) return { ...result, status: 'unverified', detail: 'reference sequence unavailable' };
+    // The id the primary was actually fetched under is not asked for again. A
+    // record re-keyed to ClinVar's allele was fetched under MyVariant's id for
+    // it, not under the allele's own — which may well hold a record too.
+    const fetched = normalizedGenomicId(primary?._myvariant_id || primary?._id);
+    const asked = siblingIdCandidates(genomic, windowStart, seq).filter(id => normalizedGenomicId(id) !== fetched);
+    if (!asked.length) return { ...result, status: 'none' };
+    let records;
+    try {
+        records = await fetchRecords(asked);
+    } catch (err) {
+        console.warn('MyVariant sibling records unavailable', err);
+        return { ...result, status: 'unverified', asked, detail: describeUpstreamFailure(err) };
+    }
+    const record = { ...(primary || { _id: genomic }) };
+    const added = {};
+    // In candidate order, so a real spelling's block is preferred to the same
+    // block under an id of MyVariant's own making.
+    for (const id of asked) {
+        const sibling = records.find(r => normalizedGenomicId(r._id) === normalizedGenomicId(id));
+        if (!sibling) continue;
+        const blocks = blocksForAllele(sibling, genomic, windowStart, seq);
+        const keys = Object.keys(blocks).filter(key => record[key] === undefined);
+        for (const key of keys) record[key] = blocks[key];
+        if (keys.length) added[sibling._id] = keys;
+    }
+    if (!Object.keys(added).length) return { ...result, status: 'none', asked };
+    // Left in the raw JSON: which id each borrowed block is filed under.
+    record._also_filed_under = added;
+    return { record, status: 'merged', added, asked, detail: '' };
+}
+
+// POS/REF/ALT for the variant: the tuple's own when it carries alleles (a pasted
+// row, a substitution), else the record's vcf block — with the position THAT
+// block is anchored at. MyVariant left-aligns an indel and anchors it on the
+// base before, so its REF/ALT do not belong to the first base of the HGVS
+// event, which is what they used to be paired with: 5382insC, filed as
+// 17-41209079-T-TG, was linked to SpliceAI as "chr17 41209082 T TG", and
+// F508del typed as HGVS went to gnomAD as 7-117199645-ATCT-A (it is at 644).
+function tupleVcfAlleles(tuple, vcfData) {
+    if (!tuple) return null;
+    if (tuple.ref && tuple.alt) return { pos: String(tuple.pos), ref: tuple.ref, alt: tuple.alt };
+    const ref = String(vcfData?.ref || '').toUpperCase();
+    const alt = String(vcfData?.alt || '').toUpperCase();
+    if (!/^[ACGTN]+$/.test(ref) || !/^[ACGTN]+$/.test(alt)) return null;
+    const pos = vcfData.position ?? vcfData.pos ?? tuple.pos;
+    return /^\d+$/.test(String(pos)) ? { pos: String(pos), ref, alt } : null;
+}
+
 // Build a gnomAD variant-browser URL from either raw token input (preferred) or
 // a simple genomic substitution HGVS string.
 // vcfData: optional annotation.vcf object {ref, alt, position} from myvariant.info —
@@ -1380,10 +1634,9 @@ function buildGnomadVariantUrl(rawInput, gVariant, annotationId, vcfData, resolv
     const tuple = buildVariantCoordinateTuple(rawInput, gVariant);
     if (tuple) {
         const chrom = tuple.chrom.replace(/^chr/i, '');
-        const ref = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
-        const alt = tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
-        if (ref && alt) {
-            return `https://gnomad.broadinstitute.org/variant/${chrom}-${tuple.pos}-${ref}-${alt}?dataset=gnomad_r2_1`;
+        const alleles = tupleVcfAlleles(tuple, vcfData);
+        if (alleles) {
+            return `https://gnomad.broadinstitute.org/variant/${chrom}-${alleles.pos}-${alleles.ref}-${alleles.alt}?dataset=gnomad_r2_1`;
         }
         // No alleles available — fall back to a region view spanning the variant so
         // the button still appears (and, for an indel, actually covers the event).
@@ -5443,10 +5696,9 @@ function buildSpliceAiApiVariant(rawInput, gVariant, annotation, resolvedAlleles
     const vcfData = annotation && annotation.vcf;
     if (!tuple) return '';
     const chrom = tuple.chrom.replace(/^chr/i, 'chr');
-    const ref = tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null;
-    const alt = tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null;
-    if (!chrom || !tuple.pos || !ref || !alt) return '';
-    return `${chrom}-${tuple.pos}-${ref}-${alt}`;
+    const alleles = tupleVcfAlleles(tuple, vcfData);
+    if (!chrom || !alleles) return '';
+    return `${chrom}-${alleles.pos}-${alleles.ref}-${alleles.alt}`;
 }
 
 async function fetchSpliceAiPrediction(variant, options = {}) {
@@ -8009,11 +8261,30 @@ const initVariantSearchUi = () => {
             const vepAnswered = vepWanted
                 ? fetchLookupVep(gVariant).then(() => true, () => new Promise(() => {}))
                 : new Promise(() => {});
+            // MyVariant files one indel under several ids, each holding part of
+            // what it knows about it (see gatherAlleleRecords). Collect the rest
+            // while the wait below runs.
+            const siblingRecords = vepWanted ? gatherAlleleRecords(annotation, gVariant) : null;
             await Promise.race([
                 transcriptsPromise,
                 vepAnswered,
                 new Promise((resolve) => setTimeout(resolve, 6000))
             ]);
+            if (siblingRecords) {
+                let gathered = null;
+                try {
+                    gathered = await settledWithin(siblingRecords, API_TIMEOUT_MS.siblingRecords, 'not checked in time');
+                } catch (siblingErr) {
+                    gathered = { status: 'unverified', detail: siblingErr.message };
+                }
+                if (!isCurrentSearch()) return;
+                if (gathered.status === 'merged') {
+                    annotation = gathered.record;
+                    LookupProgress.note('myvariant', `also filed under ${describeSiblingBlocks(gathered.added)}`);
+                } else if (gathered.status === 'unverified') {
+                    LookupProgress.note('myvariant', `its other ids for this allele were not checked — ${gathered.detail}`);
+                }
+            }
             // A newer search may have started while this one's annotation was in
             // flight; from here on every write hits shared UI (progress panel,
             // status line, cards), so a stale run must stop before it overwrites
@@ -10239,11 +10510,12 @@ const initVariantSearchUi = () => {
                     if (alleles && alleles.ref && alleles.alt) {
                         return { chrom: alleles.chrom, pos37: alleles.pos, ref: alleles.ref, alt: alleles.alt };
                     }
+                    const fromRecord = tupleVcfAlleles(tuple, vcfData);
                     return {
                         chrom: tuple.chrom.replace(/^chr/i, ''),
-                        pos37: tuple.pos,
-                        ref: tuple.ref || (vcfData && String(vcfData.ref || '').toUpperCase()) || null,
-                        alt: tuple.alt || (vcfData && String(vcfData.alt || '').toUpperCase()) || null
+                        pos37: fromRecord ? fromRecord.pos : tuple.pos,
+                        ref: fromRecord ? fromRecord.ref : null,
+                        alt: fromRecord ? fromRecord.alt : null
                     };
                 }
                 const hg19 = annotation?.hg19 || annotation?.dbsnp?.hg19;
@@ -10475,10 +10747,12 @@ const initVariantSearchUi = () => {
                 const pathUrl = `https://www.google.com/search?q=${pathQuery}`;
                 const clinicalUrl = `https://www.google.com/search?q=${clinicalQuery}`;
                 const spliceTuple = buildVariantCoordinateTuple(rawInput, gVariant);
-                // Recover REF from annotation.vcf for MNVs where delins notation drops the reference.
-                const spliceRef = (spliceTuple && spliceTuple.ref) || (annotation && annotation.vcf && String(annotation.vcf.ref || '').toUpperCase()) || null;
-                const spliceAlt = (spliceTuple && spliceTuple.alt) || (annotation && annotation.vcf && String(annotation.vcf.alt || '').toUpperCase()) || null;
-                const spliceVariantText = (spliceTuple && spliceRef && spliceAlt) ? `${spliceTuple.chrom} ${spliceTuple.pos} ${spliceRef} ${spliceAlt}` : '';
+                // Recover REF/ALT (and their position) from annotation.vcf where the
+                // HGVS notation does not spell them out.
+                const spliceAlleles = tupleVcfAlleles(spliceTuple, annotation && annotation.vcf);
+                const spliceRef = spliceAlleles ? spliceAlleles.ref : null;
+                const spliceAlt = spliceAlleles ? spliceAlleles.alt : null;
+                const spliceVariantText = spliceAlleles ? `${spliceTuple.chrom} ${spliceAlleles.pos} ${spliceRef} ${spliceAlt}` : '';
                 // SpliceAI lookup defaults to hg38 when hg is omitted. Most MyVariant coordinates
                 // we surface in this app are hg19/GRCh37, so explicitly request hg=37.
                 const buildSpliceAiPageUrl = (variantText) => (variantText
@@ -10826,6 +11100,9 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         applyGenomicHgvsToReference, sameGenomicAllele, compareGenomicAlleles,
         // MyVariant ids versus ClinVar's own HGVS; which hit a name means
         clinvarGenomicAllele, recordFoundThroughClinvar, reconcileClinvarAllele, variantNameRank,
+        // one allele under several MyVariant ids
+        indelPlacements, siblingIdCandidates, blocksForAllele, gatherAlleleRecords, fetchMyVariantRecords,
+        describeSiblingBlocks, tupleVcfAlleles, buildGnomadVariantUrl, buildSpliceAiApiVariant,
         // coordinate-row parsing
         isDnaAllele, isChromToken, splitCoordinateRow, looksLikeCoordinateRow,
         parseCoordinateRow, coordinateRowToGenomicHgvs,

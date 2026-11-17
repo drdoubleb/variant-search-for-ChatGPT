@@ -158,6 +158,64 @@ keeps one of the genes ClinVar lists, and for EGFR exon 20 that is the antisense
 gene: `NM_005228.5:c.2300_2308dup` was labelled `EGFR-AS1` and sent to CIViC,
 PubMed and the other gene cards as that.
 
+### One allele, several MyVariant records
+
+MyVariant keys a record by the spelling its source used, and its sources spell
+an indel in a repeat differently. One allele is therefore several records, each
+holding only what one family of sources knew:
+
+| | id | holds |
+| --- | --- | --- |
+| BRCA1 c.5266dup (5382insC) | `chr17:g.41209082dup` — 3′-most, HGVS | dbSNP: rs80357906 |
+| | `chr17:g.41209079_41209080insG` — left-aligned, VCF | gnomAD, ExAC, snpEff, vcf |
+| | `chr17:g.41209079_41209080dup` — MyVariant's own | ClinVar: 17677 |
+| CFTR F508del | `chr7:g.117199645_117199647del` — left-aligned | ClinVar, gnomAD, ExAC, snpEff |
+| | `chr7:g.117199646_117199648del` — 3′-most | dbSNP: rs113993960 |
+
+A lookup showed whichever record it landed on:
+
+| Input | was missing | now |
+| --- | --- | --- |
+| `rs80357906` | ClinVar ("Clinical significance: N/A"), gnomAD | ClinVar 17677 · Pathogenic (14) · gnomAD exome AF 0.0183% |
+| `BRCA1 c.5266dup` | gnomAD, rsID | both |
+| `17 7578474 TP53 C CG` | ClinVar, rsID | ClinVar 182958 · rs730882019 |
+| `7 117199644 CFTR ATCT A` (F508del) | rsID | rs113993960 |
+| `chr13:g.32906700_32906701insCA` | everything — no record under either real spelling | ClinVar 2505518 |
+
+`gatherAlleleRecords` collects the rest. The other ids are **derived, not
+guessed**: the reference says how far the indel slides, and the two ends of
+that stretch are the left-aligned and the 3′-most placement
+(`indelPlacements`). On top of those come the two ids MyVariant makes up for
+ClinVar records, both measured — over ClinVar records in BRCA1, BRCA2, TP53,
+MLH1 and APC, 80 of 80 duplications are filed as `g.<left>_<left+1>dup` and 49
+of 49 mis-filed insertions as `g.<left>_<left+1>ins<3′-most bases>`. All the
+candidates go to MyVariant in one batch request.
+
+**Nothing is merged on the strength of a spelling.** Each record that comes back
+is applied to the reference and must come out as the allele being looked up
+(`blocksForAllele`). The ids MyVariant makes up read, literally, as *other*
+alleles, so from those only the ClinVar block is taken, and only when ClinVar's
+own HGVS inside it is this allele — the dbSNP block beside ClinVar 17677 is
+rs2051500205, the 2-bp duplication its id spells, and is left where it is.
+The same rule keeps `13 32906699 BRCA2 G GCA` from inheriting ClinVar 2505518,
+which MyVariant files under exactly that id. A block the lookup already has is
+never replaced; what was borrowed, and from where, is listed in the progress
+panel (`also filed under chr17:g.41209079_41209080insG (gnomAD, ExAC, snpEff,
+vcf), chr17:g.41209079_41209080dup (ClinVar)`) and in the raw JSON under
+`_also_filed_under`.
+
+Without the reference nothing can be derived or proven, so nothing is merged and
+the panel says `its other ids for this allele were not checked`. The step runs
+alongside the wait for Ensembl and is given 6 s; a substitution has one id and
+costs nothing.
+
+A related slip, fixed with it: links that took REF/ALT from the record's `vcf`
+block paired them with the first base of the HGVS event rather than the position
+that block is anchored at — F508del typed as HGVS went to gnomAD as
+`7-117199645-ATCT-A` (it is at 117199644).
+
+See `tests/sibling-records.test.js`.
+
 ### Which variant a gene-symbol name means
 
 A gene symbol does not choose a transcript, and c./p. numbering differs between

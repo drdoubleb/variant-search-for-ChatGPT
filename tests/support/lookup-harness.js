@@ -18,6 +18,7 @@
  *   1. `route(url, key, respond)` if the test supplies one and it answers;
  *   2. the cassette's recorded response for that exact URL;
  *   3. a slice of a recorded reference window, for Ensembl sequence requests;
+ *      (MyVariant's batch POST is answered from the same per-id recordings);
  *   4. `backend[name](url)` for the site's own /api/<name> proxies;
  *   5. otherwise the failure that source gives when it has nothing: 404 for a
  *      MyVariant id, an empty hit list for a MyVariant search, 503 for Ensembl
@@ -88,6 +89,17 @@ export async function runLookup(cassette, {
         const routed = await route(url, key, respond, options);
         if (routed) return routed;
         const path = decodeURIComponent(url.pathname);
+        // MyVariant's batch endpoint: one POST for several ids, answered from the
+        // per-id recordings. Logged with the ids it asked for.
+        if (url.hostname === 'myvariant.info' && path === '/v1/variant' && String(options.method).toUpperCase() === 'POST') {
+            const ids = new URLSearchParams(String(options.body || '')).get('ids').split(',');
+            requests[requests.length - 1] = `${key} [POST ids=${ids.join(',')}]`;
+            if (withheld(key)) return respond({ error: 'Service Unavailable' }, 503);
+            return respond(ids.map((id) => {
+                const recorded = cassette.responses?.[`myvariant.info/v1/variant/${id}`];
+                return recorded && recorded.status === 200 ? { query: id, ...recorded.body } : { query: id, notfound: true };
+            }));
+        }
         const api = path.match(/\/api\/([a-z0-9-]+)$/);
         if (api && /vercel\.app$/.test(url.hostname)) {
             const answer = backend[api[1]] ? await backend[api[1]](url, options) : null;

@@ -370,6 +370,9 @@ async function lookup(input, fx, {
             if (referenceDown) return response('Service Unavailable', 503);
             const [, chrom, start, end] = path.match(/human\/([^:]+):(\d+)\.\.(\d+)$/);
             assert.equal(chrom, fx.reference.chrom);
+            // The wide window read to find an allele's other MyVariant ids is
+            // not in these fixtures; that step then reports "not checked".
+            if (Number(end) - Number(start) > 250) return response('Service Unavailable', 503);
             return response(referenceSlice(fx.reference, Number(start), Number(end)));
         }
         if (path.includes('/lookup/symbol/')) return response(fx.mane);
@@ -422,10 +425,11 @@ const resolved = (page, label) => {
     assert.match(page.panel, /Confirm allele · GRCh37 reference/);
     assert.match(page.panel, /chrX:g\.20156694_20156723dup is the same allele as the input/);
     assert(!page.requests.some(r => r.includes('20156694_20156695ins')), 'the one-base-off candidate is never formed');
-    // Two small reference requests, both started early: the row's REF base, and
-    // the stretch both spellings are applied to.
+    // Three reference reads: the row's REF base and the stretch both spellings
+    // are applied to (both started early), and the wider one that shows which
+    // other ids MyVariant may file this allele under.
     assert.deepEqual(page.requests.filter(r => r.includes('/sequence/region/')).map(r => r.match(/human\/([^?]+)/)[1]).sort(),
-        ['X:20156691..20156725', 'X:20156693..20156693']);
+        ['X:20156544..20156873', 'X:20156691..20156725', 'X:20156693..20156693']);
     console.log('ok indel lookup: reported EIF1AX 30-bp duplication');
 }
 
