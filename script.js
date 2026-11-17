@@ -7612,13 +7612,23 @@ const initVariantSearchUi = () => {
      * objects with transcript, cDNA and protein fields. If no transcripts can be obtained, returns an empty array.
      * @param {string} q Variant query (e.g. protein HGVS, cDNA or genomic variant).
      */
-    async function getTranscriptsList(q) {
+    // `isCurrent` says whether the lookup that asked is still the one on the
+    // page. The recoder can take a minute, and a lookup no longer waits for it
+    // once it has what it needs — so it routinely answers, or fails, after its
+    // lookup has finished and the next one has begun. Its failure used to be
+    // written onto whatever lookup was running by then: "rs80357906", then
+    // "BRCA1 c.5382insC" 40 s later, ended in "Lookup could not complete …
+    // upstream outage" for a name that resolves, because the first lookup's
+    // recoder had just given up.
+    async function getTranscriptsList(q, isCurrent = () => true) {
         try {
             const recResults = await fetchVariantRecoder(q);
+            if (!isCurrent()) return [];
             lastRecoderResult = { query: q, data: recResults, error: null };
             const allele = selectRecoderAlleles(recResults, q)[0];
             if (allele) return transcriptsFromRecoderAllele(allele);
         } catch (err) {
+            if (!isCurrent()) return [];
             // If the recoder request fails, fall through and return an empty array.
             // Record it though: an empty transcript list because Ensembl is down
             // must not be presented the same way as one because the variant is
@@ -8495,7 +8505,16 @@ const initVariantSearchUi = () => {
         // failure emptied the rows altogether. After this point the recoder's
         // outcome is only reported.
         let transcriptRowsSettled = false;
-        const recoderTranscripts = (asked) => getTranscriptsList(asked).then((list) => {
+        // An rsID or a name comes back from the recoder as several alleles, and
+        // the rows getTranscriptsList returns are the FIRST one's. That is put
+        // right once, further down, for the allele the lookup settled on — but
+        // the recoder may answer after that point (it is no longer waited for),
+        // and then its first allele's rows stood: rs113488022 showed
+        // chr7:g.140453136A>T and ClinVar 13961 beside "c.1799T>C", V600A's, and
+        // asked PubMed about that. Set as soon as the allele is known; from
+        // then on rows are taken for that allele whenever they arrive.
+        let rowsForChosenAllele = null;
+        const recoderTranscripts = (asked) => getTranscriptsList(asked, isCurrentSearch).then((list) => {
             // Guard the shared state: a stale search's late-resolving recoder must
             // not overwrite the transcripts or progress panel of a newer search.
             if (!isCurrentSearch()) return list;
@@ -8506,6 +8525,7 @@ const initVariantSearchUi = () => {
                     'answered after the result was ready — not needed: the variant was resolved without it');
                 return list;
             }
+            if (rowsForChosenAllele) list = rowsForChosenAllele(list, asked);
             transcriptsFromRecoder = list;
             // A Variation Services fallback answer carries genomic candidates but
             // no transcript nomenclature — say that, not "no transcript match".
@@ -8540,6 +8560,13 @@ const initVariantSearchUi = () => {
                     + `${typedName ? typedName.gene : 'GENE'} c.…, NM_…:c.…, chr7:g.… — or as a coordinate row.`), { unreadableName: true });
             }
             let gVariant = query;
+            rowsForChosenAllele = (list, asked) => {
+                // Only where the answer can hold several alleles and one has
+                // been settled on; a genomic query's answer is its own allele.
+                if (isGenomicVariant(asked) || !isGenomicVariant(gVariant)) return list;
+                const answer = lastRecoderResult.query === asked ? lastRecoderResult.data : null;
+                return answer ? recoderTranscriptsForGenomic(answer, gVariant, asked) : list;
+            };
             let recoderData = null;
             let annotation = null;
             // Global candidate variant list. When the Ensembl variant recoder produces multiple genomic
@@ -9524,7 +9551,14 @@ const initVariantSearchUi = () => {
                     // Keep nucleotide-only recoder rows when pairing is unavailable.
                     // An absent protein annotation is preferable to one from another transcript.
                     console.warn('Transcript-specific VEP annotation unavailable:', err);
-                    if (unprompted) LookupProgress.step('vep', 'warn', describeUpstreamFailure(err));
+                    if (unprompted) {
+                        LookupProgress.step('vep', 'warn', describeUpstreamFailure(err));
+                        // ...unless they only arrived while VEP was being waited for
+                        // and the record has rows of its own: those say what the
+                        // change does, which the recoder's do not, and they are
+                        // what is shown when the recoder has not answered at all.
+                        if (pairedAnnotationRows.length) transcriptsFromRecoder = [];
+                    }
                 }
             }
             if (!isCurrentSearch()) return;

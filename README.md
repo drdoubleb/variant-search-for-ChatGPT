@@ -514,6 +514,20 @@ altogether). Once the rows a result is built from have been decided, the
 recoder's outcome is only reported: *"answered after the result was ready — not
 needed: the variant was resolved without it"*.
 
+Two more of the same kind, found in review. The recoder's rows are at first
+those of the first allele in its answer, and they were put right for the allele
+the lookup chose at one point only — before the wait for VEP. Answering *during*
+that wait, with VEP then giving up, it left V600A's row on V600E's page
+(`g.140453136A>T`, ClinVar 13961, `c.1799T>C`) and PubMed was asked about that.
+Rows are now taken for the chosen allele whenever they arrive
+(`rowsForChosenAllele`), and when VEP gives up the record's own rows, which say
+what the change does, are preferred to recoder rows that arrived meanwhile. And
+a recoder that outlives its lookup — it can take a minute — used to write its
+failure onto whichever lookup was running by then: `rs80357906`, then
+`BRCA1 c.5382insC`, ended in *"Lookup could not complete … upstream outage"* for
+a name that resolves, because the first lookup's recoder had just given up. A
+lookup's recoder now touches nothing once another lookup has begun.
+
 Without VEP the record's own rows are used, and there a bare `c.` from ClinVar's
 list no longer displaces snpEff's row for the same transcript: ClinVar lists the
 current version (NM_000546.6) beside snpEff's older one (.5), the bare row was

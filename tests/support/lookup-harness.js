@@ -69,7 +69,10 @@ export async function runLookup(cassette, {
     route = () => undefined, backend = {}, without = [], settleMs = 25,
     // Every wait the page sets is cut to this many milliseconds. A test that
     // needs something to land DURING one of the page's waits widens it.
-    timerCap = 5
+    timerCap = 5,
+    // A second lookup on the same page, submitted once the first has finished:
+    // { input }. What is returned then describes the page after the second.
+    followUp = null
 } = {}) {
     const { document } = parseHTML(html);
     addTableHelpers(document);
@@ -150,6 +153,10 @@ export async function runLookup(cassette, {
         if (tumorType) document.getElementById('tumorTypeInput').value = tumorType;
         if (grch38) document.getElementById('grch38Toggle').checked = true;
         await submit({ preventDefault() {} });
+        if (followUp) {
+            document.getElementById('variantInput').value = followUp.input;
+            await submit({ preventDefault() {} });
+        }
         await new Promise(resolve => setTimeout(resolve, settleMs));
         const text = el => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
         const cards = Object.fromEntries([...document.querySelectorAll('.card')]
