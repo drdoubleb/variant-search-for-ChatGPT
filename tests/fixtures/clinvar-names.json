@@ -1,0 +1,261 @@
+{
+ "term": "BRCA1 5382insC",
+ "esearch": {
+  "esearchresult": {
+   "count": "5",
+   "idlist": [
+    "37560",
+    "17677",
+    "17662",
+    "13128",
+    "9325"
+   ]
+  }
+ },
+ "esummary": {
+  "result": {
+   "uids": [
+    "37560",
+    "17677",
+    "17662",
+    "13128",
+    "9325"
+   ],
+   "37560": {
+    "uid": "37560",
+    "title": "NM_007294.4(BRCA1):c.4035del (p.Glu1346fs)",
+    "obj_type": "Deletion",
+    "germline_classification": {
+     "description": "Pathogenic",
+     "review_status": "reviewed by expert panel",
+     "trait_set": [
+      {
+       "trait_name": "Breast-ovarian cancer, familial, susceptibility to, 1"
+      }
+     ]
+    },
+    "molecular_consequence_list": [
+     "frameshift variant",
+     "intron variant"
+    ],
+    "variation_set": [
+     {
+      "variation_name": "NM_007294.4(BRCA1):c.4035del (p.Glu1346fs)",
+      "variant_type": "Deletion",
+      "aliases": [
+       "Glu1346LysfsX20",
+       "4154delA"
+      ],
+      "cdna_change": "c.4035del",
+      "variation_loc": [
+       {
+        "assembly_name": "GRCh38",
+        "chr": "17",
+        "start": "43091496",
+        "stop": "43091496",
+        "display_start": "43091496"
+       },
+       {
+        "assembly_name": "GRCh37",
+        "chr": "17",
+        "start": "41243513",
+        "stop": "41243513",
+        "display_start": "41243513"
+       }
+      ]
+     }
+    ]
+   },
+   "17677": {
+    "uid": "17677",
+    "title": "NM_007294.4(BRCA1):c.5266dup (p.Gln1756fs)",
+    "obj_type": "Duplication",
+    "germline_classification": {
+     "description": "Pathogenic",
+     "review_status": "reviewed by expert panel",
+     "trait_set": [
+      {
+       "trait_name": "Breast-ovarian cancer, familial, susceptibility to, 1"
+      }
+     ]
+    },
+    "molecular_consequence_list": [
+     "frameshift variant",
+     "non-coding transcript variant"
+    ],
+    "variation_set": [
+     {
+      "variation_name": "NM_007294.4(BRCA1):c.5266dup (p.Gln1756fs)",
+      "variant_type": "Duplication",
+      "aliases": [
+       "5382_5383insC",
+       "p.Gln1756ProfsX74",
+       "NP_009225.1:p.Gln1756ProfsTer74",
+       "p.(Gln1756ProfsTer74)",
+       "5382insC",
+       "5384insC",
+       "5385insC",
+       "5383insC"
+      ],
+      "cdna_change": "c.5266dup",
+      "variation_loc": [
+       {
+        "assembly_name": "GRCh38",
+        "chr": "17",
+        "start": "43057062",
+        "stop": "43057063",
+        "display_start": "43057062"
+       },
+       {
+        "assembly_name": "GRCh37",
+        "chr": "17",
+        "start": "41209079",
+        "stop": "41209080",
+        "display_start": "41209079"
+       }
+      ]
+     }
+    ]
+   },
+   "17662": {
+    "uid": "17662",
+    "title": "NM_007294.4(BRCA1):c.68_69del (p.Glu23fs)",
+    "obj_type": "Microsatellite",
+    "germline_classification": {
+     "description": "Pathogenic",
+     "review_status": "reviewed by expert panel",
+     "trait_set": [
+      {
+       "trait_name": "BRCA1-related cancer predisposition"
+      }
+     ]
+    },
+    "molecular_consequence_list": [
+     "frameshift variant",
+     "5 prime UTR variant",
+     "non-coding transcript variant"
+    ],
+    "variation_set": [
+     {
+      "variation_name": "NM_007294.4(BRCA1):c.68_69del (p.Glu23fs)",
+      "variant_type": "Microsatellite",
+      "aliases": [
+       "NP_009225.1:p.Glu23ValfsTer17",
+       "NM_007294.4(BRCA1):c.68_69del",
+       "c.185delAG",
+       "p.Glu23fs*17",
+       "187delAG",
+       "185delAG"
+      ],
+      "cdna_change": "c.68_69del",
+      "variation_loc": [
+       {
+        "assembly_name": "GRCh38",
+        "chr": "17",
+        "start": "43124028",
+        "stop": "43124029",
+        "display_start": "43124028"
+       },
+       {
+        "assembly_name": "GRCh37",
+        "chr": "17",
+        "start": "41276045",
+        "stop": "41276046",
+        "display_start": "41276045"
+       }
+      ]
+     }
+    ]
+   },
+   "13128": {
+    "uid": "13128",
+    "title": "NM_002875.5(RAD51):c.-98G>C",
+    "obj_type": "single nucleotide variant",
+    "germline_classification": {
+     "description": "Benign",
+     "review_status": "criteria provided, multiple submitters, no conflicts",
+     "trait_set": [
+      {
+       "trait_name": "not provided"
+      }
+     ]
+    },
+    "molecular_consequence_list": [
+     "5 prime UTR variant",
+     "intron variant"
+    ],
+    "variation_set": [
+     {
+      "variation_name": "NM_002875.5(RAD51):c.-98G>C",
+      "variant_type": "single nucleotide variant",
+      "aliases": [
+       "135G-C"
+      ],
+      "cdna_change": "NM_002875.5(RAD51):c.-98G>C",
+      "variation_loc": [
+       {
+        "assembly_name": "GRCh38",
+        "chr": "15",
+        "start": "40695330",
+        "stop": "40695330",
+        "display_start": "40695330"
+       },
+       {
+        "assembly_name": "GRCh37",
+        "chr": "15",
+        "start": "40987528",
+        "stop": "40987528",
+        "display_start": "40987528"
+       }
+      ]
+     }
+    ]
+   },
+   "9325": {
+    "uid": "9325",
+    "title": "NM_000059.4(BRCA2):c.5946del (p.Ser1982fs)",
+    "obj_type": "Deletion",
+    "germline_classification": {
+     "description": "Pathogenic",
+     "review_status": "reviewed by expert panel",
+     "trait_set": [
+      {
+       "trait_name": "BRCA2-related cancer predisposition"
+      }
+     ]
+    },
+    "molecular_consequence_list": [
+     "frameshift variant"
+    ],
+    "variation_set": [
+     {
+      "variation_name": "NM_000059.4(BRCA2):c.5946del (p.Ser1982fs)",
+      "variant_type": "Deletion",
+      "aliases": [
+       "NP_000050.3:p.Ser1982ArgfsTer22",
+       "NM_000059.4(BRCA2):c.5946del",
+       "6174delT"
+      ],
+      "cdna_change": "c.5946del",
+      "variation_loc": [
+       {
+        "assembly_name": "GRCh38",
+        "chr": "13",
+        "start": "32340301",
+        "stop": "32340301",
+        "display_start": "32340301"
+       },
+       {
+        "assembly_name": "GRCh37",
+        "chr": "13",
+        "start": "32914438",
+        "stop": "32914438",
+        "display_start": "32914438"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ }
+}

@@ -404,6 +404,12 @@ HGVS is accepted in genomic, coding and protein form:
 chrX:g.20148675dup      NM_001412.4:c.388dup      EIF1AX:p.Gln130ProfsTer3
 ```
 
+So are an rsID (`rs113488022` — see [rsID lookups](#rsid-lookups) for a site
+with several alleles), mitochondrial `m.` notation (`m.8993T>G`,
+`NC_012920.1:m.8993T>G`), a stop written the short way (`TP53 R213*`,
+`R213X`), and the older names ClinVar lists a variant under (`BRCA1 5382insC`,
+`BRCA1 185delAG` — see [Names that are not HGVS](#names-that-are-not-hgvs)).
+
 Pasted coordinate rows are also accepted, in the shapes people actually paste
 out of VCFs, MAFs, spreadsheets and pipeline reports:
 
@@ -499,9 +505,14 @@ a genomic query fails over to nobody, and with the mirror down the lookup
 reports an outage. The mitochondrion, whose sequence is the same in both
 assemblies, still fails over.
 
-When **both** Ensembl hosts fail, the recoder falls back to **NCBI Variation
-Services** (`api.ncbi.nlm.nih.gov/variation/v0`, CORS-open, independent
-infrastructure): `/hgvs/{query}/contextuals` places the variant as a SPDI, and
+When Ensembl has not answered an accessioned name within 2.5 s — or has failed
+outright — the recoder also asks **NCBI Variation Services**
+(`api.ncbi.nlm.nih.gov/variation/v0`, CORS-open, independent infrastructure), and
+the first usable answer is taken. It used to be asked only after both Ensembl
+hosts had failed, four 12 s attempts later: `NM_007294.4:c.68_69del` (BRCA1
+185delAG) waited 53 s for an answer NCBI gives in one. Ensembl still goes first
+and is preferred when it is prompt, because its answer carries transcript rows.
+`/hgvs/{query}/contextuals` places the variant as a SPDI, and
 `/spdi/{spdi}/all_equivalent_contextual` remaps it to the GRCh37 `NC_`
 chromosome placement. The scope is deliberately narrow — accessioned nucleotide
 HGVS only (`NM_/NC_/NG_/NR_` with `c./g./n.`); gene-symbol and protein queries
@@ -510,8 +521,9 @@ deletion), so they are trimmed to the minimal event in **both** trim orders
 (`minimalSpdiForms`) — in a repeat region the order decides which flank
 survives, and MyVariant indexes only its normalised form — and fed into the
 existing candidate-conversion path as a recoder-shaped response with no
-transcript nomenclature. The progress panel says "resolved via NCBI Variation
-Services" rather than pretending Ensembl answered.
+transcript nomenclature. The progress panel says "variant placed by NCBI
+Variation Services — Ensembl had not answered" rather than pretending Ensembl
+did.
 
 The app previously made a single attempt behind a 6-7 second deadline, so a
 slow or unwell upstream produced:
@@ -938,6 +950,59 @@ protein is rejected rather than silently mapped to the wrong locus.
 Queries that cannot even be resolved to a codon fail with a message naming the
 reason and pointing at c./g. notation, instead of the previous bare
 "Variant not found via Ensembl Variant Recoder".
+
+Before settling for the codon, the name is looked up among ClinVar's other names
+(next section): `BRCA1 p.Gln1756ProfsTer74` is one ClinVar variant and nothing
+else, so it resolves to that variant, not to a region. (The region it used to
+get was wrong as well: "Ter74", the distance to the new stop, was read as a
+residue, giving "residues 74–1756" — 47 kb of BRCA1.)
+
+## Names that are not HGVS
+
+"BRCA1 5382insC", "BRCA1 185delAG", "BRCA2 6174delT", "MTHFR C677T": what these
+variants were called before HGVS, counted from a different first base, and still
+what a clinic letter says. No nomenclature service resolves them.
+
+| Input | before | now |
+| --- | --- | --- |
+| `BRCA1 5382insC` | sent on as `BRCA1:p.5382insC`; "could not resolve" | NM_007294.4:c.5266dup · ClinVar 17677 |
+| `BRCA1 c.5382insC` | "Lookup could not complete … please retry" | the same |
+| `BRCA1 185delAG` | read as a protein change, `p.185delAG` | NM_007294.4:c.68_69del · ClinVar 17662 |
+| `BRCA2 6174delT` | `p.6174delT` | NM_000059.4:c.5946del · ClinVar 9325 |
+| `MTHFR C677T` | read as p.Cys677Thr; "could not resolve" | NM_005957.5:c.665C>T (p.Ala222Val) · ClinVar 3520 |
+| `BRCA1 p.Gln1756ProfsTer74`, `BRCA1 Q1756Pfs*74` | a 47 kb "codon region" | NM_007294.4:c.5266dup · ClinVar 17677 |
+
+ClinVar lists them: every record carries the other names its variant goes by
+(`aliases` — "5382insC", "5385insC", "p.Gln1756ProfsX74", and OMIM-style strings
+such as "MTHFR, 677C-T, ALA222VAL (rs1801133)"). When a `GENE name` input will
+not resolve, `resolveClinvarOtherName` asks the existing `/api/clinvar-protein`
+proxy for `GENE name` (it is a plain ClinVar search; it now returns each
+record's `aliases` and `variationCount`) and accepts a record only if
+
+- it is a single variant (not a haplotype) named in that gene, and
+- one of its other names **is** the typed name, compared in one spelling
+  (`variantNameKeys`: "c." and the sequence dropped, a protein change in
+  single-letter codes with one mark for a stop, and `C677T` = `677C>T` =
+  `677C-T`), and
+- it is the only such record. Two variants under one name are not for the page
+  to choose between.
+
+The lookup then runs again for that record's HGVS name, and says so in the
+progress panel and on the Variant card: *"5382insC" is another name ClinVar
+lists for NM_007294.4(BRCA1):c.5266dup (p.Gln1756fs) (Variation 17677), which
+is what is shown here.* What was typed stays in "You entered" and in the URL.
+
+This is a last resort, asked once per lookup and only after the ordinary route
+has failed — a name that resolves never consults it — and not when the failure
+was a service being down. A token that starts with a digit is no longer given a
+`p.`: `BRCA1 9999delT` is refused at once as *not a name this tool can read …
+ClinVar lists no BRCA1 variant under that name either*, without a request to
+Ensembl or MyVariant. If the proxy cannot be reached the panel says "could not
+be consulted" and no claim is made about what ClinVar lists; a backend deployed
+before this change sends no `aliases`, so nothing resolves and nothing is
+wrongly resolved.
+
+See `tests/other-names.test.js`.
 
 ## Test suite imports the real code
 

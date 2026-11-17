@@ -14,6 +14,11 @@
 // protein-change match (the free-text search is recall-oriented); titles are
 // returned so that filtering can parse the canonical HGVS p. change.
 //
+// The same search finds a variant by one of its older names — the term is just
+// "GENE <text>" — so each variant also carries ClinVar's `aliases` for it.
+// GET /api/clinvar-protein?gene=BRCA1&change=5382insC returns, among others,
+// NM_007294.4(BRCA1):c.5266dup with aliases ["5382insC", "5385insC", ...].
+//
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
 import { ncbiFetchJson } from './_ncbi.js';
@@ -126,6 +131,13 @@ export default async function handler(req, res) {
                 oncogenicity: rec.oncogenicity_classification?.description || '',
                 conditions: collectTraitNames(rec),
                 variationName: rec.variation_set?.[0]?.variation_name || '',
+                // Other names ClinVar lists the variant under ("5382insC",
+                // "185delAG") and how many variants the record is made of (a
+                // haplotype has several). The frontend uses these to recognise
+                // a legacy name; see resolveClinvarOtherName in script.js.
+                aliases: (Array.isArray(rec.variation_set?.[0]?.aliases) ? rec.variation_set[0].aliases : [])
+                    .map((a) => String(a)).slice(0, 40),
+                variationCount: Array.isArray(rec.variation_set) ? rec.variation_set.length : 0,
                 molecularConsequence: rec.molecular_consequence_list || rec.molecular_consequence || rec.variation_set?.[0]?.molecular_consequence || '',
                 pos: varPos !== null ? Number(varPos) : null
             };

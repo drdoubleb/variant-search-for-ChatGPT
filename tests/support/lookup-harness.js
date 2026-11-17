@@ -9,8 +9,10 @@
  *   {
  *     input:     the text typed into the form,
  *     responses: { "<host><path><query>": { status, body } },   core upstreams
- *     reference: [ { chrom, start, seq } ]                      GRCh37 windows
- *   }
+ *     reference: [ { chrom, start, seq } ],                     GRCh37 windows
+ *     api:       { "<name>?<query>": body }      answers of the site's own /api
+ *   }                                            proxies, where one decides the
+ *                                                lookup (ClinVar's other names)
  * Keys are the request URL with the scheme dropped and percent-encoding undone,
  * exactly as they appear in the returned `requests` list.
  *
@@ -102,8 +104,14 @@ export async function runLookup(cassette, {
         }
         const api = path.match(/\/api\/([a-z0-9-]+)$/);
         if (api && /vercel\.app$/.test(url.hostname)) {
-            const answer = backend[api[1]] ? await backend[api[1]](url, options) : null;
-            return answer ? respond(answer) : respond({ error: 'not recorded' }, 404);
+            if (backend[api[1]]) {
+                const answer = await backend[api[1]](url, options);
+                return answer ? respond(answer) : respond({ error: 'not recorded' }, 404);
+            }
+            // A proxy answer recorded with the scenario (cassette.api), keyed
+            // "name?query" the way `page.api(name)` reports requests.
+            const recordedApi = withheld(key) ? null : cassette.api?.[`${api[1]}${decodeURIComponent(url.search.replace(/\+/g, ' '))}`];
+            return recordedApi ? respond(recordedApi) : respond({ error: 'not recorded' }, 404);
         }
         const recorded = withheld(key) ? null : cassette.responses?.[key];
         if (recorded) {
