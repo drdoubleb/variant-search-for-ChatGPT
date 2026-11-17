@@ -1036,10 +1036,11 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
         // The name is the same variant on both of KRAS's clinical transcripts:
         // there is no other reading to offer.
         assert.equal(readingText(page), null, `${label}: no other reading`);
+        // (Whichever spelling it arrived at: VEP is asked about an in-frame
+        // indel left-aligned. See tests/indel-protein-name.test.js.)
+        assert.match(page.variant, /p\.: p\.Gly13dup/, label);
         if (options.without === noPlacement) {
             assert(asked(page, /\/vep\/human\/hgvs\/NM_004985\.5:c\.34_36dup/).length > 0, `${label}: VEP was asked by the name`);
-        } else {
-            assert.match(page.variant, /p\.: p\.Gly13dup/, label);
         }
         if (!options.without) {
             assert.match(page.panel, /Ensembl gives this change as c\.36_38dup — the same variant, written where HGVS places it/, label);

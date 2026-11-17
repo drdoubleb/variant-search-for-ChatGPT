@@ -248,6 +248,78 @@ raw JSON as `_vcf_as_filed`.
 
 See `tests/sibling-records.test.js`.
 
+### One allele, one protein name
+
+Ensembl's VEP supplies the protein change shown for each transcript, and its
+answer for an insertion or deletion depends on how the allele is spelled. To see
+how much, VEP was asked about the equivalent spellings of 50 indels that can be
+written more than one way — some 500 requests, every spelling of each (a spread
+of them for the longest repeats):
+
+| | indels | named the same at every spelling |
+| --- | --- | --- |
+| coding name (c.) | 50 | 49 (not HTT's CAG repeat, where RefSeq's transcript is not the genome's) |
+| protein name of a frameshift | 9 | 9 |
+| protein name, in-frame, gene on the forward strand | 14 | 14 |
+| protein name, in-frame, gene on the reverse strand | 27 | **14** |
+
+The 13 that are misnamed are not corner cases:
+
+| Allele | right name | what VEP also calls it |
+| --- | --- | --- |
+| BRAF `c.1794_1796dup` | p.Thr599dup | `p.Thr599_Val600insTer` — an inserted stop — at the 3′-most genomic spelling |
+| NRAS `c.34_36dup` | p.Gly13dup | `p.Val14delinsGlyPhe` at three of its nine spellings, among them `g.115258746_115258748dup` — the one Ensembl's own recoder gives; `p.Val14dup` at another |
+| KRAS `c.34_36dup` | p.Gly13dup | `p.Val14dup`, also when asked by that very name; `p.Gly13_Val14insCys` |
+| FLT3 `c.1780_1800dup` | p.Phe594_Asp600dup | `p.Asp600_Leu601insTer` |
+| PHOX2B `c.721_780dup` | p.Ala241_Ala260dup | an insertion of 19 other residues and a stop, when asked by that very name |
+| CDKN2A `c.9_32dup` | p.Ala4_Pro11dup | eight other insertions; no protein name at all at 16 of its 50 spellings |
+
+and CEBPA `c.937_939dup`, HRAS `c.34_36dup`, KRAS `c.37_39dup`, TP53
+`c.522_524dup`, FOXL2 `c.672_701dup`, ARX `c.304_327dup` and the deletion CDKN2A
+`c.9_32del`. The page asked VEP by whatever spelling the lookup had arrived at —
+normally the recoder's, so **`NRAS c.34_36dup` was shown as
+p.Val14delinsGlyPhe with every service answering**, and `KRAS c.34_36dup` as
+p.Val14dup whenever the recoder had not answered. (`shift_3prime` and
+`shift_genomic`, VEP's own options, change none of these.)
+
+**The left-aligned spelling was named right in all 50.** On the reverse strand
+that is where HGVS itself puts the change on the transcript, so VEP has nothing
+to shift; it is also what a VCF holds, so the page now agrees with a pipeline
+that runs VEP on normalised VCFs. So:
+
+- An in-frame insertion, duplication or deletion is put to VEP **left-aligned**,
+  whichever spelling the lookup arrived at (`vepSpellingFor`,
+  `leftAlignedSpelling`). The spelling comes from the reference window the
+  lookup reads anyway for the allele's other MyVariant records — one request
+  serves both — and VEP is asked once. The `g.` shown is unchanged; the panel
+  says `asked as chr1:g.115258741_115258742insCAC — the same allele,
+  left-aligned`.
+- A frameshift, a substitution and anything else is asked about as before, at
+  once: their names did not depend on the spelling in any measurement.
+- **Without the reference** the left-aligned spelling cannot be worked out. VEP
+  is then asked by the spelling in hand, and the protein names it gives on
+  reverse-strand transcripts are **not shown** — the card reads `p.: N/A`, the
+  coding name and effect stay, and the panel flags the line: `▲ … protein change
+  not shown: Ensembl names an in-frame insertion or deletion on the reverse
+  strand reliably only when it is written left-aligned, and it could not be
+  asked that way`. Forward-strand names are shown as they are. The same goes for
+  rows VEP gave for a *name* (the last-resort route) when it then does not
+  answer for the allele.
+
+| Input | was | now |
+| --- | --- | --- |
+| `NRAS c.34_36dup` | p.Val14delinsGlyPhe | p.Gly13dup |
+| `KRAS c.34_36dup`, Ensembl's recoder and NCBI silent | p.Val14dup | p.Gly13dup |
+| `chr7:g.140453142_140453143insTAG` (BRAF), recoder silent | p.Thr599_Val600insTer | p.Thr599dup |
+| `chr12:g.25398285_25398286insACC`, `12 25398285 C CACC` (KRAS) | p.Val14dup | p.Gly13dup |
+
+What this does not cover: a name VEP gets wrong at *every* spelling. HTT
+`c.52_54dup`, one more CAG in the repeat, is "p.Pro39del" however it is written,
+because RefSeq's HTT transcript carries a different number of repeats than
+GRCh37 does.
+
+See `tests/indel-protein-name.test.js`.
+
 ### Which variant a gene-symbol name means
 
 A gene symbol does not choose a transcript, and c./p. numbering differs between

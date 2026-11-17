@@ -458,15 +458,21 @@ async function lookup(input, fx, {
             return path.endsWith(`/${asked}`) ? response(recoder) : response({ error: 'unexpected recoder query' }, 400);
         }
         if (path.includes('/vep/human/hgvs/')) {
-            return path.endsWith(`/${fx.vep[0].input}`) ? response(fx.vep) : response({ error: 'unexpected VEP query' }, 400);
+            // (An in-frame indel is asked about left-aligned: see scenario 1.)
+            const answer = [fx.vep, fx.vepLeftAligned].find(vep => vep && path.endsWith(`/${vep[0].input}`));
+            return answer ? response(answer) : response({ error: 'unexpected VEP query' }, 400);
         }
         if (path.includes('/sequence/region/human/')) {
             if (referenceDown) return response('Service Unavailable', 503);
             const [, chrom, start, end] = path.match(/human\/([^:]+):(\d+)\.\.(\d+)$/);
             assert.equal(chrom, fx.reference.chrom);
             // The wide window read to find an allele's other MyVariant ids is
-            // not in these fixtures; that step then reports "not checked".
-            if (Number(end) - Number(start) > 250) return response('Service Unavailable', 503);
+            // in one of these fixtures only; elsewhere that step reports "not
+            // checked".
+            if (Number(end) - Number(start) > 250) {
+                return fx.referenceWide ? response(referenceSlice(fx.referenceWide, Number(start), Number(end)))
+                    : response('Service Unavailable', 503);
+            }
             return response(referenceSlice(fx.reference, Number(start), Number(end)));
         }
         // The MANE lookup is two requests: the gene (for its canonical
@@ -525,6 +531,11 @@ const resolved = (page, label) => {
     assert.match(page.variant, /c\.: c\.34_63dup/);
     assert.match(page.variant, /p\.: p\.Arg12_Ser21dup/);
     assert.match(page.variant, /inframe_insertion/);
+    // An in-frame indel is put to VEP left-aligned (see vepSpellingFor): for
+    // this one that is the row as pasted, and VEP is asked once.
+    assert.deepEqual(page.requests.filter(r => r.includes('/vep/human/hgvs/')).map(r => r.match(/hgvs\/([^?]+)/)[1]),
+        ['X:g.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT']);
+    assert.match(page.panel, /asked as chrX:g\.20156693_20156694insAGATTCATTCTCATTCTTACCCCTGCGTCT — the same allele, left-aligned/);
     assert.match(page.panel, /Confirm allele · GRCh37 reference/);
     assert.match(page.panel, /chrX:g\.20156694_20156723dup is the same allele as the input/);
     assert(!page.requests.some(r => r.includes('20156694_20156695ins')), 'the one-base-off candidate is never formed');
@@ -551,8 +562,18 @@ const resolved = (page, label) => {
     // every gene-level source. VEP names the gene.
     assert.match(page.variant, /Gene: EIF1AX/);
     assert.match(page.variant, /Transcript: NM_001412\.4 \(MANE Select\)/);
-    assert.match(page.variant, /p\.: p\.Arg12_Ser21dup/);
     assert.match(page.variant, /inframe_insertion/);
+    // Without the reference the left-aligned spelling cannot be worked out, and
+    // VEP's protein name for an in-frame indel in a reverse-strand gene (EIF1AX
+    // is one) depends on the spelling — it calls BRAF p.Thr599dup an inserted
+    // stop in one of them. The name it gives for the spelling in hand is
+    // therefore not shown, and the panel says why. (Here it happens to be the
+    // right one. The coding name does not depend on the spelling.)
+    assert.match(page.variant, /c\.: c\.34_63dupp\.: N\/A/);
+    assert.doesNotMatch(page.variant + page.panel, /Arg12_Ser21dup/);
+    assert.match(page.panel, /protein change not shown: Ensembl names an in-frame insertion or deletion on the reverse strand reliably only when it is written left-aligned, and it could not be asked that way/);
+    assert.deepEqual(page.requests.filter(r => r.includes('/vep/human/hgvs/')).map(r => r.match(/hgvs\/([^?]+)/)[1]),
+        ['X:g.20156694_20156723dup'], 'asked by the spelling in hand');
     assert.doesNotMatch(page.variant, /Gene: CHR/i);
     assert.match(page.panel, /GeneEIF1AX/, 'and the panel names it too');
     assert(page.requests.some(r => /[?&]gene=EIF1AX\b/.test(r)), 'gene-level cards ask about EIF1AX');
