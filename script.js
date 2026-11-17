@@ -9223,8 +9223,9 @@ const initVariantSearchUi = () => {
                     if (proteinOnly && !otherNameAsked && (!firstAnn || !isSingleBaseChange(chosenCandidate))) {
                         const { known, told } = await consultOtherNames();
                         if (!isCurrentSearch()) return;
-                        const inHand = String((selectedAnn && selectedAnn.clinvar && selectedAnn.clinvar.variant_id) || '');
-                        if (known && known.id !== inHand) return runLookup(null, forOtherName(known));
+                        // (MyVariant gives a record's ClinVar block as one object, or as several.)
+                        const inHand = [].concat((selectedAnn && selectedAnn.clinvar) || []).map(block => String((block && block.variant_id) || ''));
+                        if (known && !inHand.includes(known.id)) return runLookup(null, forOtherName(known));
                         if (known) LookupProgress.step('clinvarName', 'ok', `ClinVar knows this variant as "${typedName.name}"`);
                         else otherNamesSettledNothing(known, told);
                     }
@@ -10090,8 +10091,9 @@ const initVariantSearchUi = () => {
                     const note = document.createElement('span');
                     note.className = 'protein-change-shared-note';
                     note.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
-                    const shownId = codonOnlyResolutionGlobal ? '' : String((annotation && annotation.clinvar && annotation.clinvar.variant_id) || '');
-                    const others = nameShared.variants.filter(v => v.id !== shownId);
+                    const shownIds = codonOnlyResolutionGlobal ? []
+                        : [].concat((annotation && annotation.clinvar) || []).map(block => String((block && block.variant_id) || ''));
+                    const others = nameShared.variants.filter(v => !shownIds.includes(v.id));
                     const all = `${nameShared.variants.length} ${typedName.gene} variants in ClinVar `
                         + (nameShared.how === 'several' ? `go by "${typedName.name}"` : `have the protein change "${typedName.name}"`);
                     note.appendChild(document.createTextNode(codonOnlyResolutionGlobal
