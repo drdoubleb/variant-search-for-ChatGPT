@@ -8174,10 +8174,25 @@ const initVariantSearchUi = () => {
             LookupProgress.step('recoder', 'running');
             return recoderTranscripts(asked);
         };
+        // Set once this lookup's transcript rows have been decided — the
+        // recoder's, VEP's, or the record's own. The lookup stops waiting for the
+        // recoder as soon as VEP has answered, and the recoder typically answers
+        // a second or two after that: in the middle of what remains. Its rows
+        // carry no protein change, and its late arrival used to replace VEP's —
+        // F508del by its g. name came out "c.1521_1523del · p.: N/A · Effect:
+        // N/A" whenever Ensembl took 3 s over it rather than 1 — while a late
+        // failure emptied the rows altogether. After this point the recoder's
+        // outcome is only reported.
+        let transcriptRowsSettled = false;
         const recoderTranscripts = (asked) => getTranscriptsList(asked).then((list) => {
             // Guard the shared state: a stale search's late-resolving recoder must
             // not overwrite the transcripts or progress panel of a newer search.
             if (!isCurrentSearch()) return list;
+            if (transcriptRowsSettled) {
+                LookupProgress.stepUnlessFailed('recoder', 'warn',
+                    'answered after the result was ready — not needed: the variant was resolved without it');
+                return list;
+            }
             transcriptsFromRecoder = list;
             // A Variation Services fallback answer carries genomic candidates but
             // no transcript nomenclature — say that, not "no transcript match".
@@ -8194,7 +8209,7 @@ const initVariantSearchUi = () => {
         }).catch((recoderErr) => {
             // getTranscriptsList swallows its own errors, so this is a safety net.
             if (!isCurrentSearch()) return [];
-            transcriptsFromRecoder = [];
+            if (!transcriptRowsSettled) transcriptsFromRecoder = [];
             LookupProgress.step('recoder', 'fail', describeUpstreamFailure(recoderErr));
             if (recoderErr && recoderErr.retryable) LookupProgress.markUpstreamOutage('recoder');
             return [];
@@ -9132,6 +9147,9 @@ const initVariantSearchUi = () => {
             if (!transcriptsFromRecoder.length) {
                 transcriptsFromRecoder = buildCanonicalFromAnnotation(annotation, targetProtGlobal, query).transcriptsList;
             }
+            // These are the rows the result is built from; the waits that follow
+            // (the MANE label, the cards) must not see them swapped underneath.
+            transcriptRowsSettled = true;
             if (transcriptsFromRecoder.length && !codonOnlyResolutionGlobal) {
                 const gene = geneHintGlobal || transcriptsFromRecoder.find(t => t.gene)?.gene
                     || Array.from(getHitGenesUpper(annotation))[0] || parseMyVariantQueryIntent(query).gene;

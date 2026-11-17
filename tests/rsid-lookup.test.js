@@ -159,4 +159,52 @@ console.log('rsID unit checks passed');
     console.log('ok genomic lookup: a record with no transcript rows gets them from VEP');
 }
 
+// 6. Not waiting for the recoder means it answers later — typically a second
+//    or two after VEP, in the middle of what remains of the lookup. Its rows
+//    carry no protein change, and arriving then they replaced VEP's: F508del by
+//    its g. name came out "c.1521_1523del · p.: N/A · Effect: N/A" in a real
+//    browser, whenever Ensembl's recoder took 3 s rather than 1. Here the
+//    recoder comes back only once the panel shows VEP's rows taken up, while
+//    the gene's MANE lookup keeps the label step that follows waiting.
+{
+    const cassette = cassettes.cftrF508del;
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const late = async (outcome) => {
+        const order = [];
+        const page = await runLookup(cassette, {
+            input: 'chr7:g.117199645_117199647del',
+            timerCap: 150,
+            settleMs: 500,
+            route: async (url, key, respond, options, { document }) => {
+                if (/variant_recoder/.test(key)) {
+                    const vepStep = () => document.querySelector('[data-step="vep"]')?.textContent || '';
+                    for (let i = 0; i < 2000 && !/\d transcripts?/.test(vepStep()); i++) await wait(1);
+                    order.push(`VEP: ${vepStep().match(/\d transcripts?/)?.[0]}`, `recoder ${outcome}`);
+                    const recorded = cassette.responses[key];
+                    return outcome === 'answers' ? respond(recorded.body, recorded.status) : respond({ error: 'Bad Gateway' }, 400);
+                }
+                if (/rest\.ensembl\.org\/lookup\//.test(key)) { await wait(450); return respond({ error: 'late' }, 503); }
+                return undefined;
+            }
+        });
+        return { page, order };
+    };
+    for (const outcome of ['answers', 'fails']) {
+        const { page, order } = await late(outcome);
+        assertResolved(assert, page, `F508del, recoder ${outcome} late`);
+        assert.deepEqual(order, ['VEP: 2 transcripts', `recoder ${outcome}`], 'the recoder came back after the rows were decided');
+        assert.match(page.variant, /Transcript: NM_000492\.4c\.: c\.1521_1523delp\.: p\.Phe508del \(p\.F508del\)Effect: inframe_deletion/, outcome);
+        assert.doesNotMatch(page.variant, /p\.: N\/A|Effect: N\/A/, outcome);
+        assert.match(page.panel, /CodingNM_000492\.4:c\.1521_1523delProteinp\.Phe508delEffectinframe_deletion/, outcome);
+        assert.match(page.panel, outcome === 'answers'
+            ? /Resolve nomenclature · Ensemblanswered after the result was ready — not needed: the variant was resolved without it/
+            : /✕Resolve nomenclature · EnsemblHTTP 400/);
+    }
+    // Answering in good time, it is used as before (its rows, paired with VEP's).
+    const prompt = await runLookup(cassette, { input: 'chr7:g.117199645_117199647del' });
+    assert.match(prompt.panel, /●Resolve nomenclature · Ensembl5 transcripts/);
+    assert.match(prompt.variant, /Transcript: NM_000492\.4 \(MANE Select\)c\.: c\.1521_1523delp\.: p\.Phe508del/);
+    console.log('ok genomic lookup: a recoder answer that arrives late does not replace VEP\'s rows');
+}
+
 console.log('rsID lookup tests passed');

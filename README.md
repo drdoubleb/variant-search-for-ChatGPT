@@ -441,6 +441,15 @@ displace RefSeq rows the record already has (during an Ensembl blip
 `NM_000059.3` row went unused), and the panel says *"RefSeq transcripts
 unavailable — the record's own are shown"*.
 
+Not waiting for the recoder means it answers later — typically a second or two
+after VEP, in the middle of what remains of the lookup. Its rows carry no protein
+change, and arriving then they replaced VEP's: in a real browser F508del by its
+g. name came out `c.1521_1523del · p.: N/A · Effect: N/A` whenever Ensembl's
+recoder took 3 s rather than 1 (and a late *failure* emptied the rows
+altogether). Once the rows a result is built from have been decided, the
+recoder's outcome is only reported: *"answered after the result was ready — not
+needed: the variant was resolved without it"*.
+
 Without VEP the record's own rows are used, and there a bare `c.` from ClinVar's
 list no longer displaces snpEff's row for the same transcript: ClinVar lists the
 current version (NM_000546.6) beside snpEff's older one (.5), the bare row was

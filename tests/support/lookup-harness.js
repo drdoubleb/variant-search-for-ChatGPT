@@ -17,7 +17,9 @@
  * exactly as they appear in the returned `requests` list.
  *
  * What a request gets:
- *   1. `route(url, key, respond)` if the test supplies one and it answers;
+ *   1. `route(url, key, respond, options, { document })` if the test supplies
+ *      one and it answers (the page's document is there for a route that has
+ *      to answer at a particular point in the lookup);
  *   2. the cassette's recorded response for that exact URL;
  *   3. a slice of a recorded reference window, for Ensembl sequence requests;
  *      (MyVariant's batch POST is answered from the same per-id recordings);
@@ -64,7 +66,10 @@ function addTableHelpers(document) {
 
 export async function runLookup(cassette, {
     input = cassette.input, tumorType = '', grch38 = false,
-    route = () => undefined, backend = {}, without = [], settleMs = 25
+    route = () => undefined, backend = {}, without = [], settleMs = 25,
+    // Every wait the page sets is cut to this many milliseconds. A test that
+    // needs something to land DURING one of the page's waits widens it.
+    timerCap = 5
 } = {}) {
     const { document } = parseHTML(html);
     addTableHelpers(document);
@@ -88,7 +93,7 @@ export async function runLookup(cassette, {
         const url = new URL(String(address), 'https://drdoubleb.com/variant/');
         const key = requestKey(url);
         requests.push(key);
-        const routed = await route(url, key, respond, options);
+        const routed = await route(url, key, respond, options, { document });
         if (routed) return routed;
         const path = decodeURIComponent(url.pathname);
         // MyVariant's batch endpoint: one POST for several ids, answered from the
@@ -135,7 +140,7 @@ export async function runLookup(cassette, {
         console: { log() {}, warn() {}, error(e) { errors.push(String(e)); } },
         URL, URLSearchParams, AbortController, performance, structuredClone,
         // Timeouts and retry back-offs collapse to a few milliseconds.
-        setTimeout(fn, ms, ...args) { const timer = setTimeout(fn, Math.min(ms, 5), ...args); timers.push(timer); return timer; },
+        setTimeout(fn, ms, ...args) { const timer = setTimeout(fn, Math.min(ms, timerCap), ...args); timers.push(timer); return timer; },
         clearTimeout
     });
     try {
