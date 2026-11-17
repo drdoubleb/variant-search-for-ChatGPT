@@ -372,4 +372,33 @@ console.log('ok mitochondrial lookup: the GRCh38 box changes nothing, and asks n
     console.log('ok gene from VEP: the gene the effect is about, nearest first');
 }
 
+// 8b. ...and the page hands VEP's reported effect over, at both places where it
+//     names the gene from VEP's rows (the function's own tests above cannot
+//     tell). F508del by its g. name, with nothing from MyVariant: VEP gives a
+//     row for CFTR (inframe_deletion) and one for CFTR-AS1, the antisense gene
+//     the deletion is merely intronic in. Listed in the other order than they
+//     were recorded, the two stand equal until the effect is taken into account
+//     — and the variant was labelled CFTR-AS1.
+{
+    const cassette = cassettes.cftrF508del;
+    const vepKey = Object.keys(cassette.responses).find(key => key.includes('/vep/human/hgvs/'));
+    const recorded = cassette.responses[vepKey].body[0];
+    assert.deepEqual(recorded.transcript_consequences.map(row => row.gene_symbol), ['CFTR', 'CFTR-AS1']);
+    assert.equal(recorded.most_severe_consequence, 'inframe_deletion');
+    const antisenseFirst = [{ ...recorded, transcript_consequences: [...recorded.transcript_consequences].reverse() }];
+    const route = (url, key, respond) => (/\/vep\/human\/hgvs\//.test(key) ? respond(antisenseFirst) : undefined);
+    // The recoder resolves the allele and MyVariant holds no record of it...
+    const viaRecoder = await runLookup(cassette, { input: 'chr7:g.117199645_117199647del', route, without: [/myvariant\.info/] });
+    assertResolved(assert, viaRecoder, 'F508del by g. name, no MyVariant record');
+    assert.match(viaRecoder.variant, /Gene: CFTR(?!-AS1)/);
+    assert.match(viaRecoder.panel, /Resolve nomenclature · Ensembl\s*\d+ transcripts?/, 'the recoder answered');
+    assert(viaRecoder.api('civic').every(asked => /gene=CFTR(&|$)/.test(asked)), 'and the gene cards are CFTR\'s');
+    // ...and with the recoder not answering either, where VEP is the last resort.
+    const lastResort = await runLookup(cassette, { input: 'chr7:g.117199645_117199647del', route, without: [/myvariant\.info/, /variant_recoder/] });
+    assertResolved(assert, lastResort, 'F508del by g. name, VEP alone');
+    assert.match(lastResort.variant, /Gene: CFTR(?!-AS1)/);
+    assert.doesNotMatch(lastResort.panel, /Resolve nomenclature · Ensembl\s*\d+ transcripts?/, 'the recoder did not answer');
+    console.log('ok gene from VEP: the reported effect reaches the ranking, by either route');
+}
+
 console.log('Mitochondrial tests passed');

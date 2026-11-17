@@ -150,13 +150,36 @@ console.log('rsID unit checks passed');
 }
 
 // 5. A direct genomic lookup of a dbSNP-only record takes the same road: the
-//    recoder is not waited for once VEP has answered.
+//    recoder is not waited for once VEP has answered. Shown with the page's
+//    waits at their real length (it gives the recoder 6 s where it has to) and
+//    the recoder's answer held back until the lookup is over: the lookup must
+//    finish regardless, and long before that wait would have run out.
 {
-    const page = await runLookup(cassettes.rs80357906, { input: 'chr17:g.41209082dup' });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let asked = 0;
+    const started = Date.now();
+    const lookup = runLookup(cassettes.rs80357906, {
+        input: 'chr17:g.41209082dup',
+        timerCap: 6000,
+        route: async (url, key, respond) => {
+            if (!/variant_recoder/.test(key)) return undefined;
+            asked += 1;
+            await held;
+            return respond({ error: 'Service Unavailable' }, 503);
+        }
+    });
+    const page = await Promise.race([lookup, new Promise(resolve => setTimeout(() => resolve(null), 3500))]);
+    const took = Date.now() - started;
+    release();
+    assert(page, 'the lookup finished while the recoder had still not answered');
+    assert(asked >= 1, 'which it had been asked');
+    assert(took < 3000, `and without sitting out the 6 s it allows the recoder (${took} ms)`);
     assertResolved(assert, page, 'chr17:g.41209082dup');
     assert.match(page.variant, /Gene: BRCA1Transcript: NM_007294\.4/);
     assert.match(page.variant, /p\.: p\.Gln1756ProfsTer74/);
-    console.log('ok genomic lookup: a record with no transcript rows gets them from VEP');
+    assert.match(page.panel, /Resolve nomenclature · Ensembl\s*still answering — not needed: the variant was resolved without it/);
+    console.log('ok genomic lookup: a record with no transcript rows gets them from VEP, without waiting for the recoder');
 }
 
 // 6. Not waiting for the recoder means it answers later — typically a second
@@ -247,18 +270,28 @@ console.log('rsID unit checks passed');
         assert.doesNotMatch(page.variant, /c\.1799T>C/);
         assert.deepEqual(page.api('pubmed').map(r => (r.match(/variant=([^&]+)/) || [])[1]).filter(Boolean), ['V600E']);
     }
-    {
-        // A record with no transcript rows of its own (as a dbSNP-only one is):
-        // the recoder's rows are then what there is — for the allele chosen.
-        const bare = structuredClone(cassette.responses['myvariant.info/v1/variant/chr7:g.140453136A>T'].body);
-        for (const block of ['snpeff', 'dbnsfp', 'cadd']) delete bare[block];
-        const page = await lateRecoder(bare);
-        assertResolved(assert, page, 'rs113488022, recoder late, record without rows');
-        assert.match(page.variant, /g\.: chr7:g\.140453136A>T/);
-        assert.match(page.variant, /c\.: c\.1799T>A/);
-        assert.doesNotMatch(page.variant, /c\.1799T>[CG]/, 'no row of another allele');
-        assert(!page.requests.some(r => /c\.1799T>[CG]/.test(r)), 'and no source asked about one');
-    }
+    // A record with no transcript rows of its own, as a dbSNP-only one is: no
+    // snpEff or dbNSFP rows, and no ClinVar names to make rows from. The
+    // recoder's rows are then all there is to show — for the allele chosen.
+    const bare = structuredClone(cassette.responses['myvariant.info/v1/variant/chr7:g.140453136A>T'].body);
+    for (const block of ['snpeff', 'dbnsfp', 'cadd', 'clinvar', 'hgvsc', 'hgvsp', 'civic', 'cosmic', 'docm', 'cgi']) delete bare[block];
+    const noOtherAllele = (page, label) => {
+        assertResolved(assert, page, label);
+        assert.match(page.variant, /g\.: chr7:g\.140453136A>T/, label);
+        assert.match(page.variant, /Transcript: NM_004333\.\d+(?: \(MANE Select\))?c\.: c\.1799T>A/, `${label}: the recoder's row for A>T`);
+        assert.doesNotMatch(page.variant, /c\.1799T>[CG]/, `${label}: no row of another allele`);
+        assert(!page.requests.some(r => /c\.1799T>[CG]/.test(r)), `${label}: and no source asked about one`);
+    };
+    // Arriving late, during the wait for VEP: taken for the chosen allele then.
+    noOtherAllele(await lateRecoder(bare), 'rs113488022, recoder late, record without rows');
+    // Arriving at once, before the allele is chosen: put right when it is.
+    noOtherAllele(await runLookup(cassette, {
+        route: (url, key, respond) => {
+            if (/\/vep\//.test(key)) return respond({ error: 'Service Unavailable' }, 503);
+            if (/myvariant\.info\/v1\/variant\/chr7:g\.140453136A>T/.test(key)) return respond(bare);
+            return undefined;
+        }
+    }), 'rs113488022, recoder prompt, VEP down, record without rows');
     console.log('ok rsID lookup: rows that arrive late are the chosen allele\'s');
 }
 
@@ -307,6 +340,53 @@ console.log('rsID unit checks passed');
     assert.equal(page.api('clinvar-protein').filter(r => /retmax=200/.test(r)).length, 1, 'ClinVar\'s other names were asked');
     assert.doesNotMatch(page.panel, /Resolve nomenclature · Ensembl\s*HTTP 503/, 'the first lookup\'s failure is not on this panel');
     console.log('ok rsID lookup: a finished lookup\'s recoder does not fail the next one');
+}
+
+// 9. ...nor does it take the next lookup's rows away by answering. The page
+//    keeps the recoder's last answer to read it again later; a finished
+//    lookup's answer landing there displaced the current one's, whose
+//    transcript rows — all it had, with no record and no VEP — then went.
+{
+    const first = cassettes.rs113488022;
+    const second = cassettes.cftrF508del;
+    const both = { input: first.input, reference: [...first.reference, ...second.reference], responses: { ...first.responses, ...second.responses } };
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let vepAsked = false;
+    let staleAnswered = false;
+    const page = await runLookup(both, {
+        followUp: { input: 'chr7:g.117199645_117199647del' },
+        settleMs: 300,
+        route: async (url, key, respond, options) => {
+            if (/variant_recoder\/human\/rs113488022/.test(key)) {
+                // The first lookup's recoder answers — properly, with its three
+                // alleles — only once the second lookup is waiting for VEP.
+                for (let i = 0; i < 6000 && !vepAsked; i++) await wait(1);
+                const recorded = first.responses['grch37.rest.ensembl.org/variant_recoder/human/rs113488022?content-type=application/json'];
+                setTimeout(() => { staleAnswered = true; }, 30);
+                return respond(recorded.body, recorded.status);
+            }
+            // The second lookup has only the recoder to go by: MyVariant holds
+            // nothing for the allele under any of its ids, and VEP fails once
+            // the stale answer is in.
+            if (/myvariant\.info\/v1\/variant\/chr7:g\.1171996/.test(key)) return respond({ success: false, error: 'Not Found.' }, 404);
+            if (url.hostname === 'myvariant.info' && String(options.method).toUpperCase() === 'POST') {
+                return respond(new URLSearchParams(String(options.body || '')).get('ids').split(',').map(id => ({ query: id, notfound: true })));
+            }
+            if (/\/vep\/human\/hgvs\/7:g\.1171996/.test(key)) {
+                vepAsked = true;
+                for (let i = 0; i < 6000 && !staleAnswered; i++) await wait(1);
+                return respond({ error: 'Service Unavailable' }, 503);
+            }
+            return undefined;
+        }
+    });
+    assert(staleAnswered, 'the first lookup\'s recoder answered during the second');
+    assertResolved(assert, page, 'chr7:g.117199645_117199647del, after rs113488022');
+    assert.match(page.panel, /You entered\s*chr7:g\.117199645_117199647del/);
+    assert.match(page.variant, /Transcript: NM_000492\.\d+(?: \(MANE Select\))?c\.: c\.1521_1523del/, 'its own recoder rows are still there');
+    assert.doesNotMatch(page.variant, /1799T|BRAF/);
+    assert.doesNotMatch(page.variant, /p\.Phe508del/, '(the recoder\'s rows: MyVariant and VEP contributed none)');
+    console.log('ok rsID lookup: a finished lookup\'s recoder answer does not displace the next one\'s');
 }
 
 console.log('rsID lookup tests passed');

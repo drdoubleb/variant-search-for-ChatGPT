@@ -104,6 +104,8 @@ for (const typed of ['KRAS G12X', 'kras g12x', 'KRAS p.Gly12X', 'KRAS:p.G12X']) 
     assert.match(page.panel, /Resolve nomenclature · Ensembl\s*a stop here takes more than one base change — "X" read as any amino acid/, typed);
     // Nothing is asked about a stop at Gly12, or about an allele nobody named.
     assert.deepEqual(page.api('clinvar-protein').filter(r => !/retmax=/.test(r)), [], typed);
+    // ClinVar's names are consulted for it, once.
+    assert.equal(page.api('clinvar-protein').filter(r => /retmax=/.test(r)).length, 1, typed);
     assert(!page.requests.some(r => /\/vep\//.test(r)), `${typed}: no consequence is asked for an allele nobody named`);
     for (const asked of page.api('pubmed')) assert.match(asked, /term=KRAS G12X&gene=KRAS&variant=G12X(&|$)/, typed);
     assert.deepEqual(page.searches('google.com/search').slice(-2),
@@ -136,6 +138,8 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
         assert.match(page.panel, /Resolve nomenclature · Ensembl\s*3 different nucleotide changes give this protein change, none on record/);
         // It IS a stop that was asked about: the same-protein search stands.
         assert.deepEqual(page.api('clinvar-protein').filter(r => !/retmax=/.test(r)), ['clinvar-protein?gene=KRAS&change=Gly12Ter,G12*']);
+        assert.deepEqual(page.api('clinvar-protein').filter(r => /retmax=/.test(r)), ['clinvar-protein?gene=KRAS&change=G12&retmax=200'],
+            'ClinVar\'s names are consulted once');
         shown.add(page.variant.match(/Codon region \(hg19\): (\S+?)(?=p\.|Gene|Resolved|$)/)?.[1] || page.variant.slice(0, 80));
     }
     assert.equal(shown.size, 1, 'the result does not depend on the order of Ensembl\'s answer');

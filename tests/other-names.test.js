@@ -658,6 +658,32 @@ console.log('ok other names: 5382insC, c.5382insC and the protein-level frameshi
     console.log('ok other names: a protein change several variants share is said to be shared');
 }
 
+// 13b. The allele in hand can be the very one ClinVar knows by the name. Then
+//      there is nothing to look up a second time, and nothing to announce as
+//      a different variant. (ClinVar's answer with the name moved to the
+//      c.1522_1524del record, and MyVariant's record of that allele carrying
+//      that ClinVar id.)
+{
+    const cassette = cassettes.cftrF508delName;
+    const answer = structuredClone(cassette.api['clinvar-protein?gene=CFTR&change=F508del&retmax=200']);
+    for (const variant of answer.variants) {
+        if (variant.variationCount === 1) variant.aliases = variant.id === '4072070' ? ['F508del'] : [];
+    }
+    const twinKey = 'myvariant.info/v1/variant/chr7:g.117199647_117199649del';
+    const twin = { ...cassette.responses[twinKey].body, clinvar: { variant_id: 4072070, gene: { symbol: 'CFTR' } } };
+    const page = await runLookup(cassette, {
+        backend: { 'clinvar-protein': () => answer },
+        route: (url, key, respond) => (key === twinKey ? respond(twin) : undefined)
+    });
+    assertResolved(assert, page, 'CFTR F508del, the allele in hand is the named one');
+    assert.match(page.variant, /c\.: c\.1522_1524del/);
+    assert.match(page.panel, /●Other names · ClinVar\s*ClinVar knows this variant as "F508del"/);
+    assert.equal(page.document.querySelector('.other-name-note'), null, 'not announced as another variant');
+    assert(!page.requests.some(r => /variant_recoder\/human\/NM_000492/.test(r)), 'and not looked up a second time');
+    assert.equal(nameSearches(page).length, 1);
+    console.log('ok other names: the variant in hand being the named one, nothing is run again');
+}
+
 // 14. A substitution MyVariant holds is what a substitution's name means:
 //     ClinVar's names are not consulted for it.
 {

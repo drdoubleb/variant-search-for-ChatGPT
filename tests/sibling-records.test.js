@@ -456,13 +456,28 @@ const rawJson = page => JSON.parse(page.document.getElementById('rawOutput').tex
     assertResolved(assert, noRefSeq, 'BRCA2 c.1084_1085insCA, no RefSeq transcript');
     assert.match(noRefSeq.variant, /Transcript: ENST00000544455\.1c\.: c\.1084_1085insCA/);
     assert.match(noRefSeq.panel, /●Consequences · Ensembl VEP3 transcripts/);
-    // Where the record has no transcript rows of its own, Ensembl's are the answer.
+    // Where the record has no transcript rows of its own, Ensembl's are the
+    // answer: there is no RefSeq row for them to displace. (rs80357906 lands on
+    // a dbSNP-only record; with the reference withheld nothing is added to it.
+    // Ensembl's set answers as the recorded RefSeq one does, on its own
+    // transcript.)
+    const refseqKey = 'grch37.rest.ensembl.org/vep/human/hgvs/17:g.41209082dup?content-type=application/json&hgvs=1&refseq=1&mane=1&canonical=1';
+    const recorded = cassettes.rs80357906.responses[refseqKey].body[0];
+    const ensemblOnly = [{ ...recorded, transcript_consequences: [{ ...recorded.transcript_consequences[0], gene_id: 'ENSG00000012048',
+        transcript_id: 'ENST00000357654', hgvsc: 'ENST00000357654.3:c.5266dup', hgvsp: 'ENSP00000350283.3:p.Gln1756ProfsTer74', canonical: 1 }] }];
+    const sets = [];
     const dbsnpOnly = await runLookup(cassettes.rs80357906, {
-        route: (url, key, respond) => (/\/vep\/human\/hgvs\//.test(key) && /refseq=1/.test(key)
-            ? respond({ error: 'Internal Server Error' }, 500) : undefined),
+        route: (url, key, respond) => {
+            if (!/\/vep\/human\/hgvs\//.test(key)) return undefined;
+            sets.push(/refseq=1/.test(key) ? 'RefSeq' : 'Ensembl');
+            return /refseq=1/.test(key) ? respond({ error: 'Internal Server Error' }, 500) : respond(ensemblOnly);
+        },
         without: [/\/sequence\/region\//]
     });
     assertResolved(assert, dbsnpOnly, 'rs80357906, RefSeq VEP down');
+    assert.equal(sets.at(-1), 'Ensembl', 'VEP fell back to its own transcript set');
+    assert.match(dbsnpOnly.variant, /Transcript: ENST00000357654(?:\.\d+)?c\.: c\.5266dupp\.: p\.Gln1756ProfsTer74/);
+    assert.match(dbsnpOnly.panel, /●Consequences · Ensembl VEP1 transcript/);
     assert.doesNotMatch(dbsnpOnly.panel, /the record's own are shown/);
     console.log('ok sibling records: an Ensembl-only VEP answer does not displace the record\'s RefSeq row');
 }
