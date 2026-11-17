@@ -1373,6 +1373,10 @@ things followed (`proteinNameReading`; measured live, found in review):
 | `KRAS G12*` | `…delinsTCA` in one run, `…delinsTTA` in the next | the codon: *p.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown*, with a link to each |
 | `KRAS G12K` | one of two replacements, likewise by the order of Ensembl's answer | the codon, with both linked |
 
+(The alleles of such a note are listed in one order — sorted — whatever order
+Ensembl gave them in: it changes between calls, and the sentence used to read
+differently from one lookup of the same name to the next.)
+
 **"X".** It is the old one-letter code for a stop — `TP53 R213X` is what ClinVar
 and the literature call p.Arg213Ter — and in HGVS (`Xaa`) and in oncology
 shorthand it is *any* amino acid: "KRAS G12X" is G12C, G12D, G12V and the rest.

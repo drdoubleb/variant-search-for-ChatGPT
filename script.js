@@ -10195,7 +10195,9 @@ const initVariantSearchUi = () => {
                     } else if (reading !== 'allele') {
                         // Not the first of them, as it used to be: the codon, by the
                         // route a name Ensembl cannot resolve takes (below).
-                        proteinNameOpen = { reading, alleles: distinctAlleleSpellings(uniqueCandidates), recordsKnown: candidateRecordsKnown };
+                        // (Listed in one order whatever order Ensembl gave them in: it
+                        // changes between calls, and the note read differently each time.)
+                        proteinNameOpen = { reading, alleles: distinctAlleleSpellings(uniqueCandidates).sort(), recordsKnown: candidateRecordsKnown };
                         LookupProgress.step('recoder', 'empty', reading === 'any-residue'
                             ? 'a stop here takes more than one base change — "X" read as any amino acid'
                             : `${proteinNameOpen.alleles.length} different nucleotide changes give this protein change, `

@@ -131,10 +131,14 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
         assert.match(page.variant, /p\.: p\.Gly12Ter/);
         assert.match(note(page)[0], /^p\.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown: /);
         // One link per allele, each a lookup of its own; the same three whatever the order.
-        assert.deepEqual(noteLinks(page).map(decodeURIComponent).sort(), [
+        // ...and listed in the same order: the sentence does not change from
+        // one call to the next either.
+        assert.deepEqual(noteLinks(page).map(decodeURIComponent), [
             '?variant=chr12:g.25398283_25398285delinsCTA',
             '?variant=chr12:g.25398283_25398285delinsTCA',
-            '?variant=chr12:g.25398283_25398285delinsTTA']);
+            '?variant=chr12:g.25398283_25398285delinsTTA'], String(order));
+        assert.equal(note(page)[0], 'p.Gly12Ter can be any of 3 nucleotide changes and none of them is on record, so no single one is shown: '
+            + 'chr12:g.25398283_25398285delinsCTA, chr12:g.25398283_25398285delinsTCA, chr12:g.25398283_25398285delinsTTA.', String(order));
         assert.match(page.panel, /Resolve nomenclature · Ensembl\s*3 different nucleotide changes give this protein change, none on record/);
         // It IS a stop that was asked about: the same-protein search stands.
         assert.deepEqual(page.api('clinvar-protein').filter(r => !/retmax=/.test(r)), ['clinvar-protein?gene=KRAS&change=Gly12Ter,G12*']);
