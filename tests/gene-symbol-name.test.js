@@ -113,17 +113,25 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
     const report = (symbol, transcripts) => ({ product: { symbol, transcripts: transcripts.map(([accession_version, select_category, ensembl_transcript]) => ({ accession_version, select_category, ensembl_transcript })) } });
     // MANE Select is one transcript with two names; NCBI gives Ensembl's as well.
     const mecp2 = { reports: [report('MECP2', [['NM_001110792.2', 'MANE_SELECT', 'ENST00000453960.7'], ['NM_004992.4', 'MANE_PLUS_CLINICAL', 'ENST00000303391.11'], ['NM_001316337.2'], ['XM_011531166.3']])] };
+    // (`ensembl`: all of them by Ensembl's ids, MANE Select first — the
+    // transcripts a protein-level name may be counted on. See
+    // tests/protein-substitution-alleles.test.js.)
     assert.deepEqual(h.clinicalTranscriptsFromReport(mecp2, 'mecp2'),
-        { select: 'NM_001110792.2', selectEnsembl: 'ENST00000453960.7', plusClinical: ['NM_004992.4'], refseqSelect: '' });
-    const cdkn2a = { reports: [report('CDKN2A', [['NM_000077.6', 'REFSEQ_SELECT'], ['NM_058195.4', 'MANE_PLUS_CLINICAL', 'ENST00000579755.2']])] };
-    assert.deepEqual(h.clinicalTranscriptsFromReport(cdkn2a, 'CDKN2A'), { select: '', selectEnsembl: '', plusClinical: ['NM_058195.4'], refseqSelect: 'NM_000077.6' },
-        'RefSeq Select is not MANE Select, and is kept apart');
+        { select: 'NM_001110792.2', selectEnsembl: 'ENST00000453960.7', plusClinical: ['NM_004992.4'], refseqSelect: '',
+            ensembl: ['ENST00000453960', 'ENST00000303391'] });
+    const cdkn2a = { reports: [report('CDKN2A', [['NM_000077.6', 'REFSEQ_SELECT', 'ENST00000304494.10'], ['NM_058195.4', 'MANE_PLUS_CLINICAL', 'ENST00000579755.2']])] };
+    assert.deepEqual(h.clinicalTranscriptsFromReport(cdkn2a, 'CDKN2A'), { select: '', selectEnsembl: '', plusClinical: ['NM_058195.4'], refseqSelect: 'NM_000077.6',
+        ensembl: ['ENST00000304494', 'ENST00000579755'] },
+    'RefSeq Select is not MANE Select, and is kept apart — but it is the transcript a name is counted on where there is no other');
+    // (Where the gene has a MANE Select transcript, RefSeq's own pick is not one more.)
+    assert.deepEqual(h.clinicalTranscriptsFromReport({ reports: [report('G1', [['NM_1.1', 'MANE_SELECT', 'ENST00000000001.1'],
+        ['NM_2.1', 'REFSEQ_SELECT', 'ENST00000000002.1'], ['NM_3.1', 'MANE_PLUS_CLINICAL', 'ENST00000000001.4']])] }, 'G1').ensembl, ['ENST00000000001']);
     // A symbol search also returns genes that have the symbol as an alias.
     const ttn = { reports: [report('TTR', [['NM_000371.4', 'MANE_SELECT', 'ENST00000237014.8']]), report('TTN', [['NM_001267550.2', 'MANE_SELECT']])] };
-    assert.deepEqual(h.clinicalTranscriptsFromReport(ttn, 'TTN'), { select: 'NM_001267550.2', selectEnsembl: '', plusClinical: [], refseqSelect: '' });
-    assert.deepEqual(h.clinicalTranscriptsFromReport({}, 'NOSUCHGENE'), { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '' });
-    assert.equal(h.clinicalTranscriptsFromReport({ reports: [report('X1', [['NM_1.1', 'MANE_SELECT', '<img onerror=x>']])] }, 'X1').selectEnsembl, '',
-        'only an Ensembl transcript id is taken for one');
+    assert.deepEqual(h.clinicalTranscriptsFromReport(ttn, 'TTN'), { select: 'NM_001267550.2', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [] });
+    assert.deepEqual(h.clinicalTranscriptsFromReport({}, 'NOSUCHGENE'), { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [] });
+    const odd = h.clinicalTranscriptsFromReport({ reports: [report('X1', [['NM_1.1', 'MANE_SELECT', '<img onerror=x>']])] }, 'X1');
+    assert.deepEqual([odd.selectEnsembl, odd.ensembl], ['', []], 'only an Ensembl transcript id is taken for one');
 
     // ── The "(MANE Select)" label: whichever authority names it first ──────
     {
@@ -157,7 +165,8 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
     };
     try {
         assert.deepEqual(await h.fetchClinicalTranscripts('mecp2'),
-            { select: 'NM_001110792.2', selectEnsembl: 'ENST00000453960.7', plusClinical: ['NM_004992.4'], refseqSelect: '' });
+            { select: 'NM_001110792.2', selectEnsembl: 'ENST00000453960.7', plusClinical: ['NM_004992.4'], refseqSelect: '',
+                ensembl: ['ENST00000453960', 'ENST00000303391'] });
         assert.deepEqual(urls, ['https://api.ncbi.nlm.nih.gov/datasets/v2/gene/symbol/MECP2/taxon/9606/product_report']);
         await h.fetchClinicalTranscripts('MECP2');
         assert.equal(urls.length, 1, 'cached per gene');

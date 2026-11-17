@@ -2746,16 +2746,20 @@ function clinicalTranscriptsFromReport(data, gene) {
     // ("TTN" brings TTR first): only the gene of that name counts.
     const product = [].concat(data?.reports || []).map(report => report?.product)
         .find(candidate => String(candidate?.symbol || '').toUpperCase() === wanted);
-    if (!product) return { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '' };
+    if (!product) return { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [] };
     const rows = category => [].concat(product.transcripts || [])
         .filter(t => String(t?.select_category || '').toUpperCase() === category
             && /^NM_\d+\.\d+$/.test(String(t?.accession_version || '')));
     const tagged = category => rows(category).map(t => String(t.accession_version));
     const select = tagged('MANE_SELECT')[0] || '';
     // MANE Select is one transcript with two names; NCBI gives Ensembl's too.
-    const ensembl = String((rows('MANE_SELECT')[0] || {}).ensembl_transcript || '');
-    return { select, selectEnsembl: /^ENST\d+(?:\.\d+)?$/.test(ensembl) ? ensembl : '',
-        plusClinical: tagged('MANE_PLUS_CLINICAL'), refseqSelect: select ? '' : (tagged('REFSEQ_SELECT')[0] || '') };
+    const ensemblOf = row => (/^ENST\d+(?:\.\d+)?$/.test(String((row || {}).ensembl_transcript || '')) ? String(row.ensembl_transcript) : '');
+    // (All of them by Ensembl's names, for records that know no other: see
+    // proteinSubstitutionAlleles.)
+    const standard = rows('MANE_SELECT').concat(select ? [] : rows('REFSEQ_SELECT'), rows('MANE_PLUS_CLINICAL'));
+    return { select, selectEnsembl: ensemblOf(rows('MANE_SELECT')[0]),
+        plusClinical: tagged('MANE_PLUS_CLINICAL'), refseqSelect: select ? '' : (tagged('REFSEQ_SELECT')[0] || ''),
+        ensembl: Array.from(new Set(standard.map(ensemblOf).filter(Boolean).map(id => id.replace(/\.\d+$/, '')))) };
 }
 async function fetchClinicalTranscripts(gene) {
     const symbol = String(gene || '').trim().toUpperCase();
@@ -8040,9 +8044,20 @@ function rankAllelesOnRecord(entries) {
     return { ranked: ranked.map(r => r.entry), tied };
 }
 
+// The genetic code (nuclear): codon -> amino acid, '*' for a stop.
+const GENETIC_CODE = (() => {
+    const bases = 'TCAG';
+    const aminoAcids = 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG';
+    const table = {};
+    let i = 0;
+    for (const a of bases) for (const b of bases) for (const c of bases) table[a + b + c] = aminoAcids[i++];
+    return table;
+})();
+const COMPLEMENT_BASE = { A: 'T', C: 'G', G: 'C', T: 'A' };
+
 /*
  * The single-base changes that give a protein substitution named on a gene
- * symbol — from MyVariant alone.
+ * symbol — from MyVariant's records of the residue, and the genetic code.
  *
  * Only Ensembl's recoder turned "KRAS p.Tyr64Ter" into alleles, and it is the
  * slowest thing this page asks: 3 to 17 s per name on the day this was
@@ -8050,93 +8065,179 @@ function rankAllelesOnRecord(entries) {
  * sat out four attempts — about 50 s — and came back with the codon alone.
  *
  * dbNSFP, which MyVariant carries, lists every non-synonymous single-base
- * change in the genome with the residue it changes on each transcript. Asked
- * for the residue it answers in half a second, and what it lists are records.
- * For 30 names checked against Ensembl the single-base alleles were the same
- * (Ensembl adds, for a gene whose transcripts number residues differently,
- * multi-base changes on the other transcripts: MECP2 T158M came with a
- * two-base change on the one where residue 158 is another threonine).
+ * change in the genome, with the residue it changes on each transcript, the
+ * codon it is in and which base of it. Asked for the residue it answers in
+ * half a second. Three things are read from its records:
+ *
+ *   1. Which codon the name means. A record counts where the residue has that
+ *      number on a transcript the name may be counted on — MANE Select or
+ *      MANE Plus Clinical of the gene named (`standard`; MECP2's T158M and
+ *      R306C are on the latter). The number on ANY transcript used to count,
+ *      though the record says which transcript each number is on: "TP53
+ *      R202X" came out as p.Arg213Ter (which a fragment, ENST00000615910,
+ *      numbers 202), "TP53 W53G" as p.Trp146Gly, "PDGFRA V367A" as
+ *      p.Val607Ala (367 on a transcript of another gene the record is shared
+ *      with). Found in review.
+ *   2. Where its bases are. Each such record places one: its own position,
+ *      which base of the codon it is, and — its reference base against the
+ *      codon's — the strand.
+ *   3. The reference codon. Which changes of it give the amino acid asked for
+ *      then follows from the genetic code — not from what is listed. dbNSFP
+ *      has no synonymous changes, and a record in two genes' reading frames
+ *      names one of them only, so "the residue is listed, and no record gives
+ *      this" proved nothing: "KRAS G12G" came with "No single-base change
+ *      gives p.Gly12Gly", which three do.
+ *
+ * An allele is given only at a base of the codon that a record places. A base
+ * none does — the third, wherever every change of it is silent — is not
+ * assumed to follow the second: an intron may lie between.
+ *
+ * Mitochondrial genes are left to Ensembl: MyVariant files dbNSFP's chrM
+ * records by another reference's positions than the rest of this page uses
+ * (m.11778G>A, MT-ND4 R340H, is "chrMT:g.11779G>A" there), and the code is
+ * not this one.
  *
  * `hits` is MyVariant's answer for the residue: gene, reference amino acid,
- * position — any new amino acid. Returns { alleles, residueKnown, codon }:
- *   alleles       the ids that give this change, each a single-base change
- *   residueKnown  dbNSFP has this residue of this gene under this number.
- *                 Only then does an empty list mean that no single base
- *                 change gives the protein change (p.Gly12Ter takes two);
- *                 otherwise the name is not in dbNSFP's numbering, and
- *                 nothing is concluded from it.
- *   codon         where the residue's codon lies, { chrom, start, end,
- *                 transcript }, when the records agree on one (see
- *                 codonFromResidueRecords); null otherwise.
+ * position — any new amino acid. Returns null when the records cannot say
+ * (the gene's standard transcripts are not known; a change that gives the
+ * amino acid lies at a base no record places; the records contradict the
+ * code), and otherwise { alleles, residueKnown, codon }:
+ *   alleles       the ids of the single-base changes that give this change
+ *   residueKnown  the residue has this number on a standard transcript. Only
+ *                 then does an empty list mean that no single base change
+ *                 gives the protein change (p.Gly12Ter takes two); otherwise
+ *                 the name is not in that numbering, and nothing is
+ *                 concluded from it.
+ *   codon         { chrom, start, end, bases, transcript }: the bases of the
+ *                 codon that records place — all three, or the first two
+ *                 (`bases`). null for a number that is two codons (MECP2's
+ *                 306 on its two transcripts) and for a codon an intron
+ *                 splits.
  */
-function proteinSubstitutionAlleles(hits, gene, change) {
+function proteinSubstitutionAlleles(hits, gene, change, standard) {
     const symbol = String(gene || '').toUpperCase();
     // (dbNSFP writes a stop as X.)
     const code = aa => (aa === '*' ? 'X' : String(aa === undefined || aa === null ? '' : aa).toUpperCase());
     const ref = code(change && change.ref);
     const alt = code(change && change.alt);
     const pos = Number(change && change.pos);
-    // dbnsfp.aa is one object — or several, where the variant lies in more
-    // than one reading frame: MECP2's R306C is A301V in another. The residue
-    // has to be right within ONE of them; MyVariant's search matches across.
-    const frames = hit => [].concat((hit && hit.dbnsfp && hit.dbnsfp.aa) || []).filter(aa => aa && typeof aa === 'object');
-    const atResidue = aa => code(aa.ref) === ref && [].concat(aa.pos === undefined ? [] : aa.pos).map(Number).includes(pos);
-    const inGene = hit => [].concat((hit && hit.dbnsfp && hit.dbnsfp.genename) || []).some(g => String(g).toUpperCase() === symbol);
-    const residue = (hits || []).filter(hit => inGene(hit) && frames(hit).some(atResidue));
-    const alleles = residue
-        .filter(hit => frames(hit).some(aa => atResidue(aa) && [].concat(aa.alt === undefined ? [] : aa.alt).map(code).includes(alt)))
-        .map(hit => String(hit._id || ''))
-        .filter(id => /^chr(?:[0-9]{1,2}|X|Y|MT):g\.\d+[ACGT]>[ACGT]$/.test(id));
-    return { alleles: Array.from(new Set(alleles)).sort(), residueKnown: residue.length > 0,
-        codon: codonFromResidueRecords(residue, atResidue, pos) };
-}
+    const list = value => [].concat(value === undefined || value === null ? [] : value);
+    const bare = id => String(id || '').toUpperCase().replace(/\.\d+$/, '');
+    const transcripts = new Set(list(standard).map(bare).filter(id => /^ENST\d+$/.test(id)));
+    if (!transcripts.size) return null;
+    const atResidue = aa => code(aa.ref) === ref && list(aa.pos).map(Number).includes(pos);
 
-/*
- * The codon of a residue, from the single-base changes recorded at it.
- *
- * Each record says which base of the codon it changes (codonpos 1 to 3), so two
- * records at different bases give the codon's place and its strand — KRAS
- * Gly12: base 1 at 25398285 and base 2 at 25398284 make it 25398283-25398285,
- * read backwards. That is the same span Ensembl's translation map gives, and
- * it needs no Ensembl: "KRAS G12K", a change of two bases, ended in an error
- * when Ensembl could neither name the alleles nor place the codon.
- *
- * Only where the records agree on one codon. A number that is two codons —
- * TP53's residue 125 on two of its transcripts, MECP2's 306 — or a codon
- * split by an intron is not guessed at: null.
- */
-function codonFromResidueRecords(records, atResidue, residuePos) {
-    const points = [];
-    const transcripts = [];
-    for (const hit of records || []) {
-        const id = String((hit && hit._id) || '').match(/^(chr(?:[0-9]{1,2}|X|Y|MT)):g\.(\d+)[ACGT]>[ACGT]$/);
-        if (!id) continue;
-        for (const aa of [].concat((hit.dbnsfp && hit.dbnsfp.aa) || [])) {
-            if (!aa || typeof aa !== 'object' || !atResidue(aa)) continue;
-            const positions = [].concat(aa.pos === undefined ? [] : aa.pos).map(Number);
-            const codonPositions = [].concat(aa.codonpos === undefined ? [] : aa.codonpos).map(Number);
-            const ids = [].concat((hit.dbnsfp.ensembl && hit.dbnsfp.ensembl.transcriptid) || []);
+    // What each record at the residue says of its codon: on a standard
+    // transcript (`placed`), or on a transcript the record does not name
+    // (`unnamed`).
+    const placed = [];
+    const unnamed = [];
+    let residueKnown = false;
+    for (const hit of hits || []) {
+        // (Nuclear chromosomes only: see above.)
+        const id = String((hit && hit._id) || '').match(/^(chr(?:[0-9]{1,2}|X|Y)):g\.(\d+)([ACGT])>[ACGT]$/);
+        const dbnsfp = hit && hit.dbnsfp;
+        if (!id || !dbnsfp) continue;
+        // dbnsfp.aa is one object — or several, where the variant lies in more
+        // than one reading frame: MECP2's R306C is A301V in another. The
+        // residue has to be right within ONE of them; MyVariant's search
+        // matches across.
+        list(dbnsfp.aa).filter(aa => aa && typeof aa === 'object').forEach((aa, frame) => {
+            if (!atResidue(aa)) return;
+            const positions = list(aa.pos).map(Number);
+            // (codonpos and refcodon are listed per transcript, like pos; or once for all.)
+            const per = (values, i) => (values.length === positions.length ? values[i] : values[0]);
+            const reading = (i) => {
+                const codonpos = Number(per(list(aa.codonpos), i));
+                const refcodon = String(per(list(aa.refcodon), i) || '').toUpperCase();
+                if (![1, 2, 3].includes(codonpos) || !/^[ACGT]{3}$/.test(refcodon)) return null;
+                const base = refcodon[codonpos - 1];
+                const strand = base === id[3] ? 1 : (base === COMPLEMENT_BASE[id[3]] ? -1 : 0);
+                return strand ? { chrom: id[1], strand, refcodon, codonpos, position: Number(id[2]),
+                    alt: list(aa.alt).map(code).includes(alt) ? String(hit._id) : '' } : null;
+            };
+            // The transcripts and genes a record names are those of its FIRST
+            // amino-acid change, one for one with its positions.
+            const ids = frame === 0 && dbnsfp.ensembl && !Array.isArray(dbnsfp.ensembl) ? list(dbnsfp.ensembl.transcriptid).map(bare) : [];
+            const genes = list(dbnsfp.genename).map(name => String(name).toUpperCase());
+            const named = frame === 0 && ids.length === positions.length && (genes.length === ids.length || genes.length === 1);
             positions.forEach((position, i) => {
-                if (position !== residuePos) return;
-                // (codonpos is listed per transcript, like pos; or once for all.)
-                const codonpos = codonPositions.length === positions.length ? codonPositions[i] : codonPositions[0];
-                if (![1, 2, 3].includes(codonpos)) return;
-                points.push({ chrom: id[1], pos: Number(id[2]), codonpos });
-                if (ids.length === positions.length && /^ENST\d+$/.test(String(ids[i]))) transcripts.push(String(ids[i]));
+                if (position !== pos) return;
+                if (!named) {
+                    unnamed.push(reading(i));
+                } else if (transcripts.has(ids[i]) && (genes.length === 1 ? genes[0] : genes[i]) === symbol) {
+                    residueKnown = true;
+                    placed.push({ ...reading(i), transcript: ids[i], read: Boolean(reading(i)) });
+                }
             });
+        });
+    }
+    if (!residueKnown) return { alleles: [], residueKnown: false, codon: null };
+
+    // One codon per standard transcript (MANE Select first); the same one for
+    // both, as a rule.
+    const codons = new Map();
+    for (const transcript of Array.from(transcripts).filter(id => placed.some(entry => entry.transcript === id))) {
+        const readings = placed.filter(entry => entry.transcript === transcript && entry.read);
+        if (!readings.length) return null;
+        const { chrom, strand, refcodon } = readings[0];
+        const bases = {};
+        for (const entry of readings) {
+            if (entry.chrom !== chrom || entry.strand !== strand || entry.refcodon !== refcodon) return null;
+            if (bases[entry.codonpos] !== undefined && bases[entry.codonpos] !== entry.position) return null;
+            bases[entry.codonpos] = entry.position;
+        }
+        const key = JSON.stringify([chrom, strand, refcodon, bases]);
+        if (!codons.has(key)) codons.set(key, { chrom, strand, refcodon, bases, transcript, listed: [] });
+        codons.get(key).listed.push(...readings.map(entry => entry.alt).filter(Boolean));
+    }
+    // A record that names no transcript places a base of a codon it fits:
+    // same strand, same reference codon, and next to a base already placed.
+    for (const entry of unnamed.filter(Boolean)) {
+        for (const codon of codons.values()) {
+            if (entry.chrom !== codon.chrom || entry.strand !== codon.strand || entry.refcodon !== codon.refcodon) continue;
+            const fits = [1, 2, 3].some(c => codon.bases[c] !== undefined
+                && entry.position === codon.bases[c] + codon.strand * (entry.codonpos - c));
+            if (!fits || (codon.bases[entry.codonpos] !== undefined && codon.bases[entry.codonpos] !== entry.position)) continue;
+            codon.bases[entry.codonpos] = entry.position;
+            if (entry.alt) codon.listed.push(entry.alt);
         }
     }
-    if (!points.length || new Set(points.map(pt => pt.chrom)).size !== 1) return null;
-    // One record fits either strand; two bases of the codon say which.
-    if (new Set(points.map(pt => pt.codonpos)).size < 2) return null;
-    for (const strand of [1, -1]) {
-        const firstBases = new Set(points.map(pt => pt.pos - strand * (pt.codonpos - 1)));
-        if (firstBases.size !== 1) continue;
-        const first = [...firstBases][0];
-        return { chrom: points[0].chrom, start: strand === 1 ? first : first - 2, end: strand === 1 ? first + 2 : first,
-            transcript: Array.from(new Set(transcripts)).sort()[0] || '' };
+
+    const alleles = new Set();
+    for (const codon of codons.values()) {
+        if (code(GENETIC_CODE[codon.refcodon]) !== ref) return null;
+        const mine = new Set();
+        for (const c of [1, 2, 3]) {
+            for (const base of 'ACGT') {
+                if (base === codon.refcodon[c - 1]) continue;
+                const changed = codon.refcodon.slice(0, c - 1) + base + codon.refcodon.slice(c);
+                if (code(GENETIC_CODE[changed]) !== alt) continue;
+                // A change that gives it, at a base no record places: not known.
+                if (codon.bases[c] === undefined) return null;
+                const genomic = letter => (codon.strand === 1 ? letter : COMPLEMENT_BASE[letter]);
+                mine.add(`${codon.chrom}:g.${codon.bases[c]}${genomic(codon.refcodon[c - 1])}>${genomic(base)}`);
+            }
+        }
+        // (What dbNSFP lists for the change must be among them.)
+        if (codon.listed.some(id => !mine.has(id))) return null;
+        mine.forEach(id => alleles.add(id));
     }
-    return null;
+
+    let codon = null;
+    if (codons.size === 1) {
+        const only = Array.from(codons.values())[0];
+        const at = [1, 2, 3].filter(c => only.bases[c] !== undefined);
+        const first = only.bases[at[0]] - only.strand * (at[0] - 1);
+        // (Bases an intron separates are not one span.)
+        if (at.every(c => only.bases[c] === first + only.strand * (c - 1))) {
+            const positions = at.map(c => only.bases[c]);
+            const start = Math.min(...positions);
+            const end = Math.max(...positions);
+            codon = { chrom: only.chrom, start, end, bases: end - start + 1, transcript: only.transcript };
+        }
+    }
+    return { alleles: Array.from(alleles).sort(), residueKnown: true, codon };
 }
 
 // What to ask MyVariant for that: every non-synonymous single-base change at
@@ -8144,27 +8245,46 @@ function codonFromResidueRecords(records, atResidue, residuePos) {
 function proteinResidueQuery(gene, change) {
     const symbol = String(gene || '').trim();
     const ref = change && (change.ref === '*' ? 'X' : String(change.ref || '').toUpperCase());
-    if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(symbol) || !/^[A-Z]$/.test(ref || '')
+    if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(symbol) || /^MT-/i.test(symbol) || !/^[A-Z]$/.test(ref || '')
         || !change || !Number.isInteger(change.pos) || change.pos < 1) return '';
     return `dbnsfp.genename:${symbol} AND dbnsfp.aa.ref:${ref} AND dbnsfp.aa.pos:${change.pos}`;
 }
 
+/*
+ * The transcripts a protein-level name typed on `gene` may be counted on, as
+ * Ensembl ids: MANE Select — RefSeq Select where the gene has no transcript so
+ * tagged — and MANE Plus Clinical (see fetchClinicalTranscripts). [] for a gene
+ * that has none; null when NCBI could not say in time.
+ */
+async function fetchStandardEnsemblTranscripts(gene, fetchClinical = fetchClinicalTranscripts) {
+    try {
+        const clinical = await settledWithin(Promise.resolve().then(() => fetchClinical(gene)),
+            API_TIMEOUT_MS.proteinAlleles, 'NCBI did not list the gene\'s transcripts in time');
+        return clinical ? clinical.ensembl : null;
+    } catch {
+        return null;
+    }
+}
+
 // Never throws to no purpose: a failed request is "not known", which leaves
 // the name to Ensembl as before.
-async function fetchProteinSubstitutionAlleles(gene, change) {
+async function fetchProteinSubstitutionAlleles(gene, change, fetchStandard = fetchStandardEnsemblTranscripts) {
     const q = proteinResidueQuery(gene, change);
     if (!q) return null;
     const url = `https://myvariant.info/v1/query?q=${encodeURIComponent(q)}`
-        + '&fields=dbnsfp.genename,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos,dbnsfp.aa.codonpos,dbnsfp.ensembl.transcriptid&size=60';
-    const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.proteinAlleles);
-    if (!response.ok) return null;
+        + '&fields=dbnsfp.genename,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos,dbnsfp.aa.codonpos,dbnsfp.aa.refcodon,dbnsfp.ensembl.transcriptid&size=60';
+    const [response, standard] = await Promise.all([
+        fetchWithTimeout(url, {}, API_TIMEOUT_MS.proteinAlleles),
+        fetchStandard(gene)
+    ]);
+    if (!response.ok || !standard) return null;
     const data = await response.json();
-    // A list cut short is not a list: one allele of two would then stand as
-    // "the" change. (Nine single-base changes a codon; over 38 residues of
+    // A list cut short is not a list: a base of the codon may be among what
+    // was left out. (Nine single-base changes a codon; over 38 residues of
     // genes with many transcripts the longest answer was 20 records.)
     const hits = (data && Array.isArray(data.hits)) ? data.hits : [];
     if (Number(data && data.total) > hits.length) return null;
-    return proteinSubstitutionAlleles(hits, gene, change);
+    return proteinSubstitutionAlleles(hits, gene, change, standard);
 }
 
 // Those alleles in the shape the recoder's answer has, for the code that turns
@@ -10758,11 +10878,16 @@ const initVariantSearchUi = () => {
                         codonRegion = await resolveProteinCodonRegion(geneForCodon, residues.start, residues.end);
                         if (!isCurrentSearch()) return;
                         // Ensembl not placing it either: the residue's own records
-                        // say where its codon is (see codonFromResidueRecords).
+                        // say where its codon is (see proteinSubstitutionAlleles) —
+                        // as much of it as they place. A base none of them is at
+                        // is not assumed to lie next to the others.
                         if (!codonRegion && residueCodon && residues.start === residueCodon.residue && residues.end === residueCodon.residue) {
                             codonRegion = { chrom: residueCodon.chrom, start: residueCodon.start, end: residueCodon.end,
-                                transcript: residueCodon.transcript, protein: '' };
-                            LookupProgress.note('parse', 'codon placed from MyVariant\'s records of the residue — Ensembl did not answer');
+                                transcript: residueCodon.transcript, protein: '', bases: residueCodon.bases };
+                            LookupProgress.note('parse', residueCodon.bases < 3
+                                ? `${residueCodon.bases} of the codon's three bases placed from MyVariant's records of the residue `
+                                    + `(none places the other${residueCodon.bases === 2 ? '' : 's'}) — Ensembl did not answer`
+                                : 'codon placed from MyVariant\'s records of the residue — Ensembl did not answer');
                         }
                     }
                     if (!codonRegion) {
@@ -10783,6 +10908,9 @@ const initVariantSearchUi = () => {
                         residueEnd: residues.end,
                         transcript: codonRegion.transcript,
                         protein: codonRegion.protein,
+                        // (How many of the codon's bases the span holds, where it
+                        // is not all three: see residueCodon.)
+                        placedBases: codonRegion.bases && codonRegion.bases < 3 ? codonRegion.bases : 0,
                         open: proteinNameOpen
                     };
                     annotation = { _id: query };
@@ -11413,7 +11541,11 @@ const initVariantSearchUi = () => {
                             ? `–${codonOnlyResolutionGlobal.residueEnd}` : '')
                         + `${codonOnlyResolutionGlobal.transcript ? ` on ${codonOnlyResolutionGlobal.transcript}` : ''} only. Protein notation does not determine the`
                         + ' nucleotide change, so allele-based results (gnomAD, SpliceAI, an exact ClinVar record)'
-                        + ' are unavailable — enter the c. or g. notation for those.';
+                        + ' are unavailable — enter the c. or g. notation for those.'
+                        + (codonOnlyResolutionGlobal.placedBases
+                            ? ` The region is ${codonOnlyResolutionGlobal.placedBases === 1 ? 'the one base' : `the ${codonOnlyResolutionGlobal.placedBases} bases`}`
+                                + ' of the codon that MyVariant\'s records place: Ensembl, which maps the whole codon, did not answer.'
+                            : '');
                     content.appendChild(codonNote);
                 } else {
                     content.appendChild(makeLine('g.', gVariant));
@@ -14022,7 +14154,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars,
         isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
-        proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, codonFromResidueRecords,
+        proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,
