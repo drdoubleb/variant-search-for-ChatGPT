@@ -8296,6 +8296,30 @@ function recoderShapedFromAlleles(query, alleles) {
     return data;
 }
 
+// What the page shows and passes on as "Ensembl's recoder result": Ensembl's
+// own answer, or — where something stands in its place — a line saying whose
+// it is. The stand-ins have the answer's shape, and were shown under Ensembl's
+// name. (Found in review.)
+function ensemblRecoderAnswer(data) {
+    return data && !data.__fromRecords && !data.__vsFallback ? data : null;
+}
+function recoderPaneText(used, ensembl) {
+    const own = ensemblRecoderAnswer(used) || ensemblRecoderAnswer(ensembl);
+    try {
+        if (own) return JSON.stringify(own, null, 2);
+        if (used && used.__fromRecords) {
+            return 'Ensembl\'s recoder was not waited for. MyVariant lists the single-base changes that give this protein change:\n'
+                + JSON.stringify(Object.keys(used[0] || {}), null, 2);
+        }
+        if (used && used.__vsFallback) {
+            return 'Ensembl\'s recoder had not answered. The variant was placed by NCBI Variation Services:\n' + JSON.stringify(used, null, 2);
+        }
+    } catch {
+        // (nothing to show)
+    }
+    return '';
+}
+
 // Query MyVariant.info by rsID or other variant identifier. Returns the best matching hit when possible.
 async function queryMyVariantById(identifier, expectedGenomic = '') {
     return (await searchMyVariant(identifier, expectedGenomic))[0] || null;
@@ -8927,6 +8951,13 @@ const initVariantSearchUi = () => {
         alterationTypeGlobal = null;
         isGeneOnlyMode = false;
         codonOnlyResolutionGlobal = null;
+        // The recoder's last answer is this lookup's own or nobody's. One that
+        // came in after the previous lookup had finished stayed here, and the
+        // same name looked up again took it for its own being in hand — then
+        // waited for the call it had just made: 49 s for the second "KRAS
+        // Y64*" on a day Ensembl was not answering, where the first took none.
+        // (Found in review.)
+        lastRecoderResult = { query: null, data: null, error: null };
 
         // Normalise user input to improve variant parsing. Accept inputs like
         // "BRAF V600E", "braf:p.v600e", "BRAF:V600E" etc. by converting them
@@ -10326,6 +10357,7 @@ const initVariantSearchUi = () => {
                     // order, so the outcome matches the old sequential scan minus the
                     // serial MyVariant round-trips.
                     let candidateRecordsKnown = true;
+                    const candidatesUnasked = [];
                     const candidateAnns = await Promise.all(uniqueCandidates.map(async (cand) => {
                         try {
                             const fetched = await fetchRecordForAllele(cand);
@@ -10334,7 +10366,10 @@ const initVariantSearchUi = () => {
                         } catch (candErr) {
                             console.log('[DEBUG] Annotation fetch error for candidate', cand);
                             // "No record" is an answer; anything else is not.
-                            if (!candErr || !candErr.notFound) candidateRecordsKnown = false;
+                            if (!candErr || !candErr.notFound) {
+                                candidateRecordsKnown = false;
+                                candidatesUnasked.push(cand);
+                            }
                             return null;
                         }
                     }));
@@ -10378,6 +10413,28 @@ const initVariantSearchUi = () => {
                         }
                         selectedAnn = chosen.record;
                         selectedVar = chosen.id;
+                        /*
+                         * ...and unless MyVariant could not be asked about another
+                         * of its alleles. The one that did come with a record was
+                         * then shown as THE variant, with nothing said: "KRAS Y64*"
+                         * was c.192C>G or c.192C>A according to which of the two
+                         * requests had failed. It is still shown — it is on record —
+                         * but the card names the alleles nobody could be asked
+                         * about. (Found in review.)
+                         */
+                        if (isProteinVariant && !/c\./i.test(query) && candidatesUnasked.length) {
+                            const alleleOf = id => (candidateAlleleIndex.has(id) ? candidateAlleleIndex.get(id) : id);
+                            const withRecord = new Set(uniqueCandidates.filter((cand, i) => candidateAnns[i]).map(alleleOf));
+                            const unasked = new Map();
+                            for (const id of candidatesUnasked) {
+                                if (!withRecord.has(alleleOf(id)) && !unasked.has(alleleOf(id))) unasked.set(alleleOf(id), id);
+                            }
+                            if (unasked.size) {
+                                allelesOnRecord = { ...(allelesOnRecord || { others: [], tied: false }), unasked: Array.from(unasked.values()).sort() };
+                                LookupProgress.note('recoder', `MyVariant could not be asked about ${unasked.size === 1 ? 'another allele' : `${unasked.size} other alleles`} `
+                                    + `that give${unasked.size === 1 ? 's' : ''} this protein change — showing ${chosen.id}, which is on record`);
+                            }
+                        }
                     }
                     // The recoder can resolve an exact HGVS expression even when
                     // MyVariant omits that transcript's annotation. Its mapped
@@ -10452,6 +10509,10 @@ const initVariantSearchUi = () => {
                     // notation rather than echoing the original non-genomic query.
                     if (uniqueCandidates && uniqueCandidates.length > 0) {
                         gVariant = uniqueCandidates[0];
+                        // (MyVariant not answering is not MyVariant having nothing.)
+                        if (!candidateRecordsKnown) {
+                            LookupProgress.step('myvariant', 'warn', 'could not be asked for a record of this allele — it is shown without one');
+                        }
                     }
                     }
                     // The adopted candidate has to be proven the same allele as a
@@ -10476,7 +10537,17 @@ const initVariantSearchUi = () => {
                         // ignore errors during extraction
                     }
                 }
-                if (transcriptsFromRecoder && transcriptsFromRecoder.length > 0) {
+                // ...or the allele is known all the same: MyVariant listed it as the
+                // single-base change that gives the protein change (see
+                // proteinSubstitutionAlleles), and has no record of it — or could
+                // not be asked for one. That list has no transcript rows; VEP
+                // supplies them. Without this, "KRAS Q61X" with the allele's
+                // record unfetchable came out as the codon and "which nucleotide
+                // change a stop here would be could not be looked up" — after it
+                // had been. (Found in review.)
+                const listedAllele = Boolean(allelesFromRecords) && recoderData === allelesFromRecords
+                    && candidateVariants.length === 1 && gVariant === candidateVariants[0] && isGenomicVariant(gVariant);
+                if ((transcriptsFromRecoder && transcriptsFromRecoder.length > 0) || listedAllele) {
                     /*
                      * At this point the variant_recoder successfully returned transcript‑level cDNA/protein
                      * annotations but we were unable to retrieve a genomic annotation from MyVariant.info.
@@ -10861,6 +10932,11 @@ const initVariantSearchUi = () => {
                     let geneForCodon = geneHintGlobal
                         || (query.match(/^([A-Za-z][A-Za-z0-9-]*)\s*:/) || [])[1]
                         || '';
+                    // (An Ensembl id without its version reads like a symbol. It
+                    // is not one: "ENSP00000256078:p.Gly12Ter" came out as "Gene:
+                    // ENSP00000256078", and every gene-level source was asked
+                    // about that. Found in review.)
+                    if (/^(?:ENS[GPT]\d|LRG_?\d)/i.test(geneForCodon) || isChromosomeLikeGeneSymbol(geneForCodon)) geneForCodon = '';
                     let codonRegion = null;
                     if (residues && accessionTranslation) {
                         // On the accession's own protein, and its gene from whoever
@@ -11552,25 +11628,39 @@ const initVariantSearchUi = () => {
                     if (typedX) content.appendChild(stopReadingNote());
                     const sharedNote = sharedProteinChangeNote();
                     if (sharedNote) content.appendChild(sharedNote);
-                    if (allelesOnRecord && allelesOnRecord.others.length) {
+                    if (allelesOnRecord && (allelesOnRecord.others.length || (allelesOnRecord.unasked || []).length)) {
                         // A protein change does not say which allele; MyVariant holds
                         // several. Which one is shown is a choice made for the user.
-                        const { others, tied } = allelesOnRecord;
+                        const { others, tied, unasked = [] } = allelesOnRecord;
                         const typed = (query.match(/p\.[^\s:]+/i) || [])[0] || 'This protein change';
                         const alleleNote = document.createElement('span');
                         alleleNote.className = 'protein-alleles-note';
                         alleleNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
-                        alleleNote.appendChild(document.createTextNode(`${typed} is ${others.length + 1} alleles on record. `
-                            + (tied ? 'Nothing tells them apart; this is one of them, ' : 'This is the best documented one; ')
-                            + `the other${others.length === 1 ? ' is' : 's are'} `));
-                        others.slice(0, 4).forEach((id, i) => {
-                            if (i) alleleNote.appendChild(document.createTextNode(', '));
-                            const link = document.createElement('a');
-                            link.setAttribute('href', `?variant=${encodeURIComponent(id)}`);
-                            link.textContent = id;
-                            alleleNote.appendChild(link);
-                        });
-                        alleleNote.appendChild(document.createTextNode(others.length > 4 ? ', …' : '.'));
+                        const listAlleles = (ids) => {
+                            ids.slice(0, 4).forEach((id, i) => {
+                                if (i) alleleNote.appendChild(document.createTextNode(', '));
+                                const link = document.createElement('a');
+                                link.setAttribute('href', `?variant=${encodeURIComponent(id)}`);
+                                link.textContent = id;
+                                alleleNote.appendChild(link);
+                            });
+                            alleleNote.appendChild(document.createTextNode(ids.length > 4 ? ', …' : '.'));
+                        };
+                        if (others.length) {
+                            alleleNote.appendChild(document.createTextNode(`${typed} is ${others.length + 1} alleles on record. `
+                                + (tied ? 'Nothing tells them apart; this is one of them, ' : 'This is the best documented one; ')
+                                + `the other${others.length === 1 ? ' is' : 's are'} `));
+                            listAlleles(others);
+                        }
+                        // (Alleles MyVariant could not be asked about: one of them
+                        // may be on record too, and better documented.)
+                        if (unasked.length) {
+                            alleleNote.appendChild(document.createTextNode(others.length
+                                ? ` MyVariant could not be asked about ${unasked.length === 1 ? 'a further one' : 'further ones'}: `
+                                : `${typed} can be ${unasked.length + 1} nucleotide changes. This one is on record; MyVariant could not be asked about `
+                                    + `the other${unasked.length === 1 ? '' : 's'}, which may be better documented: `));
+                            listAlleles(unasked);
+                        }
                         content.appendChild(alleleNote);
                     }
                     if (rsidAlleles.length > 1) {
@@ -14027,7 +14117,9 @@ const initVariantSearchUi = () => {
                             }
                             return Object.keys(trimmed).length > 0 ? trimmed : null;
                         })(),
-                        ensembl_recoder: typeof recoderData !== 'undefined' ? recoderData : null
+                        // (Ensembl's own answer only: see ensemblRecoderAnswer.)
+                        ensembl_recoder: (typeof recoderData !== 'undefined' ? ensemblRecoderAnswer(recoderData) : null)
+                            || (lastRecoderResult.query === query ? ensemblRecoderAnswer(lastRecoderResult.data) : null)
                     };
                 }
             });
@@ -14038,16 +14130,10 @@ const initVariantSearchUi = () => {
             detailsContainer.classList.add('hidden');
             // Raw output and result section visibility
             rawOutput.textContent = JSON.stringify(annotation, null, 2);
-            // Populate Ensembl output with the raw variant recoder response. If none exists (e.g. recoder failed), clear it.
-            if (typeof recoderData !== 'undefined' && recoderData) {
-                try {
-                    ensemblOutput.textContent = JSON.stringify(recoderData, null, 2);
-                } catch {
-                    ensemblOutput.textContent = '';
-                }
-            } else {
-                ensemblOutput.textContent = '';
-            }
+            // Populate Ensembl output with the raw variant recoder response — or say
+            // what stood in for it. If neither exists (e.g. recoder failed), clear it.
+            ensemblOutput.textContent = recoderPaneText(typeof recoderData !== 'undefined' ? recoderData : null,
+                lastRecoderResult.query === query ? lastRecoderResult.data : null);
             resultSection.classList.remove('hidden');
         } catch (err) {
             // A stale run's failure must not overwrite the status/progress panel
@@ -14155,6 +14241,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
+        ensemblRecoderAnswer, recoderPaneText,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,

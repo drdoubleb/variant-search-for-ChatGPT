@@ -483,6 +483,29 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
         assert.deepEqual([...two.document.querySelectorAll('.protein-alleles-note')].map(el => el.textContent),
             ['p.Tyr64Ter is 2 alleles on record. This is the best documented one; the other is chr12:g.25380266G>T.'], String(order));
     }
+    // The same on Ensembl's own id for the protein — which, written without
+    // its version, reads like a gene symbol. It is not one: the card said
+    // "Gene: ENSP00000256078", and ClinVar's names, CIViC, PubMed and the MANE
+    // lookup were asked about a gene of that name. (Found in review. Ensembl's
+    // answers below are the recorded one for the RefSeq accession, and what it
+    // says of its protein and transcript.)
+    for (const typed of ['ENSP00000256078:p.Gly12Ter', 'ENSP00000256078.4:p.Gly12Ter', 'ensp00000256078:p.G12*']) {
+        const page = await runLookup(cassette, { input: typed,
+            route: (url, k, respond) => {
+                if (/\/variant_recoder\/human\/ENSP00000256078(?:\.4)?:p\.Gly12Ter/i.test(k)) return respond(recorded);
+                if (/lookup\/id\/ENSP00000256078\?/.test(k)) return respond({ id: 'ENSP00000256078', Parent: 'ENST00000256078', object_type: 'Translation' });
+                if (/lookup\/id\/ENST00000256078\?content-type/.test(k)) return respond({ id: 'ENST00000256078', display_name: 'KRAS-004', Parent: 'ENSG00000133703' });
+                return undefined;
+            } });
+        assertResolved(assert, page, typed);
+        assert.match(page.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/, typed);
+        assert.match(page.variant, /Gene: KRAS/, typed);
+        assert.doesNotMatch(page.variant, /Gene: ENSP/i, typed);
+        assert.match(page.variant, /Resolved to residue 12 on ENSP00000256078(?:\.4)? only\./i, typed);
+        assert.deepEqual(page.requests.filter(r => /ENSP00000256078/i.test(r) && !/variant_recoder|map\/translation|myvariant\.info|lookup\/id\/ENSP/.test(r)), [],
+            `${typed}: nothing else is asked about the accession, as if it were a gene`);
+        assert(page.requests.some(r => /[?&]gene=KRAS\b/.test(r)), `${typed}: gene-level cards ask about KRAS`);
+    }
     console.log('ok protein name: on a protein accession, several unrecorded alleles are the codon too');
 }
 

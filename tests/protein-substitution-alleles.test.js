@@ -249,6 +249,23 @@ const hit = (id, genename, aa, transcriptid) => ({ _id: id, dbnsfp: { genename, 
     const shaped = h.recoderShapedFromAlleles('KRAS:p.Tyr64Ter', ['chr12:g.25380266G>C', 'chr12:g.25380266G>T']);
     assert.deepEqual(h.selectRecoderAlleles(shaped, 'KRAS:p.Tyr64Ter').map(allele => allele.myvariant),
         [['chr12:g.25380266G>C'], ['chr12:g.25380266G>T']]);
+    // ...but they are not Ensembl's answer, and are not shown or passed on as
+    // one. The page's "Show Ensembl recoder result" held this list, in the
+    // shape of an answer, and the AI review was given it as `ensembl_recoder`.
+    // (Found in review.)
+    const ensembls = [{ T: { input: 'KRAS:p.Tyr64Ter', hgvsg: ['NC_000012.11:g.25380266G>T'] } }];
+    const placedByNcbi = Object.assign([{ A: { input: 'NM_004333.4:c.1799T>A', hgvsg: ['NC_000007.13:g.140453136A>T'] } }], { __vsFallback: true });
+    assert.equal(h.ensemblRecoderAnswer(shaped), null);
+    assert.equal(h.ensemblRecoderAnswer(placedByNcbi), null);
+    assert.equal(h.ensemblRecoderAnswer(ensembls), ensembls);
+    assert.equal(h.ensemblRecoderAnswer(null), null);
+    assert.equal(h.recoderPaneText(shaped, null), 'Ensembl\'s recoder was not waited for. MyVariant lists the single-base changes that give this protein change:\n'
+        + JSON.stringify(['chr12:g.25380266G>C', 'chr12:g.25380266G>T'], null, 2));
+    assert.equal(h.recoderPaneText(shaped, ensembls), JSON.stringify(ensembls, null, 2), 'Ensembl\'s own answer, where it came as well');
+    assert.equal(h.recoderPaneText(ensembls, null), JSON.stringify(ensembls, null, 2));
+    assert.match(h.recoderPaneText(placedByNcbi, null), /^Ensembl's recoder had not answered\. The variant was placed by NCBI Variation Services:\n\[/);
+    assert.equal(h.recoderPaneText(null, null), '');
+    assert.equal(h.recoderPaneText(null, placedByNcbi), '');
     console.log('protein-substitution unit checks passed');
 }
 
@@ -278,6 +295,10 @@ const unwaited = (label, lookup) => Promise.race([lookup, new Promise((resolve, 
         + '&fields=dbnsfp.genename,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos,dbnsfp.aa.codonpos,dbnsfp.aa.refcodon,dbnsfp.ensembl.transcriptid&size=60']);
     assert.match(page.panel, /Resolve nomenclature · Ensembl\s*not waited for — MyVariant lists the 2 single-base changes that give this protein change/);
     assert.doesNotMatch(page.variant, /Codon region/);
+    // What "Show Ensembl recoder result" holds is not passed off as Ensembl's.
+    const pane = shown => shown.document.getElementById('ensemblOutput').textContent;
+    assert.equal(pane(page), 'Ensembl\'s recoder was not waited for. MyVariant lists the single-base changes that give this protein change:\n'
+        + JSON.stringify(['chr12:g.25380266G>C', 'chr12:g.25380266G>T'], null, 2));
     // With Ensembl answering, the alleles are still MyVariant's — the same two,
     // in the same order, whatever order Ensembl lists them in.
     const key = 'grch37.rest.ensembl.org/variant_recoder/human/KRAS:p.Tyr64Ter?content-type=application/json';
@@ -290,6 +311,8 @@ const unwaited = (label, lookup) => Promise.race([lookup, new Promise((resolve, 
         assert.match(answered.variant, /g\.: chr12:g\.25380266G>C/, String(order));
         assert.deepEqual(allelesNote(answered), allelesNote(page), String(order));
         assert.equal(residueQueries(answered).length, 1);
+        // (...and there the pane holds what Ensembl said.)
+        assert.deepEqual(JSON.parse(pane(answered)), body, String(order));
     }
     console.log('ok protein substitution: KRAS Y64* is resolved from MyVariant\'s list, Ensembl or no Ensembl');
 }
@@ -551,6 +574,94 @@ const unwaited = (label, lookup) => Promise.race([lookup, new Promise((resolve, 
         assert.doesNotMatch(page.variant + page.panel, /[Nn]o single-base change/, label);
     }
     console.log('ok protein substitution: nothing is concluded about a silent change dbNSFP does not list');
+}
+
+// 11. The same name looked up again is resolved as it was the first time.
+//     Ensembl's answer to the first lookup arrives after that lookup has what
+//     it needs ("answered after … — not needed") and stays on the page. The
+//     second lookup took it for its own answer being in hand, did not set its
+//     own call aside — and waited for it: 49 s when Ensembl then said nothing,
+//     against none the first time. (Found in review.)
+{
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let recoderCalls = 0;
+    let cardsBegun = false;
+    let lateAnswerGiven = false;
+    const lookup = runLookup(cassettes.krasY64Stop, {
+        followUp: { input: 'KRAS Y64*' },
+        route: async (url, key) => {
+            if (/\/variant_recoder\//.test(key)) {
+                recoderCalls += 1;
+                // The second time, Ensembl says nothing at all.
+                if (recoderCalls > 1) return never;
+                // The first time it answers late: once the cards are being fetched.
+                for (let i = 0; i < 2000 && !cardsBegun; i++) await wait(2);
+                setTimeout(() => { lateAnswerGiven = true; }, 0);
+                return undefined;
+            }
+            if (/\/api\/(?:civic|clinvar-region|pubmed)/.test(key) && recoderCalls === 1) {
+                cardsBegun = true;
+                // ...and the first lookup ends only after that answer is in.
+                for (let i = 0; i < 2000 && !lateAnswerGiven; i++) await wait(2);
+                await wait(10);
+            }
+            return undefined;
+        }
+    });
+    const page = await unwaited('KRAS Y64*, looked up a second time', lookup);
+    assert.equal(recoderCalls, 2, 'each lookup asked Ensembl');
+    assert(lateAnswerGiven, 'the first answer came in late');
+    assertResolved(assert, page, 'KRAS Y64*, a second time');
+    assert.match(page.variant, /g\.: chr12:g\.25380266G>C/);
+    assert.deepEqual(allelesNote(page), ['p.Tyr64Ter is 2 alleles on record. This is the best documented one; the other is chr12:g.25380266G>T.']);
+    assert.match(page.panel, /Resolve nomenclature · Ensembl\s*not waited for — MyVariant lists the 2 single-base changes that give this protein change/);
+    console.log('ok protein substitution: a second lookup of the same name does not wait on the first one\'s late answer');
+}
+
+// 12. MyVariant answering for some of what it is asked. (Found in review.)
+{
+    // "KRAS Y64*" is two alleles, both on record. When the request for one of
+    // the two records failed, the other was shown as THE variant, with nothing
+    // said — c.192C>A or c.192C>G according to which request it was. It is
+    // still shown (it is on record), and the card says what could not be asked.
+    for (const [failing, shown] of [['chr12:g.25380266G>C', 'chr12:g.25380266G>T'], ['chr12:g.25380266G>T', 'chr12:g.25380266G>C']]) {
+        const page = await unwaited(`KRAS Y64*, no answer for ${failing}`, runLookup(cassettes.krasY64Stop, {
+            route: (url, key, respond) => (/\/variant_recoder\//.test(key) ? never
+                : (key === `myvariant.info/v1/variant/${failing}` ? respond({ error: 'Service Unavailable' }, 503) : undefined)) }));
+        assertResolved(assert, page, `KRAS Y64*, no answer for ${failing}`);
+        assert(page.variant.startsWith(`Variantg.: ${shown}`), page.variant.slice(0, 80));
+        assert.deepEqual(allelesNote(page), [`p.Tyr64Ter can be 2 nucleotide changes. This one is on record; MyVariant could not be asked about `
+            + `the other, which may be better documented: ${failing}.`]);
+        assert.deepEqual([...page.document.querySelectorAll('.protein-alleles-note a')].map(a => decodeURIComponent(a.getAttribute('href'))), [`?variant=${failing}`]);
+        assert.match(page.panel, new RegExp(`MyVariant could not be asked about another allele that gives this protein change — showing ${shown.replace(/[.>]/g, '\\$&')}, which is on record`));
+        assert.doesNotMatch(page.variant, /best documented one/);
+    }
+    // ...and with both answering, as before: the best documented, and the other named.
+    const both = await unwaited('KRAS Y64*', runLookup(cassettes.krasY64Stop, { route: recoderSilent }));
+    assert.deepEqual(allelesNote(both), ['p.Tyr64Ter is 2 alleles on record. This is the best documented one; the other is chr12:g.25380266G>T.']);
+
+    // "KRAS Q61X": MyVariant lists the one change that makes Gln61 a stop —
+    // and then does not answer for its record, while Ensembl has not answered
+    // either. The allele is known all the same. It came out as the codon and
+    // "Which nucleotide change a stop here (p.Gln61Ter) would be could not be
+    // looked up".
+    for (const [label, status, said] of [
+        ['MyVariant not answering for the record', 503, /Annotations · MyVariant\.info\s*could not be asked for a record of this allele — it is shown without one/],
+        ['MyVariant having no record', 404, null]
+    ]) {
+        const page = await unwaited(`KRAS Q61X, ${label}`, runLookup(cassettes.krasQ61X, {
+            route: (url, key, respond) => (/\/variant_recoder\//.test(key) ? never
+                : (/myvariant\.info\/v1\/variant\//.test(key)
+                    ? respond(status === 404 ? { success: false, error: 'Not Found.' } : { error: 'Service Unavailable' }, status) : undefined)) }));
+        assertResolved(assert, page, `KRAS Q61X, ${label}`);
+        assert.match(page.variant, /g\.: chr12:g\.25380277G>A/, label);
+        assert.match(page.variant, /Transcript: NM_004985\.5 \(MANE Select\)c\.: c\.181C>Tp\.: p\.Gln61Ter \(p\.Q61\*\)Effect: stop_gained/, label);
+        assert.deepEqual(note(page), ['"X" was read as a stop codon (p.Gln61Ter). If it stands for any amino acid, look up KRAS p.Gln61Xaa.'], label);
+        assert.doesNotMatch(page.variant, /Codon region|could not be looked up/, label);
+        if (said) assert.match(page.panel, said, label);
+        else assert.doesNotMatch(page.panel, /could not be asked for a record/, label);
+    }
+    console.log('ok protein substitution: an allele MyVariant could not be asked about is named, and one it listed is shown without its record');
 }
 
 console.log('Protein substitution allele tests passed');
