@@ -131,6 +131,8 @@ const API_TIMEOUT_MS = {
     myvariant: 10000,
     recoder: 12000,
     variationServices: 8000,
+    // MyVariant's list of the single-base changes at a residue (0.1-0.6 s).
+    proteinAlleles: 4000,
     // How long Ensembl's recoder is given before NCBI is asked as well.
     recoderHeadStart: 2500,
     vep: 20000,
@@ -7241,8 +7243,9 @@ function selectRecoderAlleles(data, query) {
     const intent = parseMyVariantQueryIntent(query);
     const accession = /^(?:NM_|NR_|ENST|LRG_)/i.test(intent.gene) ? intent.gene : '';
     const alleles = (data || []).flatMap(entry => Object.values(entry || {}))
-        .filter(v => v && typeof v === 'object' && !Array.isArray(v) && (v.hgvsg || v.spdi));
+        .filter(v => v && typeof v === 'object' && !Array.isArray(v) && (v.hgvsg || v.spdi || v.myvariant));
     if (data?.__vsFallback) return alleles; // exact NCBI HGVS contextual mapping
+    if (data?.__fromRecords) return alleles; // MyVariant's own list for the protein change
     if (isGenomicVariant(query)) {
         // The recoder echoes its input, which for the mitochondrial chromosome is
         // spelled for Ensembl ("MT:g.…"), not as the query is ("chrMT:g.…").
@@ -7558,6 +7561,85 @@ function rankAllelesOnRecord(entries) {
             || String(a.entry.id).localeCompare(String(b.entry.id)));
     const tied = ranked.length > 1 && ranked[0].rank.every((value, i) => value === ranked[1].rank[i]);
     return { ranked: ranked.map(r => r.entry), tied };
+}
+
+/*
+ * The single-base changes that give a protein substitution named on a gene
+ * symbol — from MyVariant alone.
+ *
+ * Only Ensembl's recoder turned "KRAS p.Tyr64Ter" into alleles, and it is the
+ * slowest thing this page asks: 3 to 17 s per name on the day this was
+ * measured, with one name in three unanswered after 25 s. Such a lookup then
+ * sat out four attempts — about 50 s — and came back with the codon alone.
+ *
+ * dbNSFP, which MyVariant carries, lists every non-synonymous single-base
+ * change in the genome with the residue it changes on each transcript. Asked
+ * for the residue it answers in half a second, and what it lists are records.
+ * For 30 names checked against Ensembl the single-base alleles were the same
+ * (Ensembl adds, for a gene whose transcripts number residues differently,
+ * multi-base changes on the other transcripts: MECP2 T158M came with a
+ * two-base change on the one where residue 158 is another threonine).
+ *
+ * `hits` is MyVariant's answer for the residue: gene, reference amino acid,
+ * position — any new amino acid. Returns { alleles, residueKnown }:
+ *   alleles       the ids that give this change, each a single-base change
+ *   residueKnown  dbNSFP has this residue of this gene under this number.
+ *                 Only then does an empty list mean that no single base
+ *                 change gives the protein change (p.Gly12Ter takes two);
+ *                 otherwise the name is not in dbNSFP's numbering, and
+ *                 nothing is concluded from it.
+ */
+function proteinSubstitutionAlleles(hits, gene, change) {
+    const symbol = String(gene || '').toUpperCase();
+    // (dbNSFP writes a stop as X.)
+    const code = aa => (aa === '*' ? 'X' : String(aa === undefined || aa === null ? '' : aa).toUpperCase());
+    const ref = code(change && change.ref);
+    const alt = code(change && change.alt);
+    const pos = Number(change && change.pos);
+    // dbnsfp.aa is one object — or several, where the variant lies in more
+    // than one reading frame: MECP2's R306C is A301V in another. The residue
+    // has to be right within ONE of them; MyVariant's search matches across.
+    const frames = hit => [].concat((hit && hit.dbnsfp && hit.dbnsfp.aa) || []).filter(aa => aa && typeof aa === 'object');
+    const atResidue = aa => code(aa.ref) === ref && [].concat(aa.pos === undefined ? [] : aa.pos).map(Number).includes(pos);
+    const inGene = hit => [].concat((hit && hit.dbnsfp && hit.dbnsfp.genename) || []).some(g => String(g).toUpperCase() === symbol);
+    const residue = (hits || []).filter(hit => inGene(hit) && frames(hit).some(atResidue));
+    const alleles = residue
+        .filter(hit => frames(hit).some(aa => atResidue(aa) && [].concat(aa.alt === undefined ? [] : aa.alt).map(code).includes(alt)))
+        .map(hit => String(hit._id || ''))
+        .filter(id => /^chr(?:[0-9]{1,2}|X|Y|MT):g\.\d+[ACGT]>[ACGT]$/.test(id));
+    return { alleles: Array.from(new Set(alleles)).sort(), residueKnown: residue.length > 0 };
+}
+
+// What to ask MyVariant for that: every non-synonymous single-base change at
+// the residue. '' when the gene or the change is not something to ask about.
+function proteinResidueQuery(gene, change) {
+    const symbol = String(gene || '').trim();
+    const ref = change && (change.ref === '*' ? 'X' : String(change.ref || '').toUpperCase());
+    if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(symbol) || !/^[A-Z]$/.test(ref || '')
+        || !change || !Number.isInteger(change.pos) || change.pos < 1) return '';
+    return `dbnsfp.genename:${symbol} AND dbnsfp.aa.ref:${ref} AND dbnsfp.aa.pos:${change.pos}`;
+}
+
+// Never throws to no purpose: a failed request is "not known", which leaves
+// the name to Ensembl as before.
+async function fetchProteinSubstitutionAlleles(gene, change) {
+    const q = proteinResidueQuery(gene, change);
+    if (!q) return null;
+    const url = `https://myvariant.info/v1/query?q=${encodeURIComponent(q)}`
+        + '&fields=dbnsfp.genename,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos&size=60';
+    const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.proteinAlleles);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return proteinSubstitutionAlleles(data && data.hits, gene, change);
+}
+
+// Those alleles in the shape the recoder's answer has, for the code that turns
+// an answer into candidates (see fetchVariationServicesRecoder for the other
+// stand-in). No transcript rows: VEP supplies them once the allele is chosen.
+function recoderShapedFromAlleles(query, alleles) {
+    const data = [Object.fromEntries(alleles.map(id => [id, { input: query, myvariant: [id] }]))];
+    data.__fromRecords = true;
+    return data;
 }
 
 // Query MyVariant.info by rsID or other variant identifier. Returns the best matching hit when possible.
@@ -8926,8 +9008,16 @@ const initVariantSearchUi = () => {
         // outcome is only reported.
         let transcriptRowsSettled = false;
         // Set when the recoder's answer is no longer wanted at all: ClinVar has
-        // said which variants a protein-level name could be (see namesAhead).
+        // said which variants a protein-level name could be (see namesAhead), or
+        // MyVariant which single-base changes give a substitution — and why,
+        // for the panel.
         let recoderSetAside = false;
+        let recoderSetAsideWhy = 'ClinVar had said which variants the name could be';
+        // The alleles MyVariant lists for a protein substitution, in the shape
+        // of a recoder answer (see proteinSubstitutionAlleles); and whether it
+        // has shown that no single-base change gives it.
+        let allelesFromRecords = null;
+        let noSingleBaseChange = false;
         // An rsID or a name comes back from the recoder as several alleles, and
         // the rows getTranscriptsList returns are the FIRST one's. That is put
         // right once, further down, for the allele the lookup settled on — but
@@ -8945,7 +9035,7 @@ const initVariantSearchUi = () => {
                 // Not a warning: this is how most lookups end now, and nothing
                 // was lost. The grey "contributed nothing" state says that.
                 LookupProgress.stepUnlessFailed('recoder', 'empty', recoderSetAside
-                    ? 'answered after ClinVar had said which variants the name could be — not needed'
+                    ? `answered after ${recoderSetAsideWhy} — not needed`
                     : 'answered after the result was ready — not needed: the variant was resolved without it');
                 return list;
             }
@@ -8971,6 +9061,7 @@ const initVariantSearchUi = () => {
             if (recoderErr && recoderErr.retryable) LookupProgress.markUpstreamOutage('recoder');
             return [];
         });
+        const recoderAskedAt = Date.now();
         let transcriptsPromise = geneSymbolName || unreadableName ? Promise.resolve([]) : askRecoder(query);
         // Set once ClinVar's other names have been consulted for this lookup.
         let otherNameAsked = false;
@@ -9343,6 +9434,65 @@ const initVariantSearchUi = () => {
                         LookupProgress.stepUnlessFailed('recoder', 'empty', 'not waited for — ClinVar lists the variants this name could be');
                     }
                 }
+                /*
+                 * A substitution named on a gene symbol is another matter. Its
+                 * alleles are single-base changes more often than not, and
+                 * MyVariant lists those for any residue in half a second (see
+                 * proteinSubstitutionAlleles) — where Ensembl took 3 to 17 s
+                 * when it answered, and on a bad day did not: "KRAS Y64*" was
+                 * 13 s, or 54 s and the codon alone. So MyVariant is asked:
+                 *   - it lists alleles: those are the candidates, the same
+                 *     ones whatever Ensembl is doing, and Ensembl is not
+                 *     waited for;
+                 *   - no single-base change gives the protein change: Ensembl
+                 *     may still name the larger ones, and has until its first
+                 *     attempt is over to do so. Where "X" was typed that
+                 *     already settles how X is read, and it is not waited for
+                 *     at all (unless its answer is in hand);
+                 *   - MyVariant does not have the residue under that number,
+                 *     or does not answer: Ensembl, as before.
+                 */
+                const substitution = Boolean(typedName) && isProteinVariant && !/c\./i.test(query) && !rerun && !recoderSetAside
+                    ? parseProteinChange(query) : null;
+                if (substitution) {
+                    let listed = null;
+                    try {
+                        listed = await fetchProteinSubstitutionAlleles(typedName.gene, substitution);
+                    } catch (errListed) {
+                        console.log('[DEBUG] MyVariant residue query failed:', errListed);
+                    }
+                    if (!isCurrentSearch()) return;
+                    const recoderInHand = () => lastRecoderResult.query === query && Boolean(lastRecoderResult.data);
+                    if (listed && listed.alleles.length) {
+                        allelesFromRecords = recoderShapedFromAlleles(query, listed.alleles);
+                        // (Where Ensembl has answered already, its transcript rows
+                        // are kept; the alleles are MyVariant's either way.)
+                        if (!recoderInHand()) {
+                            recoderSetAside = true;
+                            recoderSetAsideWhy = 'MyVariant had listed the single-base changes that give this protein change';
+                            LookupProgress.stepUnlessFailed('recoder', 'empty', listed.alleles.length === 1
+                                ? 'not waited for — MyVariant lists the single-base change that gives this protein change'
+                                : `not waited for — MyVariant lists the ${listed.alleles.length} single-base changes that give this protein change`);
+                        }
+                    } else if (listed && listed.residueKnown && !recoderInHand()) {
+                        noSingleBaseChange = true;
+                        const allowance = typedX ? 0 : Math.max(0, API_TIMEOUT_MS.recoder - (Date.now() - recoderAskedAt));
+                        const answered = allowance > 0 && await Promise.race([
+                            transcriptsPromise.then(() => true),
+                            new Promise(resolve => setTimeout(() => resolve(false), allowance))
+                        ]);
+                        if (!isCurrentSearch()) return;
+                        if (!answered || !recoderInHand()) {
+                            recoderSetAside = true;
+                            recoderSetAsideWhy = 'MyVariant had shown that no single-base change gives this protein change';
+                            LookupProgress.stepUnlessFailed('recoder', 'empty', typedX
+                                ? 'not waited for — MyVariant shows that no single-base change makes a stop here, which settles how "X" is read'
+                                : 'not waited for further — no single-base change gives this protein change, and Ensembl has not said which larger ones do');
+                        }
+                    } else if (listed && listed.residueKnown) {
+                        noSingleBaseChange = true;
+                    }
+                }
                 // Nothing resolved without the recoder, so now its answer is genuinely
                 // needed — wait for the in-flight call (this also guarantees
                 // lastRecoderResult below reflects this query's attempt).
@@ -9356,7 +9506,9 @@ const initVariantSearchUi = () => {
                 // Ensembl was unwell) — reuse that answer instead of a second 12s-class
                 // round trip. A cached failure stays a failure: recoderData remains
                 // null and the free-text MyVariant fallback below takes over.
-                if (recoderSetAside) {
+                if (allelesFromRecords) {
+                    recoderData = allelesFromRecords;
+                } else if (recoderSetAside) {
                     // (recoderData stays empty: the codon is where this goes.)
                 } else if (lastRecoderResult.query === query) {
                     recoderData = lastRecoderResult.data;
@@ -9448,6 +9600,11 @@ const initVariantSearchUi = () => {
                                 conversions.push(convertCandidate(spdi, convertSpdiToMyVariant, 'SPDI'));
                                 conversionAllele.push(alleleIndex);
                             }
+                        }
+                        // (MyVariant's own ids, GRCh37 already: see recoderShapedFromAlleles.)
+                        for (const id of [].concat(sub.myvariant || [])) {
+                            conversions.push(Promise.resolve(id));
+                            conversionAllele.push(alleleIndex);
                         }
                     });
                     (await Promise.all(conversions)).forEach((id, i) => {
@@ -9972,12 +10129,22 @@ const initVariantSearchUi = () => {
                     // (Not where it WAS a stop: one base makes one, but there are
                     // several alleles; or ClinVar knows variants by the stop's name.)
                     if (typedX && !nameShared && !(proteinNameOpen && proteinNameOpen.reading === 'undetermined')) {
-                        if (!proteinNameOpen) proteinNameOpen = { reading: 'x-unsettled', alleles: [] };
+                        // (MyVariant having shown that no single base makes a stop
+                        // here is the same finding Ensembl's alleles lead to; what
+                        // it leaves unsaid is whether a larger change is on record.)
+                        if (!proteinNameOpen) {
+                            proteinNameOpen = noSingleBaseChange
+                                ? { reading: 'any-residue', alleles: [], recordsKnown: false }
+                                : { reading: 'x-unsettled', alleles: [] };
+                        }
                         proteinNameOpen.stop = (query.match(/p\.[^\s:]+/i) || [])[0] || '';
                         query = query.replace(/Ter$/, 'Xaa');
                         // (and the stop is not what ClinVar or PubMed is asked about)
                         targetProtGlobal = null;
                         LookupProgress.note('parse', 'in the end as any amino acid (Xaa), not as a stop');
+                    } else if (noSingleBaseChange && !proteinNameOpen && !nameShared) {
+                        // More than one base, and nobody said which: why only the codon.
+                        proteinNameOpen = { reading: 'no-single-base', alleles: [] };
                     }
                     const proteinBody = (query.match(/p\.[^\s:]+/i) || [])[0] || '';
                     const residues = parseProteinResidueRange(proteinBody);
@@ -10534,6 +10701,9 @@ const initVariantSearchUi = () => {
                             why.textContent = `"X" was read as any amino acid (${codonOnlyResolutionGlobal.proteinChange}), not as a stop: `
                                 + `no single-base change turns ${residue} into a stop codon`
                                 + (open.recordsKnown ? ', and no such variant is on record.' : '.');
+                        } else if (open.reading === 'no-single-base') {
+                            why.textContent = `No single-base change gives ${codonOnlyResolutionGlobal.proteinChange}, and which larger `
+                                + 'changes do could not be looked up, so only the codon is shown.';
                         } else if (open.reading === 'x-unsettled') {
                             // Ensembl did not say which change a stop here would be.
                             // Nothing is claimed about records: MyVariant's name search
@@ -13173,6 +13343,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars,
         isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
+        proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,

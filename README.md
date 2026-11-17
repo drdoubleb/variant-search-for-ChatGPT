@@ -1274,6 +1274,40 @@ This applies to a name on a gene symbol; on a protein accession
 (`NP_004976.2:p.Gly12Ter`) there is no gene to find the codon through and the
 first allele stands. See `tests/protein-name-reading.test.js`.
 
+**Which bases, without waiting for Ensembl.** Only Ensembl's recoder turned a
+protein substitution into alleles, and it is the slowest thing this page asks.
+Measured over 30 names on one afternoon: 2 to 23 s where it answered, and for
+11 of the 30 no answer within 25 s. The page then sat out four attempts, about
+50 s, and showed the codon alone — `KRAS Y64*` was 13 s on a good day and 54 s
+with no allele on a bad one.
+
+MyVariant carries dbNSFP, which lists every non-synonymous single-base change
+in the genome together with the residue it changes on each transcript. Asked
+for a residue — gene, reference amino acid, position — it returns every such
+change there in 0.1 to 0.6 s (`proteinSubstitutionAlleles`), and what it
+returns are records. For the names Ensembl did answer, the single-base alleles
+were the same in every case but two: `GNAS R201H` and `CDKN2A P114L`, where
+Ensembl's older annotation adds the same-named residue of a minor transcript.
+(Ensembl also adds, for a gene whose transcripts number residues differently,
+changes of several bases on the other transcript; those have no record and
+were never shown.)
+
+So a substitution named on a gene symbol, which the name search has not found,
+is put to MyVariant first:
+
+| MyVariant says | then |
+| --- | --- |
+| these single-base changes give it | they are the candidates — the same ones whatever Ensembl is doing — and Ensembl is not waited for. `KRAS Y64*`: 3 s |
+| the residue is there, and no single-base change gives it (`p.Gly12Ter` takes two) | Ensembl may still name the larger changes, and has until its first attempt is over (12 s). After that the codon is shown, with the reason: *No single-base change gives p.Gly12Ter, and which larger changes do could not be looked up* |
+| the same, where "X" was typed | that already settles how X is read: any amino acid. Ensembl is not waited for at all. `KRAS G12X`: 3 s, where it was 11 to 55 |
+| it has no such residue under that number, or does not answer | Ensembl, as before (`TP53 R72P`: the reference genome has the proline) |
+
+A variant that lies in two reading frames comes from MyVariant as two
+amino-acid changes — MECP2's R306C is A301V in the other — and the residue has
+to be right within one of them: MyVariant's search matches across frames, and
+would return that record for "R301C" as well. See
+`tests/protein-substitution-alleles.test.js`.
+
 What *is* determined by protein notation is the codon. Rather than failing the
 whole lookup, `resolveProteinCodonRegion` maps the residue range to GRCh37
 coordinates via the gene's canonical translation (Ensembl `/lookup/symbol` then

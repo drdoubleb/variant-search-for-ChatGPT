@@ -768,6 +768,10 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     let submitted = false;
     const page = await runLookup(both, {
         settleMs: 400,
+        // (Ensembl's answer being what the first lookup waits for: MyVariant's
+        // list of the residue's single-base changes, which would cut that wait
+        // short, is left out of this one.)
+        without: ['dbnsfp.aa.pos'],
         route: async (url, key, respond, options, { document }) => {
             if (!submitted && key.includes('/variant_recoder/human/KRAS:p.Gly12Ter')) {
                 // Ensembl takes its time. The first lookup gets as far as
