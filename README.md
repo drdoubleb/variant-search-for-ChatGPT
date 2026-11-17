@@ -423,9 +423,17 @@ gene-symbol name and on an accession alike:
   coordinates are the genome's; the bases are not until they are
   reverse-complemented. They were taken as they stood (`buildGenomicHgvsFromVep`)
   — for an insertion on a minus-strand gene that is another variant, and for a
-  substitution a reference base the genome does not hold there. Whichever of
-  Ensembl's recoder, NCBI's placement and VEP now answers, the result is the
-  same allele (`12-25398280-G-GCCA`).
+  substitution a reference base the genome does not hold there:
+  `NM_004333.4:c.1799T>A`, BRAF V600E on an older version of its transcript,
+  came out as `chr7:g.140453136T>A` whenever Ensembl answered before NCBI did —
+  no ClinVar record, no rsID, and gnomAD and SpliceAI asked about an allele
+  that does not exist. Whichever of Ensembl's recoder, NCBI's placement and
+  VEP now answers, the result is the same allele (`12-25398280-G-GCCA` for the
+  duplication, `7-140453136-A-T` for V600E).
+- That last route also never asked MyVariant for the allele it had arrived at:
+  the result was VEP's rows and nothing else. The record is now fetched, so
+  V600E reached this way has its ClinVar entry (13961), rsID and frequencies
+  like any other.
 
 (One thing is Ensembl's and is shown as given: its protein name for an
 insertion depends on how the insertion is spelled. The duplication above is

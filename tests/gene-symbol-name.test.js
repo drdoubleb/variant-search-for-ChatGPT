@@ -1109,4 +1109,36 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     console.log('ok gene-symbol name: the other transcript is called what it is');
 }
 
+// 24. The same mix-up of strands, for a substitution. "NM_004333.4:c.1799T>A"
+//     is BRAF V600E on an older version of its transcript. Ensembl answers the
+//     name with rows on the current version only, so the name goes to VEP —
+//     whose "T/A", strand -1, was shown as chr7:g.140453136T>A: an allele that
+//     does not exist (the genome has A there), with no ClinVar record, no rsID
+//     and no frequency. On `main` this is what the page showed whenever
+//     Ensembl answered before NCBI did.
+{
+    const cassette = cassettes.brafOlderVersion;
+    const situations = [
+        ['every service answering', {}],
+        ['NCBI not answering', { without: [/api\.ncbi\.nlm\.nih\.gov\/variation/] }],
+        ['Ensembl\'s recoder not answering', { without: [/variant_recoder/] }],
+        ['neither answering', { without: [/variant_recoder/, /api\.ncbi\.nlm\.nih\.gov\/variation/] }]
+    ];
+    for (const [label, options] of situations) {
+        const page = await runLookup(cassette, options);
+        assertResolved(assert, page, `NM_004333.4:c.1799T>A, ${label}`);
+        assert.match(page.variant, /g\.: chr7:g\.140453136A>T/, label);
+        assert.match(page.variant, /VCF \(hg19\): 7-140453136-A-T/, label);
+        assert.match(page.variant, /c\.: c\.1799T>Ap\.: p\.Val600Glu/, label);
+        // The allele being known, its record is asked for: V600E is not "N/A".
+        assert.match(page.clinvar, /Variation ID: 13961/, label);
+        assert.doesNotMatch(page.variant + page.panel, /140453136T>A/, `${label}: not the other strand's bases`);
+    }
+    // (Where VEP was the route, it was asked by the name, and MyVariant then by the allele.)
+    const page = await runLookup(cassette, { without: [/api\.ncbi\.nlm\.nih\.gov\/variation/] });
+    assert(asked(page, /\/vep\/human\/hgvs\/NM_004333\.4:c\.1799T>A/).length > 0);
+    assert.match(page.panel, /Annotations · MyVariant\.info\s*annotation found/);
+    console.log('ok accession name: BRAF V600E on an older transcript version is A>T, with its record, whichever service answers');
+}
+
 console.log('Gene-symbol name tests passed');

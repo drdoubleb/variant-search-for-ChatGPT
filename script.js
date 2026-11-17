@@ -9797,9 +9797,30 @@ const initVariantSearchUi = () => {
                                         // the g. field keeps echoing the user's cDNA query and every
                                         // coordinate-derived card (UCSC, ClinVar region, gnomAD, SpliceAI)
                                         // stays dark even though the variant was successfully resolved.
-                                        if (!isGenomicVariant(gVariant) && vepRes.gVariant) {
-                                            gVariant = vepRes.gVariant;
+                                        const alleleFromVep = !isGenomicVariant(gVariant) && Boolean(vepRes.gVariant);
+                                        if (alleleFromVep) gVariant = vepRes.gVariant;
+                                        // Where it is VEP that said which allele this is, MyVariant has
+                                        // not been asked about it yet, and may well hold a record: this
+                                        // route is for names the other services did not place, not for
+                                        // variants nobody has seen. BRAF V600E typed on an older version
+                                        // of its transcript ("NM_004333.4:c.1799T>A") came out "Clinical
+                                        // significance: N/A", with no rsID and no frequency, whenever
+                                        // Ensembl answered before NCBI did.
+                                        let record = null;
+                                        if (alleleFromVep) {
+                                            LookupProgress.step('myvariant', 'running');
+                                            try {
+                                                record = await fetchRecordForAllele(gVariant);
+                                                LookupProgress.step('myvariant', 'ok', 'annotation found');
+                                            } catch (errRecord) {
+                                                // No record is the routine answer for an indel; MyVariant
+                                                // not answering leaves VEP's rows, which is what there was.
+                                                LookupProgress.step('myvariant', errRecord && errRecord.notFound ? 'empty' : 'fail',
+                                                    errRecord && errRecord.notFound ? 'no record for this variant' : describeUpstreamFailure(errRecord));
+                                            }
+                                            if (!isCurrentSearch()) return;
                                         }
+                                        if (record) annotation = record;
                                         let geneSym = await resolveGeneSymbolFromVep(vepConsequences, recoderData, vepRes.mostSevere);
                                         // If upstream sources still do not provide a usable gene symbol,
                                         // then use the optional user hint as the final fallback.
@@ -9812,12 +9833,13 @@ const initVariantSearchUi = () => {
                                             const queryGene = (query.match(/^([A-Za-z][A-Za-z0-9-]*)\s*:/) || [])[1];
                                             if (queryGene && !isChromosomeLikeGeneSymbol(queryGene)) geneSym = queryGene.toUpperCase();
                                         }
-                                        if (geneSym) {
+                                        // (A record says these itself.)
+                                        if (geneSym && !record) {
                                             annotation.dbnsfp = { genename: geneSym };
                                         }
                                         // Expose the most severe consequence so the summary can display an Effect
                                         // (e.g. "inframe_deletion") instead of N/A for VEP-only variants.
-                                        if (vepRes.mostSevere) {
+                                        if (vepRes.mostSevere && !record) {
                                             annotation.cadd = Object.assign({}, annotation.cadd, { consequence: vepRes.mostSevere });
                                         }
                                         // Populate transcriptsFromRecoder with the cDNA (hgvsc) and protein (hgvsp)
