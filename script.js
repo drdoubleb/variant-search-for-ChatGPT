@@ -3939,11 +3939,16 @@ function typedResidueX(rawInput, query) {
 // answer; an outage is not, and "none on record" cannot be said after one).
 //   'allele'        go on with the allele chosen
 //   'any-residue'   "X" was not a stop: only the codon is known
-//   'undetermined'  several alleles, nothing known about any: only the codon
-function proteinNameReading({ typedX = false, alleles = 1, candidates = [], onRecord = false, recordsKnown = true } = {}) {
+//   'undetermined'  several alleles and no record to choose one by: only the
+//                   codon. That holds whether MyVariant has none of them or
+//                   could not be asked — the first allele Ensembl listed used
+//                   to be shown in the second case, a different one from run
+//                   to run. What is SAID differs (`recordsKnown` goes with the
+//                   reading): "none on record" only where that was learned.
+function proteinNameReading({ typedX = false, alleles = 1, candidates = [], onRecord = false } = {}) {
     if (onRecord) return 'allele';
     if (typedX && !candidates.some(isSingleBaseChange)) return 'any-residue';
-    return alleles > 1 && recordsKnown ? 'undetermined' : 'allele';
+    return alleles > 1 ? 'undetermined' : 'allele';
 }
 
 // True when two parsed protein changes describe the same amino-acid substitution.
@@ -9732,7 +9737,8 @@ const initVariantSearchUi = () => {
                         proteinNameOpen = { reading, alleles: distinctAlleleSpellings(uniqueCandidates), recordsKnown: candidateRecordsKnown };
                         LookupProgress.step('recoder', 'empty', reading === 'any-residue'
                             ? 'a stop here takes more than one base change — "X" read as any amino acid'
-                            : `${proteinNameOpen.alleles.length} different nucleotide changes give this protein change, none on record`);
+                            : `${proteinNameOpen.alleles.length} different nucleotide changes give this protein change, `
+                                + (candidateRecordsKnown ? 'none on record' : 'and MyVariant could not be asked which is on record'));
                         recoderData = null;
                         transcriptsFromRecoder = [];
                         candidateVariants = [];
@@ -10712,10 +10718,13 @@ const initVariantSearchUi = () => {
                                 + `(${open.stop}) would be could not be looked up, so only the codon is shown, as any amino acid `
                                 + `(${codonOnlyResolutionGlobal.proteinChange}).`;
                         } else {
+                            // (A 404 says "no record"; an outage says nothing.)
                             why.appendChild(document.createTextNode(
                                 `${typedX ? '"X" was read as a stop codon. ' : ''}`
-                                + `${codonOnlyResolutionGlobal.proteinChange} can be any of ${open.alleles.length} nucleotide changes and none of them `
-                                + 'is on record, so no single one is shown: '));
+                                + `${codonOnlyResolutionGlobal.proteinChange} can be any of ${open.alleles.length} nucleotide changes`
+                                + (open.recordsKnown === false
+                                    ? '. MyVariant could not be asked which of them is on record, so no single one is shown: '
+                                    : ' and none of them is on record, so no single one is shown: ')));
                             open.alleles.slice(0, 4).forEach((id, i) => {
                                 if (i) why.appendChild(document.createTextNode(', '));
                                 const link = document.createElement('a');

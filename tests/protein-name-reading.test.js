@@ -70,11 +70,11 @@ assert.equal(h.proteinNameReading({ typedX: false, alleles: 3, candidates: three
 // "V600*": Ensembl gives one way; that is the allele, as before.
 assert.equal(h.proteinNameReading({ typedX: false, alleles: 1, candidates: ['chr7:g.140453136_140453137delinsTA'] }), 'allele');
 assert.equal(h.proteinNameReading(), 'allele');
-// MyVariant not answering is not "nothing on record": that cannot be said, so
-// the old behaviour stands — but a stop that needs the codon replaced is still
-// not what "X" meant.
-assert.equal(h.proteinNameReading({ typedX: false, alleles: 3, candidates: three, recordsKnown: false }), 'allele');
-assert.equal(h.proteinNameReading({ typedX: true, alleles: 3, candidates: three, recordsKnown: false }), 'any-residue');
+// MyVariant not answering changes what can be SAID — "none on record" cannot —
+// and not what is shown: there is still no record to choose one of three by.
+// (The first one Ensembl listed used to be shown then.)
+assert.equal(h.proteinNameReading({ typedX: false, alleles: 3, candidates: three, onRecord: false }), 'undetermined');
+assert.equal(h.proteinNameReading({ typedX: true, alleles: 3, candidates: three, onRecord: false }), 'any-residue');
 // The change is the second thing typed, whatever follows it.
 assert.equal(h.typedResidueX('KRAS G12X somatic', 'KRAS:p.Gly12Ter'), true);
 assert.equal(h.typedResidueX('KRAS G12* X', 'KRAS:p.Gly12Ter'), false);
@@ -277,9 +277,29 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
     assertResolved(assert, typedX, 'KRAS G12X, MyVariant down');
     assert.match(typedX.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
     assert.deepEqual(note(typedX), ['"X" was read as any amino acid (p.Gly12Xaa), not as a stop: no single-base change turns Gly12 into a stop codon.']);
-    const stop = await runLookup(cassettes.krasG12Stop, { input: 'KRAS G12*', route: down });
-    assert.doesNotMatch(note(stop).join(' '), /on record/, 'nothing is said about records MyVariant was not asked for');
-    console.log('ok protein name: a MyVariant outage is not "nothing on record"');
+    // A stop written as one, three ways to make it, and no telling which is on
+    // record: none is shown as the variant. The first one Ensembl listed used
+    // to be — a different allele from one run to the next.
+    const key = 'grch37.rest.ensembl.org/variant_recoder/human/KRAS:p.Gly12Ter?content-type=application/json';
+    const recorded = cassettes.krasG12Stop.responses[key].body;
+    const alleles = Object.keys(recorded[0]).filter(k => k !== 'warnings');
+    for (const order of [[0, 1, 2], [2, 0, 1]]) {
+        const body = [Object.fromEntries(order.map(i => [alleles[i], recorded[0][alleles[i]]]))];
+        const stop = await runLookup(cassettes.krasG12Stop, { input: 'KRAS G12*',
+            route: (url, k, respond) => (k === key ? respond(body) : down(url, k, respond)) });
+        assertResolved(assert, stop, 'KRAS G12*, MyVariant down');
+        assert.match(stop.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/, String(order));
+        assert.doesNotMatch(stop.variant, /g\.: chr12|c\.34_36delins|stop_gained/, String(order));
+        assert.equal(note(stop)[0].replace(/: chr12.*$/, ':'), 'p.Gly12Ter can be any of 3 nucleotide changes. MyVariant could not be asked which '
+            + 'of them is on record, so no single one is shown:', String(order));
+        assert.deepEqual(noteLinks(stop).map(decodeURIComponent).sort(), [
+            '?variant=chr12:g.25398283_25398285delinsCTA',
+            '?variant=chr12:g.25398283_25398285delinsTCA',
+            '?variant=chr12:g.25398283_25398285delinsTTA'], String(order));
+        assert.doesNotMatch(note(stop).join(' '), /none of them is on record/, 'nothing is said about records MyVariant was not asked for');
+        assert.match(stop.panel, /3 different nucleotide changes give this protein change, and MyVariant could not be asked which is on record/);
+    }
+    console.log('ok protein name: with MyVariant down, several alleles are the codon and "none on record" is not said');
 }
 
 // 8. A missense with a record is what it always was.

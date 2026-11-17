@@ -1262,13 +1262,18 @@ depends on that order:
 
 A single allele without a record is still shown — once ClinVar's names have
 been asked, since the variant known by a name can be another allele than the
-one Ensembl gives — and so is the first allele when MyVariant could not be
-asked — a 404 says "no record", an
-outage says nothing, and *"none on record"* is not claimed after one. Nor is
-it claimed when Ensembl did not answer at all: `KRAS Q61X` with the recoder
+one Ensembl gives.
+
+When MyVariant cannot be asked, there is likewise nothing to choose one of
+several alleles by, and none is shown: the codon, with each as a link. (The
+first one Ensembl listed used to be shown then — a different variant from one
+run to the next, which is what the rule above was written to end.) What is
+said differs: a 404 says "no record", an outage says nothing, so the note reads
+*p.Gly12Ter can be any of 3 nucleotide changes. MyVariant could not be asked
+which of them is on record* and never *"none of them is on record"*. Nor is
+that claimed when Ensembl did not answer at all: `KRAS Q61X` with the recoder
 down used to read *"No variant is on record for the stop (p.Gln61Ter)"*, a
-variant MyVariant holds (its name search just does not find it); the note now
-says the stop could not be looked up.
+variant MyVariant holds (its name search just does not find it).
 
 This applies to a name on a gene symbol; on a protein accession
 (`NP_004976.2:p.Gly12Ter`) there is no gene to find the codon through and the
