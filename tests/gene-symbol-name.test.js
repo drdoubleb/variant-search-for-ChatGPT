@@ -658,4 +658,43 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     console.log('ok MANE label: from whichever of Ensembl and NCBI names the transcript first');
 }
 
+// 18. A lookup that has been overtaken must not run itself again. "MECP2
+//     c.474G>C" is not a change on MANE Select, so the lookup runs again on the
+//     Plus Clinical transcript — and did so after "BRAF V600E" had been
+//     submitted, while its last fallback was still out: the page then showed
+//     MECP2's result under a box that said BRAF V600E, and BRAF's own lookup
+//     never appeared. (Found in review.)
+{
+    const first = cassettes.mecp2OnPlusClinical;
+    const second = cassettes.brafV600E;
+    const both = { input: first.input, reference: [...first.reference, ...second.reference],
+        api: { ...(first.api || {}), ...(second.api || {}) }, responses: { ...first.responses, ...second.responses } };
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let submitted = false;
+    const page = await runLookup(both, {
+        settleMs: 400,
+        route: async (url, key, respond, options, { document }) => {
+            // The first lookup's last fallback before it judges the name: the
+            // user submits the next variant while that request is out.
+            if (!submitted && key.includes('/vep/human/hgvs/NM_001110792.2:c.474G>C') && !key.includes('refseq=1')) {
+                submitted = true;
+                document.getElementById('variantInput').value = 'BRAF V600E';
+                document.getElementById('variantForm').dispatchEvent(new document.defaultView.Event('submit', { cancelable: true }));
+                await wait(2);
+                return undefined;
+            }
+            // The second lookup's recoder takes a little while, as Ensembl's does.
+            if (key.includes('/variant_recoder/human/BRAF:p.Val600Glu')) { await wait(60); return undefined; }
+            return undefined;
+        }
+    });
+    assert(submitted, 'the second lookup was submitted during the first');
+    assertResolved(assert, page, 'BRAF V600E, submitted during MECP2 c.474G>C');
+    assert.match(page.panel, /You entered\s*BRAF V600E/);
+    assert.match(page.variant, /g\.: chr7:g\.140453136A>T/);
+    assert.doesNotMatch(page.panel + page.variant, /MECP2|153296805/, 'nothing of the lookup that was overtaken');
+    assert(!page.requests.some(r => /variant_recoder\/human\/NM_004992\.4:c\.474G>C/.test(r)), 'which did not go on to its second pass');
+    console.log('ok gene-symbol name: a lookup that has been overtaken does not run itself again');
+}
+
 console.log('Gene-symbol name tests passed');

@@ -196,8 +196,44 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
     assertResolved(assert, page, 'KRAS G12X, recoder down');
     assert.match(page.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/);
     assert.match(page.variant, /p\.: p\.Gly12Xaa/);
-    assert.deepEqual(note(page), ['"X" can mean a stop codon or any amino acid. No variant is on record for the stop (p.Gly12Ter), '
-        + 'so it is shown as any amino acid (p.Gly12Xaa).']);
+    assert.deepEqual(note(page), ['"X" can mean a stop codon or any amino acid. Which nucleotide change a stop here (p.Gly12Ter) would be '
+        + 'could not be looked up, so only the codon is shown, as any amino acid (p.Gly12Xaa).']);
+    // Nothing is said about what is on record. For "KRAS Q61X" the same
+    // sentence used to read "No variant is on record for the stop
+    // (p.Gln61Ter)" — a variant MyVariant holds, and the one the page shows
+    // when Ensembl does answer; its name search simply does not find it.
+    // (Found in review. The codon's position is supplied here: the recording
+    // of Q61X, which resolves, never needed it.)
+    const q61 = cassettes.krasQ61X;
+    assert.equal(q61.responses['myvariant.info/v1/variant/chr12:g.25380277G>A'].status, 200, 'MyVariant holds the stop at Gln61');
+    const codon61 = { mappings: [{ assembly_name: 'GRCh37', seq_region_name: '12', start: 25380275, end: 25380277, strand: -1, rank: 0, gap: 0, coord_system: 'chromosome' }] };
+    const q61WithCodon = { ...q61, responses: { ...q61.responses,
+        'grch37.rest.ensembl.org/lookup/symbol/homo_sapiens/KRAS?expand=1&content-type=application/json':
+            cassettes.krasG12Stop.responses['grch37.rest.ensembl.org/lookup/symbol/homo_sapiens/KRAS?expand=1&content-type=application/json'],
+        'grch37.rest.ensembl.org/map/translation/ENSP00000256078/61..61?content-type=application/json': { status: 200, body: codon61 } } };
+    const unanswered = await runLookup(q61WithCodon, { without: ['variant_recoder'] });
+    assertResolved(assert, unanswered, 'KRAS Q61X, recoder down');
+    assert.match(unanswered.variant, /Codon region \(hg19\): chr12:g\.25380275_25380277/);
+    assert.deepEqual(note(unanswered), ['"X" can mean a stop codon or any amino acid. Which nucleotide change a stop here (p.Gln61Ter) would be '
+        + 'could not be looked up, so only the codon is shown, as any amino acid (p.Gln61Xaa).']);
+    assert.doesNotMatch(unanswered.variant, /on record/);
+    // Where one base does make the stop but Ensembl gives a second way too, and
+    // MyVariant holds neither: X was a stop, and it is the stop that has two
+    // alleles — not "p.Gln61Xaa can be any of 2 nucleotide changes".
+    const recoderKey = Object.keys(q61.responses).find(key => key.includes('/variant_recoder/'));
+    const one = Object.values(q61.responses[recoderKey].body[0]).find(value => value && value.hgvsg);
+    const two = [{ T: one, TT: { ...one, hgvsg: ['NC_000012.11:g.25380276_25380277delinsAA'], spdi: ['NC_000012.11:25380275:TG:AA'] } }];
+    const twoWays = await runLookup(q61WithCodon, {
+        route: (url, key, respond) => {
+            if (key === recoderKey) return respond(two);
+            if (/myvariant\.info\/v1\/variant\/chr12:g\.2538027/.test(key)) return respond({ success: false, error: 'Not Found.' }, 404);
+            return undefined;
+        }
+    });
+    assertResolved(assert, twoWays, 'KRAS Q61X, two alleles, none on record');
+    assert.match(twoWays.variant, /p\.: p\.Gln61Ter/);
+    assert.doesNotMatch(twoWays.variant, /Xaa/);
+    assert.match(note(twoWays)[0], /^"X" was read as a stop codon\. p\.Gln61Ter can be any of 2 nucleotide changes and none of them is on record, so no single one is shown: /);
     console.log('ok protein name: G12X with the recoder down is still not shown as a stop');
 }
 

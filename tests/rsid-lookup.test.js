@@ -292,6 +292,42 @@ console.log('rsID unit checks passed');
             return undefined;
         }
     }), 'rs113488022, recoder prompt, VEP down, record without rows');
+    // The same window, with VEP answering after all — from Ensembl's own
+    // transcript set, its RefSeq one having failed. That answer is not allowed
+    // to displace the record's RefSeq row, and the panel says "the record's own
+    // are shown": but the recoder's rows, arrived meanwhile, were what was
+    // shown, "p.: N/A · Effect: N/A". (Found in review.)
+    {
+        const refseqKey = 'grch37.rest.ensembl.org/vep/human/hgvs/7:g.140453136A>T?content-type=application/json&hgvs=1&refseq=1&mane=1&canonical=1';
+        const recorded = cassette.responses[refseqKey].body[0];
+        const ensemblOnly = [{ ...recorded, transcript_consequences: recorded.transcript_consequences.slice(0, 1).map(row => ({ ...row,
+            gene_id: 'ENSG00000157764', transcript_id: 'ENST00000288602', hgvsc: 'ENST00000288602.6:c.1799T>A', hgvsp: 'ENSP00000288602.6:p.Val600Glu' })) }];
+        let recoderAnswered = false;
+        const page = await runLookup(cassette, {
+            timerCap: 600,
+            settleMs: 700,
+            route: async (url, key, respond, options, { document }) => {
+                if (/variant_recoder/.test(key)) {
+                    const vep = () => document.querySelector('[data-step="vep"]');
+                    for (let i = 0; i < 3000 && !(vep() && /lp-running/.test(vep().className)); i++) await wait(1);
+                    setTimeout(() => { recoderAnswered = true; }, 20);
+                    const answer = cassette.responses[key];
+                    return respond(answer.body, answer.status);
+                }
+                if (/\/vep\//.test(key)) {
+                    if (/refseq=1/.test(key)) return respond({ error: 'Internal Server Error' }, 500);
+                    for (let i = 0; i < 3000 && !recoderAnswered; i++) await wait(1);
+                    return respond(ensemblOnly);
+                }
+                return undefined;
+            }
+        });
+        assertResolved(assert, page, 'rs113488022, recoder late, VEP RefSeq set down');
+        assert(recoderAnswered, 'the recoder answered while VEP was being waited for');
+        assert.match(page.panel, /Consequences · Ensembl VEPRefSeq transcripts unavailable — the record's own are shown/);
+        assert.match(page.variant, /Transcript: NM_004333\.4c\.: c\.1799T>Ap\.: p\.Val600Glu \(p\.V600E\)Effect: missense_variant/, 'and they are');
+        assert.doesNotMatch(page.variant, /p\.: N\/A/);
+    }
     console.log('ok rsID lookup: rows that arrive late are the chosen allele\'s');
 }
 

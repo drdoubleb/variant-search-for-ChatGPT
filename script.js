@@ -9137,6 +9137,9 @@ const initVariantSearchUi = () => {
                 // needed — wait for the in-flight call (this also guarantees
                 // lastRecoderResult below reflects this query's attempt).
                 if (!recoderSetAside) await transcriptsPromise;
+                // (A newer lookup may have begun during that wait — and from here
+                // on this one reads the recoder's last answer, which is shared.)
+                if (!isCurrentSearch()) return;
                 refuseStatedReferenceMismatch();
                 // getTranscriptsList already asked the recoder for this exact query at
                 // the start of the lookup (and fetchWithRetry exhausted its retries if
@@ -9537,6 +9540,7 @@ const initVariantSearchUi = () => {
                                     // Use the currently normalised gVariant if available; otherwise fall back to the original query.
                                     const hgvsForVep = gVariant || query;
                                     const vepRes = await fetchLookupVep(hgvsForVep);
+                                    if (!isCurrentSearch()) return;
                                     const vepConsequences = vepRes.consequences || [];
                                     LookupProgress.step('vep', vepConsequences.length ? 'ok' : 'empty',
                                         vepConsequences.length ? vepRes.mostSevere || 'resolved' : 'no consequences');
@@ -9580,12 +9584,24 @@ const initVariantSearchUi = () => {
                                         altFound = true;
                                     }
                                 } catch (vepErr) {
+                                    if (!isCurrentSearch()) return;
                                     // Record the reason before falling through: the error thrown
                                     // below depends on whether this was an outage or a real miss.
                                     LookupProgress.step('vep', 'fail', describeUpstreamFailure(vepErr));
                                     if (vepErr && vepErr.retryable) LookupProgress.markUpstreamOutage('vep');
                                 }
                                 if (!altFound) {
+                                    /*
+                                     * A lookup that is no longer the current one stops here.
+                                     * What follows reads the recoder's last answer — shared
+                                     * with the newer lookup — and can run the lookup AGAIN for
+                                     * another reading of the name: "MECP2 c.474G>C", overtaken
+                                     * by "BRAF V600E" while its last fallback was out, went on
+                                     * to its second pass and took the page — MECP2's result
+                                     * under a box that said BRAF V600E, whose own lookup never
+                                     * showed. (Found in review.)
+                                     */
+                                    if (!isCurrentSearch()) return;
                                     // The name itself was rejected: say what is wrong with it.
                                     const wrongBase = lastRecoderResult.query === query ? referenceBaseRejection(lastRecoderResult.error) : null;
                                     if (wrongBase) {
@@ -9686,7 +9702,9 @@ const initVariantSearchUi = () => {
                     // "G12X" that came to no allele: X is left as what it is in
                     // HGVS, any amino acid, rather than shown as the stop it was
                     // provisionally read as.
-                    if (typedX) {
+                    // (Not where it WAS a stop: one base makes one, but there are
+                    // several alleles; or ClinVar knows variants by the stop's name.)
+                    if (typedX && !nameShared && !(proteinNameOpen && proteinNameOpen.reading === 'undetermined')) {
                         if (!proteinNameOpen) proteinNameOpen = { reading: 'x-unsettled', alleles: [] };
                         proteinNameOpen.stop = (query.match(/p\.[^\s:]+/i) || [])[0] || '';
                         query = query.replace(/Ter$/, 'Xaa');
@@ -9903,6 +9921,10 @@ const initVariantSearchUi = () => {
                     if (relevant.length && !displacesRefSeq) transcriptsFromRecoder = relevant;
                     if (unprompted) {
                         if (displacesRefSeq) {
+                            // ...and they are: rows the recoder brought while VEP was
+                            // being waited for carry no protein change, and stayed —
+                            // "p.: N/A · Effect: N/A" under this very sentence.
+                            transcriptsFromRecoder = [];
                             LookupProgress.step('vep', 'warn', 'RefSeq transcripts unavailable — the record\'s own are shown');
                         } else {
                             LookupProgress.step('vep', relevant.length ? 'ok' : 'empty',
@@ -10222,11 +10244,16 @@ const initVariantSearchUi = () => {
                                 + `no single-base change turns ${residue} into a stop codon`
                                 + (open.recordsKnown ? ', and no such variant is on record.' : '.');
                         } else if (open.reading === 'x-unsettled') {
-                            why.textContent = `"X" can mean a stop codon or any amino acid. No variant is on record for the stop `
-                                + `(${open.stop}), so it is shown as any amino acid (${codonOnlyResolutionGlobal.proteinChange}).`;
+                            // Ensembl did not say which change a stop here would be.
+                            // Nothing is claimed about records: MyVariant's name search
+                            // finds none for "KRAS p.Gln61Ter", and holds the variant.
+                            why.textContent = `"X" can mean a stop codon or any amino acid. Which nucleotide change a stop here `
+                                + `(${open.stop}) would be could not be looked up, so only the codon is shown, as any amino acid `
+                                + `(${codonOnlyResolutionGlobal.proteinChange}).`;
                         } else {
                             why.appendChild(document.createTextNode(
-                                `${codonOnlyResolutionGlobal.proteinChange} can be any of ${open.alleles.length} nucleotide changes and none of them `
+                                `${typedX ? '"X" was read as a stop codon. ' : ''}`
+                                + `${codonOnlyResolutionGlobal.proteinChange} can be any of ${open.alleles.length} nucleotide changes and none of them `
                                 + 'is on record, so no single one is shown: '));
                             open.alleles.slice(0, 4).forEach((id, i) => {
                                 if (i) why.appendChild(document.createTextNode(', '));
