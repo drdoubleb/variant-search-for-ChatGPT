@@ -285,14 +285,19 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
         assert.deepEqual(reading.alternatives, []);
     }
     // No record on either: MANE Select, with the Plus Clinical transcript to try
-    // if the name does not fit — and a namesake elsewhere is now worth a mention.
+    // if the name does not fit — and offered in any case, since no record
+    // decided between them (a deletion names no bases and "fits" either). A
+    // namesake elsewhere is now worth a mention too.
     {
         const reading = choose([p251l], 'c.473C>T', known);
         assert.equal(reading.accession, 'NM_001110792.2');
         assert.equal(reading.hit, null);
         assert.deepEqual(reading.untried, ['NM_004992.4']);
-        assert.deepEqual(reading.alternatives, [{ accession: 'NM_001316337.2', kind: 'listed', known: true }]);
-        assert.deepEqual(choose([], 'c.473C>T', known).alternatives, []);
+        assert.deepEqual(reading.alternatives, [{ accession: 'NM_004992.4', kind: 'plus', known: false },
+            { accession: 'NM_001316337.2', kind: 'listed', known: true }]);
+        assert.deepEqual(choose([], 'c.473C>T', known).alternatives, [{ accession: 'NM_004992.4', kind: 'plus', known: false }]);
+        // (A record that did decide leaves the unrecorded reading unmentioned, as before.)
+        assert.deepEqual(choose([t158m], 'c.473C>T', known).alternatives, [{ accession: 'NM_001110792.2', kind: 'select', known: false }]);
     }
     // A gene with no Plus Clinical transcript: MANE Select, as before.
     {
@@ -515,8 +520,11 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     assertResolved(assert, page, 'CDKN2A c.3G>C');
     assert.match(page.variant, /g\.: chr9:g\.21994328C>G/);
     assert.match(page.clinvar, /Variation ID: 1018474/);
+    // (NM_000077.6 is RefSeq's pick, which stands in here because Ensembl's MANE
+    // record did not answer in this recording and NCBI lists no MANE Select for
+    // CDKN2A. It used to be introduced as "the MANE Select transcript".)
     assert.equal(readingNote(page).textContent, 'CDKN2A c.3G>C is read on NM_058195.4, the transcript ClinVar names this variant on '
-        + '(a MANE Plus Clinical transcript of CDKN2A). If the MANE Select transcript was meant, look up NM_000077.6:c.3G>C.');
+        + '(a MANE Plus Clinical transcript of CDKN2A). If the RefSeq Select transcript was meant, look up NM_000077.6:c.3G>C.');
     assert.deepEqual(noteLinks(page), ['?variant=NM_000077.6:c.3G>C']);
     // A name ClinVar gives on MANE Select itself has nothing to add (scenario 8).
     assert.equal(readingNote(await runLookup(cassettes.kras35)), null);
@@ -695,6 +703,122 @@ const noteLinks = page => [...readingNote(page).querySelectorAll('a')].map(a => 
     assert.doesNotMatch(page.panel + page.variant, /MECP2|153296805/, 'nothing of the lookup that was overtaken');
     assert(!page.requests.some(r => /variant_recoder\/human\/NM_004992\.4:c\.474G>C/.test(r)), 'which did not go on to its second pass');
     console.log('ok gene-symbol name: a lookup that has been overtaken does not run itself again');
+}
+
+// 19. A name ClinVar itself settles can still be two variants. "MECP2
+//     c.916C>T" is ClinVar's name for p.Arg306Ter on MANE Select — and, on the
+//     Plus Clinical transcript the clinic counts on, R306C (ClinVar 11824).
+//     The first was shown with nothing to say there was a second. (Found in
+//     review; as recorded live.)
+{
+    // The pieces.
+    const record = (id, coding) => ({ _id: id, clinvar: { hgvs: { coding } } });
+    const stop = record('chrX:g.153296399G>A', ['NM_001110792.2:c.916C>T']);
+    const r306c = record('chrX:g.153296363G>A', ['NM_004992.4:c.916C>T']);
+    const minor = record('chrX:g.153296084G>A', ['NM_001316337.2:c.916C>T']);
+    const settled = { accession: 'NM_001110792.2', change: 'c.916C>T', hitId: stop._id };
+    assert.deepEqual(h.settledNameAlternatives([minor, stop, r306c], settled, 'NM_001110792.2', ['NM_004992.4']),
+        [{ accession: 'NM_004992.4', kind: 'plus', known: true }], 'the namesake on the Plus Clinical transcript, and not the one on a minor isoform');
+    assert.deepEqual(h.settledNameAlternatives([stop], settled, 'NM_001110792.2', ['NM_004992.4']), [], 'no record there: nothing to add');
+    assert.deepEqual(h.settledNameAlternatives([stop, { ...stop }], settled, 'NM_001110792.2', ['NM_004992.4']), []);
+    // ClinVar's name on the Plus Clinical transcript: MANE Select is offered, known or not.
+    const onPlus = { accession: 'NM_004992.4', change: 'c.916C>T', hitId: r306c._id };
+    assert.deepEqual(h.settledNameAlternatives([r306c], onPlus, 'NM_001110792.2', ['NM_004992.4']),
+        [{ accession: 'NM_001110792.2', kind: 'select', known: false }]);
+    assert.deepEqual(h.settledNameAlternatives([r306c, stop], onPlus, 'NM_001110792.3', ['NM_004992.4']),
+        [{ accession: 'NM_001110792.3', kind: 'select', known: true }], 'in whichever version');
+    // How each is put.
+    const said = reading => { const n = h.nameReadingNote(reading); return n && [n.text, ...n.links.map(l => `${l.lead} ${l.variant}`)].join(' '); };
+    const base = { typed: 'MECP2 c.916C>T', gene: 'MECP2', change: 'c.916C>T', accession: 'NM_001110792.2',
+        basis: 'the MANE Select transcript of MECP2', select: 'NM_001110792.2', untried: [], rejected: [] };
+    assert.equal(said({ ...base, alternatives: [] }), null);
+    assert.equal(said({ ...base, alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: true }] }),
+        'MECP2 c.916C>T is read on NM_001110792.2, the MANE Select transcript of MECP2. Counted on the MANE Plus Clinical transcript '
+        + 'the same name is another variant, which ClinVar lists: NM_004992.4:c.916C>T');
+    assert.equal(said({ ...base, alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: false }] }),
+        'MECP2 c.916C>T is read on NM_001110792.2, the MANE Select transcript of MECP2. If the MANE Plus Clinical transcript was meant, look up NM_004992.4:c.916C>T');
+    assert.equal(said({ ...base, searchFailed: true, alternatives: [{ accession: 'NM_004992.4', kind: 'plus', known: false }] }),
+        'MECP2 c.916C>T is read on NM_001110792.2, the MANE Select transcript of MECP2. MyVariant could not be searched for the name, '
+        + 'so no record decided this. If the MANE Plus Clinical transcript was meant, look up NM_004992.4:c.916C>T');
+    assert.equal(said({ ...base, accession: 'NM_004992.4', basis: 'a MANE Plus Clinical transcript of MECP2',
+        alternatives: [{ accession: 'NM_001110792.2', kind: 'select', known: true }] }),
+    'MECP2 c.916C>T is read on NM_004992.4, a MANE Plus Clinical transcript of MECP2. Counted on the MANE Select transcript '
+        + 'the same name is another variant, which ClinVar lists: NM_001110792.2:c.916C>T');
+    assert.equal(said({ ...base, accession: 'NM_058195.4', basis: 'x', select: 'NM_000077.6', selectLabel: 'RefSeq Select',
+        alternatives: [{ accession: 'NM_000077.6', kind: 'select', known: false }] }),
+    'MECP2 c.916C>T is read on NM_058195.4, x. If the RefSeq Select transcript was meant, look up NM_000077.6:c.916C>T');
+
+    const page = await runLookup(cassettes.mecp2R306);
+    assertResolved(assert, page, 'MECP2 c.916C>T');
+    assert.match(page.variant, /g\.: chrX:g\.153296399G>A/);
+    assert.match(page.variant, /Transcript: NM_001110792\.2 \(MANE Select\)c\.: c\.916C>Tp\.: p\.Arg306Ter/);
+    assert.match(page.clinvar, /Variation ID: 11819/);
+    assert.equal(readingNote(page).textContent, 'MECP2 c.916C>T is read on NM_001110792.2, the MANE Select transcript of MECP2. '
+        + 'Counted on the MANE Plus Clinical transcript the same name is another variant, which ClinVar lists: NM_004992.4:c.916C>T.');
+    assert.deepEqual(noteLinks(page), ['?variant=NM_004992.4:c.916C>T']);
+    console.log('ok gene-symbol name: a name ClinVar settles on MANE Select still names its namesake on the Plus Clinical transcript');
+}
+
+// 20. No record to decide the reading. "NF1 c.6789_6792del" is counted on
+//     NM_000267 (ClinVar 216866); a deletion names no bases, so on MANE Select
+//     it "fits" as well — four other bases. With MyVariant's name search not
+//     answering that is what was shown, "Variant resolved", without a word
+//     (the README's own "before" row). It is still what is read; the card now
+//     says no record decided it, and offers the other transcript. (Found in
+//     review; the MANE Select answers as recorded live.)
+{
+    const cassette = cassettes.nf1LegacyDel;
+    const searchDown = (url, key, respond) => (key.startsWith('myvariant.info/v1/query?q=NF1') ? respond({ error: 'Service Unavailable' }, 503) : undefined);
+    const down = await runLookup(cassette, { route: searchDown });
+    assertResolved(assert, down, 'NF1 c.6789_6792del, name search down');
+    assert.match(down.variant, /g\.: chr17:g\.29665127_29665130del/, 'read on MANE Select, there being nothing to say otherwise');
+    assert.equal(readingNote(down).textContent, 'NF1 c.6789_6792del is read on NM_001042492.3, the MANE Select transcript of NF1. '
+        + 'MyVariant could not be searched for the name, so no record decided this. '
+        + 'If the MANE Plus Clinical transcript was meant, look up NM_000267.4:c.6789_6792del.');
+    assert.deepEqual(noteLinks(down), ['?variant=NM_000267.4:c.6789_6792del']);
+    assert.match(down.panel, /Annotations · MyVariant\.info/, 'and the panel has a MyVariant step');
+    // The search answering that it holds no record under the name: the same
+    // reading and the same offer, without the sentence about MyVariant.
+    const none = await runLookup(cassette, { route: (url, key, respond) => (key.startsWith('myvariant.info/v1/query?q=NF1') ? respond({ total: 0, hits: [] }) : undefined) });
+    assertResolved(assert, none, 'NF1 c.6789_6792del, no record under the name');
+    assert.match(none.variant, /g\.: chr17:g\.29665127_29665130del/);
+    assert.equal(readingNote(none).textContent, 'NF1 c.6789_6792del is read on NM_001042492.3, the MANE Select transcript of NF1. '
+        + 'If the MANE Plus Clinical transcript was meant, look up NM_000267.4:c.6789_6792del.');
+    // With the search answering as recorded, the record decides — as before.
+    const found = await runLookup(cassette);
+    assert.match(found.variant, /g\.: chr17:g\.29665752_29665755del/);
+    assert.match(found.clinvar, /Variation ID: 216866/);
+    console.log('ok gene-symbol name: with no record to decide, the other clinical transcript is offered');
+}
+
+// 21. "Read on the version it does have" is said of the transcript it happened
+//     to. Here MANE Select's version is newer than GRCh37's annotation, the
+//     name does not fit that transcript in any version, and it is read on the
+//     Plus Clinical one: the final pass must not say its version was dropped.
+{
+    const cassette = cassettes.mecp2OnPlusClinical;
+    const unknown = 'Unable to parse HGVS notation \'NM_001110792.2:c.474G>C\':  : Could not get a Transcript object for \'NM_001110792.2\'';
+    const recordedFor = (key) => cassette.responses[key.replace('NM_001110792:', 'NM_001110792.2:')];
+    const page = await runLookup(cassette, {
+        route: (url, key, respond) => {
+            // The versioned accession is unknown to GRCh37's annotation and to NCBI's placement...
+            if (/NM_001110792\.2:c\.474G>C/.test(key) && /variant_recoder|\/vep\//.test(key)) return respond({ error: unknown }, 400);
+            if (/api\.ncbi\.nlm\.nih\.gov\/variation\/v0\/hgvs\/NM_001110792\.2:/.test(key)) return respond({ error: 'no GRCh37 placement' }, 404);
+            // ...and without its version it is read, and rejected for its base, as recorded.
+            if (/NM_001110792:c\.474G>C/.test(key)) {
+                const recorded = recordedFor(key);
+                return recorded ? respond(recorded.body, recorded.status) : undefined;
+            }
+            return undefined;
+        }
+    });
+    assertResolved(assert, page, 'MECP2 c.474G>C, MANE Select version unknown to GRCh37');
+    assert.deepEqual(recoderQueries(page).filter((q, i, all) => all.indexOf(q) === i),
+        ['NM_001110792.2:c.474G>C', 'NM_001110792:c.474G>C', 'NM_004992.4:c.474G>C']);
+    assert.match(page.variant, /Transcript: NM_004992\.4c\.: c\.474G>Cp\.: p\.Thr158=/);
+    assert.match(page.panel, /read as NM_004992\.4:c\.474G>C/);
+    assert.doesNotMatch(page.panel, /is a newer version than GRCh37's annotation has/, 'that was another transcript');
+    console.log('ok gene-symbol name: the version note stays with the transcript it is about');
 }
 
 console.log('Gene-symbol name tests passed');

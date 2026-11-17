@@ -2565,14 +2565,18 @@ function chooseNameReading(hits, gene, change, standard) {
     const sameVariant = other => Boolean(chosen.hit && other.hit && normalizedGenomicId(chosen.hit._id) === normalizedGenomicId(other.hit._id));
     // What else the name could have been. MANE Select is always worth naming
     // when the name was read elsewhere; a Plus Clinical transcript when a
-    // record shows the name on it; and a record on some further transcript
-    // only when no record backs the reading chosen — once the name is a known
-    // variant on a transcript the gene is reported on, its namesakes on
-    // minor isoforms are noise ("MECP2 c.473C>T" is also a benign variant on
-    // NM_001316337, which is where the old hint used to send people).
+    // record shows the name on it — or when NO record decided the reading,
+    // because then the name may just as well be counted there: a deletion
+    // names no bases and "fits" MANE Select whatever was meant, and
+    // "NF1 c.6789_6792del", with MyVariant's search not answering, came out as
+    // four other bases on MANE Select without a word; and a record on some
+    // further transcript only when no record backs the reading chosen — once
+    // the name is a known variant on a transcript the gene is reported on, its
+    // namesakes on minor isoforms are noise ("MECP2 c.473C>T" is also a benign
+    // variant on NM_001316337, which is where the old hint used to send people).
     const alternatives = readings.concat(listed && !chosen.hit ? [listed] : [])
         .filter(other => other !== chosen && !sameVariant(other))
-        .filter(other => other.kind === 'select' || other.hit)
+        .filter(other => other.kind === 'select' || other.hit || (!chosen.hit && other.kind === 'plus'))
         .map(other => ({ accession: other.accession, kind: other.kind, known: Boolean(other.hit) }));
     return {
         accession: chosen.accession,
@@ -2614,6 +2618,31 @@ function transcriptsNamingChange(hit, change) {
  * sentence that introduces it). `reading` is { typed, change, accession, basis,
  * select, alternatives, rejected } as the lookup records it.
  */
+/*
+ * What else a name could have been, when ClinVar's own name for a variant
+ * settled it: the gene's other clinical transcripts on which ANOTHER record
+ * carries the same name, and MANE Select in any case.
+ *
+ * "MECP2 c.916C>T" is ClinVar's name for p.Arg306Ter on MANE Select — and, on
+ * the Plus Clinical transcript every clinic letter counts on, for R306C. The
+ * first was shown with nothing to say there was a second. (Found in review.)
+ * `settled` is { accession, change, hitId }.
+ */
+function settledNameAlternatives(hits, settled, select, plusClinical) {
+    const bare = accession => String(accession || '').replace(/\.\d+$/, '');
+    const settledId = normalizedGenomicId(settled.hitId);
+    const out = [];
+    const consider = (accession, kind) => {
+        if (!accession || bare(accession) === bare(settled.accession) || out.some(o => bare(o.accession) === bare(accession))) return;
+        const other = (hits || []).find(hit => normalizedGenomicId(hit._id) !== settledId
+            && hitMatchesVariantQuery(hit, `${bare(accession)}:${settled.change}`));
+        if (kind === 'select' || other) out.push({ accession, kind, known: Boolean(other) });
+    };
+    consider(select, 'select');
+    for (const accession of plusClinical || []) consider(accession, 'plus');
+    return out;
+}
+
 function nameReadingNote(reading) {
     if (!reading || !reading.accession) return null;
     const bare = accession => String(accession || '').replace(/\.\d+$/, '');
@@ -2628,14 +2657,20 @@ function nameReadingNote(reading) {
             .map(r => `${r.accession}, ${r.basis} (${r.actual} there, not ${r.stated})`).join(', nor on ')}.`;
         return { text, links: [] };
     }
+    // (RefSeq's own pick stands in where a gene has no MANE Select; it is not called one.)
+    const select = reading.selectLabel || 'MANE Select';
+    const transcriptOf = other => (other.kind === 'select' ? `the ${select} transcript`
+        : other.kind === 'plus' ? 'the MANE Plus Clinical transcript' : 'another transcript');
     return {
-        text: `${text}.`,
+        // No record decided the reading: say so when that is for want of asking.
+        text: `${text}.${reading.searchFailed ? ' MyVariant could not be searched for the name, so no record decided this.' : ''}`,
         links: alternatives.map(other => ({
             variant: `${other.accession}:${reading.change}`,
-            lead: other.kind === 'select'
-                ? 'If the MANE Select transcript was meant, look up'
-                : `Counted on ${other.kind === 'plus' ? 'the MANE Plus Clinical transcript' : 'another transcript'}`
-                    + ' the same name is another variant, which ClinVar lists:'
+            lead: other.known
+                ? `Counted on ${transcriptOf(other)} the same name is another variant, which ClinVar lists:`
+                : other.kind === 'listed'
+                    ? 'Counted on another transcript the same name is another variant, which ClinVar lists:'
+                    : `If ${transcriptOf(other)} was meant, look up`
         }))
     };
 }
@@ -2725,17 +2760,27 @@ function clinvarSearchTextForName(name) {
         .replace(/^[A-Za-z]{2}_\d+(?:\.\d+)?(?:\([^)]*\))?:/, '')
         .replace(/[()\s]/g, '')
         .replace(/^[cpgnm]\./i, '');
-    const fs = text.match(/^([A-Z])(\d+)([A-Z])?fs(?:\*|X|Ter)?(\d+)?$/);
-    if (fs && aaSingleToThree(fs[1]) && (!fs[3] || aaSingleToThree(fs[3]))) {
-        return `${aaSingleToThree(fs[1])}${fs[2]}${fs[3] ? aaSingleToThree(fs[3]) : ''}fs${fs[4] ? `Ter${fs[4]}` : ''}`;
+    // (Single-letter codes are taken in either case: "q1756pfs*74" is the same name.)
+    const three = aa => aaSingleToThree(String(aa).toUpperCase());
+    const residues = list => list.every(aa => three(aa) && aa !== '*');
+    const fs = text.match(/^([A-Za-z])(\d+)([A-Za-z])?fs(?:\*|X|Ter)?(\d+)?$/i);
+    if (fs && residues([fs[1]].concat(fs[3] ? [fs[3]] : []))) {
+        return `${three(fs[1])}${fs[2]}${fs[3] ? three(fs[3]) : ''}fs${fs[4] ? `Ter${fs[4]}` : ''}`;
     }
     // Likewise a deletion, duplication or insertion over a range of residues:
     // ClinVar's records carry it in three-letter codes ("Glu746_Ala750del", 3
     // records) and it has never seen "E746_A750del".
-    const indel = text.match(/^([A-Z])(\d+)_([A-Z])(\d+)(delins|del|dup|ins)([A-Z]*)$/);
-    if (indel && [indel[1], indel[3], ...indel[6]].every(aa => aaSingleToThree(aa) && aa !== '*')) {
-        return `${aaSingleToThree(indel[1])}${indel[2]}_${aaSingleToThree(indel[3])}${indel[4]}${indel[5]}`
-            + [...indel[6]].map(aa => aaSingleToThree(aa)).join('');
+    const indel = text.match(/^([A-Za-z])(\d+)_([A-Za-z])(\d+)(delins|del|dup|ins)([A-Za-z]*)$/i);
+    if (indel && residues([indel[1], indel[3], ...indel[6]])) {
+        return `${three(indel[1])}${indel[2]}_${three(indel[3])}${indel[4]}${indel[5].toLowerCase()}`
+            + [...indel[6]].map(aa => three(aa)).join('');
+    }
+    // And a stop. With the "*" merely removed, "KRAS G12*" was searched as "G12",
+    // which finds other things; a record of the stop is titled "(p.Gly12Ter)".
+    const stop = text.match(/^([A-Za-z]{3}|[A-Za-z])(\d+)(?:\*|X|Ter)$/i);
+    if (stop) {
+        const ref = stop[1].length === 3 ? aaSingleToThree(aaThreeToSingle(stop[1]) || '') : three(stop[1]);
+        if (ref && ref !== 'Ter') return `${ref}${stop[2]}Ter`;
     }
     return text.replace(/[^A-Za-z0-9+\->_]/g, '');
 }
@@ -7370,6 +7415,33 @@ function rankRsidAlleles(hits) {
         .map(entry => entry.hit);
 }
 
+/*
+ * The same question for a protein-level name. Ensembl gives every allele that
+ * produces the protein change, in an order that changes from call to call; when
+ * MyVariant holds a record for more than one, the first of them in that order
+ * was shown. "KRAS Y64*" is TAC -> TAG or TAA, both on record: four calls gave
+ * the alleles as G,A / G,A / A,G / A,G, and the page showed c.192C>G or c.192C>A
+ * accordingly.
+ *
+ * Ordered by how well documented each is — ClinVar submissions, how common it
+ * is, whether dbSNP has seen it — and, where that settles nothing, by the id,
+ * so that the answer is at least the same every time. `tied` says the first
+ * two could not be told apart that way. Takes and returns { id, record, ... }.
+ */
+function rankAllelesOnRecord(entries) {
+    const documented = (record) => {
+        const submissions = [].concat(record?.clinvar || []).reduce((n, c) => n + [].concat(c?.rcv || []).length, 0);
+        const frequency = Math.max(0, ...[record?.gnomad_exome?.af?.af, record?.gnomad_genome?.af?.af]
+            .map(Number).filter(Number.isFinite));
+        return [submissions, frequency, record?.dbsnp?.rsid ? 1 : 0];
+    };
+    const ranked = (entries || []).map(entry => ({ entry, rank: documented(entry.record) }))
+        .sort((a, b) => (b.rank[0] - a.rank[0]) || (b.rank[1] - a.rank[1]) || (b.rank[2] - a.rank[2])
+            || String(a.entry.id).localeCompare(String(b.entry.id)));
+    const tied = ranked.length > 1 && ranked[0].rank.every((value, i) => value === ranked[1].rank[i]);
+    return { ranked: ranked.map(r => r.entry), tied };
+}
+
 // Query MyVariant.info by rsID or other variant identifier. Returns the best matching hit when possible.
 async function queryMyVariantById(identifier, expectedGenomic = '') {
     return (await searchMyVariant(identifier, expectedGenomic))[0] || null;
@@ -8137,8 +8209,9 @@ const initVariantSearchUi = () => {
                     variantPart = variantPart.charAt(0).toLowerCase() + variantPart.slice(1);
                 }
                 // One spelling for a substitution: three-letter codes, "Ter" for a stop.
+                // ("p.(Arg213Ter)" is the same change, written as a prediction.)
                 if (/^p\./i.test(variantPart)) {
-                    variantPart = 'p.' + normalizeProteinSubstitution(variantPart.replace(/^p\./i, ''));
+                    variantPart = 'p.' + normalizeProteinSubstitution(variantPart.replace(/^p\./i, '').replace(/^\((.+)\)$/, '$1'));
                 }
                 // For c. variant, just ensure lower-case c and uppercase gene part
                 if (/^c\./i.test(variantPart)) {
@@ -8183,8 +8256,9 @@ const initVariantSearchUi = () => {
                     variantPart = 'p.' + variantPart;
                 }
                 // One spelling for a substitution: three-letter codes, "Ter" for a stop.
+                // ("p.(R213X)" is the same change, written as a prediction.)
                 if (/^p\./.test(variantPart)) {
-                    variantPart = 'p.' + normalizeProteinSubstitution(variantPart.slice(2));
+                    variantPart = 'p.' + normalizeProteinSubstitution(variantPart.slice(2).replace(/^\((.+)\)$/, '$1'));
                 }
                 return `${gene}:${variantPart}`;
             }
@@ -8233,7 +8307,9 @@ const initVariantSearchUi = () => {
             LookupProgress.step('clinvarName', 'ok',
                 otherNameNote(renamed));
         }
-        if (rerun && rerun.versionDropped) {
+        // (Said of the transcript it happened to — a later pass may be reading
+        // the name on another one.)
+        if (rerun && rerun.versionDropped && query.startsWith(`${rerun.versionDropped.replace(/\.\d+$/, '')}:`)) {
             LookupProgress.note('parse', `${rerun.versionDropped} is a newer version than GRCh37's annotation has `
                 + '— read on the version it does have');
         }
@@ -8827,6 +8903,11 @@ const initVariantSearchUi = () => {
             // array is defined outside of the recoder loop so that it can be referenced later, e.g. when
             // free‑text MyVariant searches fail and we want to try alternate g. notations such as delins.
             let candidateVariants = [];
+            // Which of the recoder's alleles each candidate spelling belongs to,
+            // and — where a protein-level name has records for several alleles —
+            // the ones not shown: { others: [id], tied }.
+            const candidateAlleleIndex = new Map();
+            let allelesOnRecord = null;
             const vepByVariant = new Map();
             const vepStartedAt = new Map();
             const fetchLookupVep = variant => {
@@ -8914,6 +8995,7 @@ const initVariantSearchUi = () => {
             // and everything MyVariant returned for the name as typed.
             let nameReadOn = rerun && rerun.readOn ? { ...rerun.readOn } : null;
             let nameSearchHits = [];
+            let nameSearchFailed = false;
             // A gene-symbol name that ClinVar's own name for a variant settled:
             // { typed, gene, change, accession } — the transcript of that name.
             let nameSettledByClinvar = null;
@@ -8991,6 +9073,11 @@ const initVariantSearchUi = () => {
                     } catch (searchErr) {
                         console.log('[DEBUG] Direct MyVariant search error:', searchErr);
                         named = [];
+                        // Not the same as "no record carries the name": the card
+                        // says so where a record could have decided the reading.
+                        nameSearchFailed = true;
+                        LookupProgress.step('myvariant', 'warn',
+                            `name search failed (${describeUpstreamFailure(searchErr)}) — records under this name could not be checked`);
                     }
                     if (!isCurrentSearch()) return;
                     nameSearchHits = named.raw || [];
@@ -9015,7 +9102,8 @@ const initVariantSearchUi = () => {
                             typed: `${geneSymbolName.gene} ${geneSymbolName.change}`,
                             gene: geneSymbolName.gene,
                             change: geneSymbolName.change,
-                            accession: clinvarNamedTranscript(hit, geneSymbolName.change)
+                            accession: clinvarNamedTranscript(hit, geneSymbolName.change),
+                            hitId: hit._id
                         };
                     } else if (geneSymbolName) {
                         const standard = await standardTranscriptForGene(geneSymbolName.gene);
@@ -9032,9 +9120,11 @@ const initVariantSearchUi = () => {
                                 accession: reading.accession,
                                 basis: reading.basis,
                                 select: standard.accession,
+                                selectLabel: /RefSeq Select/.test(standard.basis) ? 'RefSeq Select' : 'MANE Select',
                                 alternatives: reading.alternatives,
                                 untried: reading.untried,
-                                rejected: []
+                                rejected: [],
+                                searchFailed: nameSearchFailed && !reading.hit
                             };
                             // (gVariant still holds the name as typed until something resolves.)
                             if (gVariant === query) gVariant = `${reading.accession}:${geneSymbolName.change}`;
@@ -9213,22 +9303,31 @@ const initVariantSearchUi = () => {
                     // (GRCh38) entries each cost an Ensembl /map round-trip and used to
                     // run strictly in series.
                     const conversions = [];
-                    for (const sub of selectRecoderAlleles(recoderData, query)) {
+                    // (Which of the recoder's alleles each spelling is one of:
+                    // an allele comes as HGVS and as SPDI, and those can differ.)
+                    const conversionAllele = [];
+                    selectRecoderAlleles(recoderData, query).forEach((sub, alleleIndex) => {
                         // hgvsg / spdi entries may be a string or an array
                         if (sub.hgvsg) {
                             const hgvsgList = Array.isArray(sub.hgvsg) ? sub.hgvsg : [sub.hgvsg];
                             for (const hgvsg of hgvsgList) {
                                 conversions.push(convertCandidate(hgvsg, convertHgvsgToMyVariant, 'hgvsg'));
+                                conversionAllele.push(alleleIndex);
                             }
                         }
                         if (sub.spdi) {
                             const spdiList = Array.isArray(sub.spdi) ? sub.spdi : [sub.spdi];
                             for (const spdi of spdiList) {
                                 conversions.push(convertCandidate(spdi, convertSpdiToMyVariant, 'SPDI'));
+                                conversionAllele.push(alleleIndex);
                             }
                         }
-                    }
-                    candidateVariants.push(...(await Promise.all(conversions)).filter(Boolean));
+                    });
+                    (await Promise.all(conversions)).forEach((id, i) => {
+                        if (!id) return;
+                        candidateVariants.push(id);
+                        if (!candidateAlleleIndex.has(id)) candidateAlleleIndex.set(id, conversionAllele[i]);
+                    });
                 }
                 // Remove duplicates and ensure at least one candidate exists
                 const uniqueCandidates = Array.from(new Set(candidateVariants));
@@ -9258,6 +9357,9 @@ const initVariantSearchUi = () => {
                             return null;
                         }
                     }));
+                    // Every candidate whose record fits the name, in the recoder's
+                    // order; the first of them is the one taken...
+                    const fitting = [];
                     for (let candIdx = 0; candIdx < uniqueCandidates.length; candIdx++) {
                         const cand = uniqueCandidates[candIdx];
                         const ann = candidateAnns[candIdx];
@@ -9267,11 +9369,27 @@ const initVariantSearchUi = () => {
                             selectedVar = cand;
                         }
                         const needsTranscriptMatch = Boolean(targetCdnaGlobal || targetProtGlobal);
-                        if (!needsTranscriptMatch || hitMatchesVariantQuery(ann, query)) {
-                            selectedAnn = ann;
-                            selectedVar = cand;
-                            break;
+                        if (!needsTranscriptMatch || hitMatchesVariantQuery(ann, query)) fitting.push({ id: cand, record: ann });
+                    }
+                    if (fitting.length) {
+                        // ...unless a protein-level name has records for more than
+                        // one ALLELE (see rankAllelesOnRecord): then the best
+                        // documented, and the card names the others.
+                        const perAllele = new Map();
+                        for (const entry of fitting) {
+                            const allele = candidateAlleleIndex.has(entry.id) ? candidateAlleleIndex.get(entry.id) : entry.id;
+                            if (!perAllele.has(allele)) perAllele.set(allele, entry);
                         }
+                        let chosen = fitting[0];
+                        if (isProteinVariant && !/c\./i.test(query) && perAllele.size > 1) {
+                            const { ranked, tied } = rankAllelesOnRecord([...perAllele.values()]);
+                            chosen = ranked[0];
+                            allelesOnRecord = { others: ranked.slice(1).map(entry => entry.id), tied };
+                            LookupProgress.note('recoder', `${ranked.length} alleles on record for this protein change — showing `
+                                + `${tied ? 'one of them' : 'the best documented'}, ${chosen.id}`);
+                        }
+                        selectedAnn = chosen.record;
+                        selectedVar = chosen.id;
                     }
                     // The recoder can resolve an exact HGVS expression even when
                     // MyVariant omits that transcript's annotation. Its mapped
@@ -9651,7 +9769,7 @@ const initVariantSearchUi = () => {
                                     // accession without its version as the one it has: look that
                                     // up, and say so. (Once: the second pass does not come here.)
                                     const tooNew = lastRecoderResult.query === query ? unknownTranscriptVersion(lastRecoderResult.error) : '';
-                                    if (tooNew && query.startsWith(`${tooNew}:`) && !(rerun && rerun.versionDropped)) {
+                                    if (tooNew && query.startsWith(`${tooNew}:`) && !(rerun && rerun.versionDropped === tooNew)) {
                                         return runLookup(null, rerunWith({
                                             query: query.replace(tooNew, tooNew.replace(/\.\d+$/, '')),
                                             gene: geneHintGlobal || '',
@@ -9977,15 +10095,25 @@ const initVariantSearchUi = () => {
                         // Not known in time: the Transcript line still says where it was read.
                     }
                     if (!isCurrentSearch()) return;
-                    const select = (clinical && (clinical.select || clinical.refseqSelect))
-                        || maneAccessions.find(a => /^NM_\d+\.\d+$/.test(a)) || '';
-                    if (select && bare(select) !== bare(nameSettledByClinvar.accession)) {
+                    const maneSelect = (clinical && clinical.select) || maneAccessions.find(a => /^NM_\d+\.\d+$/.test(a)) || '';
+                    const select = maneSelect || (clinical && clinical.refseqSelect) || '';
+                    const selectLabel = maneSelect ? 'MANE Select' : 'RefSeq Select';
+                    // The gene's other clinical transcripts on which another record
+                    // carries this very name (see settledNameAlternatives) — and
+                    // MANE Select, where ClinVar's name is on another transcript.
+                    const alternatives = select
+                        ? settledNameAlternatives(nameSearchHits, nameSettledByClinvar, select, clinical ? clinical.plusClinical : [])
+                        : [];
+                    if (alternatives.length) {
+                        const onSelect = bare(select) === bare(nameSettledByClinvar.accession);
                         const plus = Boolean(clinical && clinical.plusClinical.some(a => bare(a) === bare(nameSettledByClinvar.accession)));
                         nameReadOn = {
                             ...nameSettledByClinvar,
-                            basis: `the transcript ClinVar names this variant on${plus ? ` (a MANE Plus Clinical transcript of ${nameSettledByClinvar.gene})` : ''}`,
+                            basis: onSelect ? `the ${selectLabel} transcript of ${nameSettledByClinvar.gene}`
+                                : `the transcript ClinVar names this variant on${plus ? ` (a MANE Plus Clinical transcript of ${nameSettledByClinvar.gene})` : ''}`,
                             select,
-                            alternatives: [{ accession: select, kind: 'select', known: false }],
+                            selectLabel,
+                            alternatives,
                             untried: [],
                             rejected: []
                         };
@@ -10209,16 +10337,12 @@ const initVariantSearchUi = () => {
                     const note = document.createElement('span');
                     note.className = 'protein-change-shared-note';
                     note.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
-                    const shownIds = codonOnlyResolutionGlobal ? []
-                        : [].concat((annotation && annotation.clinvar) || []).map(block => String((block && block.variant_id) || ''));
-                    const others = nameShared.variants.filter(v => !shownIds.includes(v.id));
+                    // (All of them, whatever is shown: which of them a record on the
+                    // page is, is not always knowable — it may carry no ClinVar id.)
+                    const others = nameShared.variants;
                     const all = `${nameShared.variants.length} ${typedName.gene} variants in ClinVar `
                         + (nameShared.how === 'several' ? `go by "${typedName.name}"` : `have the protein change "${typedName.name}"`);
-                    note.appendChild(document.createTextNode(codonOnlyResolutionGlobal
-                        ? `${all}, and the name does not say which: `
-                        : others.length < nameShared.variants.length
-                            ? `${all}. Shown is the one Ensembl gives for it; the other${others.length === 1 ? ' is' : 's are'} `
-                            : `${all}, none of them the allele Ensembl gives for it, which is what is shown: `));
+                    note.appendChild(document.createTextNode(`${all}, and the name does not say which: `));
                     others.slice(0, 6).forEach((variant, i) => {
                         if (i) note.appendChild(document.createTextNode(', '));
                         const link = document.createElement('a');
@@ -10299,6 +10423,27 @@ const initVariantSearchUi = () => {
                     }
                     const sharedNote = sharedProteinChangeNote();
                     if (sharedNote) content.appendChild(sharedNote);
+                    if (allelesOnRecord && allelesOnRecord.others.length) {
+                        // A protein change does not say which allele; MyVariant holds
+                        // several. Which one is shown is a choice made for the user.
+                        const { others, tied } = allelesOnRecord;
+                        const typed = (query.match(/p\.[^\s:]+/i) || [])[0] || 'This protein change';
+                        const alleleNote = document.createElement('span');
+                        alleleNote.className = 'protein-alleles-note';
+                        alleleNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                        alleleNote.appendChild(document.createTextNode(`${typed} is ${others.length + 1} alleles on record. `
+                            + (tied ? 'Nothing tells them apart; this is one of them, ' : 'This is the best documented one; ')
+                            + `the other${others.length === 1 ? ' is' : 's are'} `));
+                        others.slice(0, 4).forEach((id, i) => {
+                            if (i) alleleNote.appendChild(document.createTextNode(', '));
+                            const link = document.createElement('a');
+                            link.setAttribute('href', `?variant=${encodeURIComponent(id)}`);
+                            link.textContent = id;
+                            alleleNote.appendChild(link);
+                        });
+                        alleleNote.appendChild(document.createTextNode(others.length > 4 ? ', …' : '.'));
+                        content.appendChild(alleleNote);
+                    }
                     if (rsidAlleles.length > 1) {
                         // An rsID with several alleles does not say which one is
                         // meant. The best documented one is shown; that is a choice
@@ -12868,7 +13013,8 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         // ClinVar matching + display
         complementBase, normalizeCdnaForMatch, findExactClinvarRegionMatch,
         parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars,
-        isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel,
+        isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
+        settledNameAlternatives,
         parseClinvarEventKind, getQueryAffectedSpan,
         isTruncatingClinvarVariant, isSynonymousClinvarVariant,
         getClinvarEffectiveClassification, getPathogenicityColor,

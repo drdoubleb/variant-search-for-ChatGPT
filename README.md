@@ -335,11 +335,40 @@ transcript the name was read on and links the other reading:
 > MECP2. If the MANE Select transcript was meant, look up
 > NM_001110792.2:c.473C>T.
 
+A second review found three places where there was something to choose and the
+card said nothing:
+
+- **One name, two known variants.** `MECP2 c.916C>T` is ClinVar's name for
+  p.Arg306Ter on MANE Select, so rule 1 settles it at once — and on the Plus
+  Clinical transcript, the numbering the clinic uses, the same name is R306C
+  (ClinVar 11824). The card now adds: *Counted on the MANE Plus Clinical
+  transcript the same name is another variant, which ClinVar lists:
+  NM_004992.4:c.916C>T* (`settledNameAlternatives`).
+- **No record to decide.** Under rule 3 a deletion "fits" MANE Select whatever
+  was meant. `NF1 c.6789_6792del` with MyVariant's name search not answering
+  came out as four other bases on MANE Select, *Variant resolved* — the
+  "before" row of the table above. It is still read there, there being nothing
+  to say otherwise, but the card now reads: *NF1 c.6789_6792del is read on
+  NM_001042492.3, the MANE Select transcript of NF1. MyVariant could not be
+  searched for the name, so no record decided this. If the MANE Plus Clinical
+  transcript was meant, look up NM_000267.4:c.6789_6792del.* The same offer is
+  made, without the middle sentence, for a name no record carries.
+- **RefSeq Select is not MANE Select.** Where a gene has no MANE Select in
+  NCBI's list (CDKN2A, whose RefSeq record has moved a version on), RefSeq's own
+  pick stands in — and was introduced as "the MANE Select transcript". It is
+  called what it is.
+
 The same note appears when ClinVar's own name for a variant is on a transcript
 other than MANE Select — `CDKN2A c.3G>C` is ClinVar's name for a p14ARF variant
 on NM_058195.4, and on NM_000077 it is p16's start codon. The row shown on the
 card is the transcript the name was read on, in whichever version GRCh37's
 annotation carries (`NM_000267.3` for a name read on `NM_000267.4`).
+
+The lookup runs itself again to read a name on another transcript, and a lookup
+that has been overtaken must not: `MECP2 c.474G>C`, with `BRAF V600E` submitted
+while its last fallback was out, went on to its second pass and took the page —
+MECP2's result under a box that said BRAF V600E. A lookup now stops as soon as
+it is no longer the current one, before any second pass.
 
 If NCBI's list cannot be had, whether the gene has a second clinical transcript
 is *unknown*, which is not the same as none: a record that carries the name on
@@ -536,6 +565,13 @@ failure onto whichever lookup was running by then: `rs80357906`, then
 `BRCA1 c.5382insC`, ended in *"Lookup could not complete … upstream outage"* for
 a name that resolves, because the first lookup's recoder had just given up. A
 lookup's recoder now touches nothing once another lookup has begun.
+
+One more, from a second review: VEP answering after all in that window, from
+Ensembl's own transcript set because its RefSeq one failed. Such an answer is
+not allowed to displace the record's RefSeq row, and the panel says *"RefSeq
+transcripts unavailable — the record's own are shown"* — but the recoder's
+rows, arrived meanwhile, were what was shown: `p.: N/A · Effect: N/A` under
+that sentence. They are set aside there too.
 
 Without VEP the record's own rows are used, and there a bare `c.` from ClinVar's
 list no longer displaces snpEff's row for the same transcript: ClinVar lists the
@@ -1136,13 +1172,28 @@ written about.
 
 **Several alleles.** `p.Gly12Ter` is GGT → TAA, TAG or TGA, and Ensembl gives
 all three (for most missense names it gives one: `BRAF V600E`, `KRAS G12D`,
-`EGFR L858R`). With a record for one of them, that one is the variant, as
-before. With none, nothing distinguishes them and Ensembl
-lists them in a different order from one call to the next, so the page showed
-different variants for the same input. None is shown now; each is one click
-away. A single allele without a record (`BRAF V600*`) is still shown, and so is
-the first allele when MyVariant could not be asked — a 404 says "no record", an
-outage says nothing, and *"none on record"* is not claimed after one.
+`EGFR L858R`) — in a different order from one call to the next, so that the
+page showed different variants for the same input. What is shown no longer
+depends on that order:
+
+- *a record for one of them:* that one is the variant, as before;
+- *records for several* (`KRAS Y64*`, TAC → TAG or TAA, both in MyVariant, whose
+  name search finds neither): the best documented — ClinVar submissions, then
+  frequency, then whether dbSNP has seen it, then simply the id — and the card
+  names the others (`rankAllelesOnRecord`): *p.Tyr64Ter is 2 alleles on record.
+  This is the best documented one; the other is chr12:g.25380266G>T.* This case
+  was found in review: four live calls had listed the alleles as G,A / G,A /
+  A,G / A,G, and the page had shown c.192C>G or c.192C>A accordingly;
+- *records for none:* nothing distinguishes them, and none is shown; each is
+  one click away.
+
+A single allele without a record (`BRAF V600*`) is still shown, and so is the
+first allele when MyVariant could not be asked — a 404 says "no record", an
+outage says nothing, and *"none on record"* is not claimed after one. Nor is
+it claimed when Ensembl did not answer at all: `KRAS Q61X` with the recoder
+down used to read *"No variant is on record for the stop (p.Gln61Ter)"*, a
+variant MyVariant holds (its name search just does not find it); the note now
+says the stop could not be looked up.
 
 This applies to a name on a gene symbol; on a protein accession
 (`NP_004976.2:p.Gly12Ter`) there is no gene to find the codon through and the
@@ -1260,7 +1311,11 @@ under that name either"* on no ground at all.
   ClinVar matches `621+1G>T` as it stands (2 records); `+`, `-`, `>` and `_`
   now survive, in the page and in the proxy. A protein-level indel over a
   range goes in three-letter codes (`E746_A750del` → `Glu746_Ala750del`), which
-  is how ClinVar's records carry it.
+  is how ClinVar's records carry it, and so does a stop (`G12*`, `G12X` →
+  `Gly12Ter`: with the asterisk merely removed, `KRAS G12*` was searched as
+  "G12", which finds other things, and the page then said no variant was listed
+  under "G12*"). Single-letter codes are read in either case, and a name
+  written as a prediction — `p.(R213X)` — is the same name.
 - *Everything it found.* ClinVar returns the newest record first, so the
   variant a long-standing name belongs to comes **last**: of the 96 records
   for `CFTR F508del`, Variation 7105 is the 96th. The first 25 used to be

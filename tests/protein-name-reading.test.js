@@ -92,7 +92,7 @@ const noteLinks = page => [...page.document.querySelectorAll('.protein-name-note
 
 // 1. "KRAS G12X": the codon, read as any amino acid. It used to be
 //    "g.: chr12:g.25398283_25398285delinsTTA … c.34_36delinsTAA … stop_gained".
-for (const typed of ['KRAS G12X', 'kras g12x', 'KRAS p.Gly12X', 'KRAS:p.G12X']) {
+for (const typed of ['KRAS G12X', 'kras g12x', 'KRAS p.Gly12X', 'KRAS:p.G12X', 'KRAS p.(G12X)', 'KRAS p.(Gly12X)']) {
     const page = await runLookup(cassettes.krasG12Stop, { input: typed });
     assertResolved(assert, page, typed);
     assert.match(page.variant, /Codon region \(hg19\): chr12:g\.25398283_25398285/, typed);
@@ -138,7 +138,8 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
         assert.match(page.panel, /Resolve nomenclature · Ensembl\s*3 different nucleotide changes give this protein change, none on record/);
         // It IS a stop that was asked about: the same-protein search stands.
         assert.deepEqual(page.api('clinvar-protein').filter(r => !/retmax=/.test(r)), ['clinvar-protein?gene=KRAS&change=Gly12Ter,G12*']);
-        assert.deepEqual(page.api('clinvar-protein').filter(r => /retmax=/.test(r)), ['clinvar-protein?gene=KRAS&change=G12&retmax=200'],
+        // (...for the stop, in the form a record of it is titled — not for "G12".)
+        assert.deepEqual(page.api('clinvar-protein').filter(r => /retmax=/.test(r)), ['clinvar-protein?gene=KRAS&change=Gly12Ter&retmax=200'],
             'ClinVar\'s names are consulted once');
         shown.add(page.variant.match(/Codon region \(hg19\): (\S+?)(?=p\.|Gene|Resolved|$)/)?.[1] || page.variant.slice(0, 80));
     }
@@ -166,7 +167,12 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
     assertResolved(assert, typedX, 'TP53 R213X');
     assert.match(typedX.variant, /g\.: chr17:g\.7578212G>A/);
     assert.deepEqual(note(typedX), ['"X" was read as a stop codon (p.Arg213Ter). If it stands for any amino acid, look up TP53 p.Arg213Xaa.']);
-    for (const typed of ['TP53 R213*', 'TP53 p.Arg213Ter']) {
+    // (Written as a prediction, in parentheses, it is the same name.)
+    const predicted = await runLookup(cassettes.tp53Stop, { input: 'TP53 p.(R213X)' });
+    assertResolved(assert, predicted, 'TP53 p.(R213X)');
+    assert.match(predicted.variant, /g\.: chr17:g\.7578212G>A/);
+    assert.deepEqual(note(predicted), ['"X" was read as a stop codon (p.Arg213Ter). If it stands for any amino acid, look up TP53 p.Arg213Xaa.']);
+    for (const typed of ['TP53 R213*', 'TP53 p.Arg213Ter', 'TP53 p.(Arg213Ter)', 'TP53 p.(R213*)']) {
         const page = await runLookup(cassettes.tp53Stop, { input: typed });
         assertResolved(assert, page, typed);
         assert.match(page.variant, /g\.: chr17:g\.7578212G>A/, typed);
@@ -258,6 +264,62 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
     assert.match(page.variant, /g\.: chr7:g\.140453136A>T/);
     assert.deepEqual(note(page), []);
     console.log('ok protein name: BRAF V600E unchanged');
+}
+
+// 9. Several alleles ON record. "KRAS Y64*" is TAC -> TAG or TAA, MyVariant
+//    holds both, and its name search finds neither — so which was shown was
+//    again the order of Ensembl's answer (c.192C>G in one call, c.192C>A in
+//    another, live). The best documented one is shown, whatever the order, and
+//    the card names the other. (Found in review.)
+{
+    const rec = (id, extra) => ({ id, record: { _id: id, ...extra } });
+    const rcv = n => ({ rcv: Array.from({ length: n }, (_, i) => ({ accession: `RCV${i}` })) });
+    // ClinVar submissions, then frequency, then whether dbSNP has seen it...
+    let out = h.rankAllelesOnRecord([rec('chr1:g.5A>C', {}), rec('chr1:g.5A>G', { clinvar: rcv(2) }), rec('chr1:g.5A>T', { clinvar: rcv(5) })]);
+    assert.deepEqual(out.ranked.map(e => e.id), ['chr1:g.5A>T', 'chr1:g.5A>G', 'chr1:g.5A>C']);
+    assert.equal(out.tied, false);
+    out = h.rankAllelesOnRecord([rec('chr1:g.5A>C', { gnomad_exome: { af: { af: 0.001 } } }), rec('chr1:g.5A>G', { gnomad_genome: { af: { af: 0.2 } } })]);
+    assert.deepEqual(out.ranked.map(e => e.id), ['chr1:g.5A>G', 'chr1:g.5A>C']);
+    out = h.rankAllelesOnRecord([rec('chr1:g.5A>T', {}), rec('chr1:g.5A>C', { dbsnp: { rsid: 'rs1' } })]);
+    assert.deepEqual(out.ranked.map(e => e.id), ['chr1:g.5A>C', 'chr1:g.5A>T']);
+    assert.equal(out.tied, false);
+    // ...and where nothing tells them apart, the same one every time, and it says so.
+    for (const order of [['chr1:g.5A>T', 'chr1:g.5A>C'], ['chr1:g.5A>C', 'chr1:g.5A>T']]) {
+        out = h.rankAllelesOnRecord(order.map(id => rec(id, {})));
+        assert.deepEqual(out.ranked.map(e => e.id), ['chr1:g.5A>C', 'chr1:g.5A>T']);
+        assert.equal(out.tied, true);
+    }
+    assert.deepEqual(h.rankAllelesOnRecord([]), { ranked: [], tied: false });
+
+    const cassette = cassettes.krasY64Stop;
+    const key = 'grch37.rest.ensembl.org/variant_recoder/human/KRAS:p.Tyr64Ter?content-type=application/json';
+    const recorded = cassette.responses[key].body;
+    const alleles = Object.keys(recorded[0]).filter(k => k !== 'warnings');
+    assert.equal(alleles.length, 2, 'Ensembl gives two alleles for p.Tyr64Ter');
+    for (const id of ['chr12:g.25380266G>C', 'chr12:g.25380266G>T']) {
+        assert.equal(cassette.responses[`myvariant.info/v1/variant/${id}`].status, 200, `MyVariant holds ${id}`);
+    }
+    // (Of the two, dbSNP has seen G>C; neither is in ClinVar or gnomAD.)
+    for (const typed of ['KRAS Y64*', 'KRAS Y64X']) {
+        for (const order of [alleles, [...alleles].reverse()]) {
+            const body = [Object.fromEntries(order.map(a => [a, recorded[0][a]]))];
+            const page = await runLookup(cassette, { input: typed, route: (url, k, respond) => (k === key ? respond(body) : undefined) });
+            assertResolved(assert, page, `${typed}, alleles listed ${order.join(',')}`);
+            assert.match(page.variant, /g\.: chr12:g\.25380266G>C/, `${typed} ${order}`);
+            assert.match(page.variant, /c\.: c\.192C>G/, `${typed} ${order}`);
+            const alleleNote = page.document.querySelector('.protein-alleles-note');
+            assert.equal(alleleNote.textContent, 'p.Tyr64Ter is 2 alleles on record. This is the best documented one; the other is chr12:g.25380266G>T.', `${typed} ${order}`);
+            assert.deepEqual([...alleleNote.querySelectorAll('a')].map(a => decodeURIComponent(a.getAttribute('href'))), ['?variant=chr12:g.25380266G>T']);
+            assert.match(page.panel, /2 alleles on record for this protein change — showing the best documented, chr12:g\.25380266G>C/, `${typed} ${order}`);
+            // Nothing is asked about the allele that is not shown.
+            assert(!page.requests.some(r => /vep\/human\/hgvs\/12:g\.25380266G>T/.test(r)), `${typed} ${order}`);
+            assert.deepEqual(note(page), typed.endsWith('X')
+                ? ['"X" was read as a stop codon (p.Tyr64Ter). If it stands for any amino acid, look up KRAS p.Tyr64Xaa.'] : [], `${typed} ${order}`);
+        }
+    }
+    // One allele on record is simply the variant, as before: no such note.
+    assert.equal((await runLookup(cassettes.krasQ61X)).document.querySelector('.protein-alleles-note'), null);
+    console.log('ok protein name: of two alleles on record the best documented is shown, whatever Ensembl\'s order');
 }
 
 console.log('Protein name reading tests passed');

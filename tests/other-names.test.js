@@ -77,7 +77,13 @@ assert.equal(h.clinvarSearchTextForName('c.1585-1G>A'), '1585-1G>A');
 assert.equal(h.clinvarSearchTextForName('3849+10kbC>T'), '3849+10kbC>T');
 assert.equal(h.clinvarSearchTextForName('IVS8-5T'), 'IVS8-5T');
 assert.equal(h.clinvarSearchTextForName('c.68_69del'), '68_69del');
-assert.equal(h.clinvarSearchTextForName('R213*'), 'R213', 'never the wildcard');
+// A stop is searched in the form a record of it is titled. With the "*" merely
+// removed, "KRAS G12*" was searched as "G12" — which finds other things — and
+// the page then said no variant was listed under "G12*".
+for (const stop of ['R213*', 'R213X', 'r213x', 'Arg213*', 'Arg213Ter', 'p.Arg213Ter', 'p.(R213X)']) {
+    assert.equal(h.clinvarSearchTextForName(stop), 'Arg213Ter', stop);
+}
+assert.equal(h.clinvarSearchTextForName('G12*'), 'Gly12Ter', 'never the wildcard, and never "G12"');
 assert.equal(h.clinvarSearchTextForName('"621+1G>T" OR x[gene]'), '621+1G>TORxgene', 'nothing that is search syntax');
 // A protein-level indel over a range, in the codes ClinVar's records carry.
 assert.equal(h.clinvarSearchTextForName('E746_A750del'), 'Glu746_Ala750del');
@@ -87,6 +93,10 @@ assert.equal(h.clinvarSearchTextForName('A763_Y764insFQEA'), 'Ala763_Tyr764insPh
 assert.equal(h.clinvarSearchTextForName('Y772_A775dup'), 'Tyr772_Ala775dup');
 assert.equal(h.clinvarSearchTextForName('p.Glu746_Ala750del'), 'Glu746_Ala750del');
 assert.equal(h.clinvarSearchTextForName('F508del'), 'F508del', 'a name in its own right: as typed');
+// Single-letter codes in either case: the same name.
+assert.equal(h.clinvarSearchTextForName('q1756pfs*74'), 'Gln1756ProfsTer74');
+assert.equal(h.clinvarSearchTextForName('e746_a750del'), 'Glu746_Ala750del');
+assert.equal(h.clinvarSearchTextForName('l747_p753delinss'), 'Leu747_Pro753delinsSer');
 assert.equal(h.clinvarSearchTextForName('B746_A750del'), 'B746_A750del', 'not residues: left alone');
 assert.deepEqual(h.parseClinvarTitle('NM_007294.4(BRCA1):c.5266dup (p.Gln1756fs)'), { accession: 'NM_007294.4', gene: 'BRCA1', change: 'c.5266dup' });
 assert.deepEqual(h.parseClinvarTitle('NM_002875.5(RAD51):c.-98G>C'), { accession: 'NM_002875.5', gene: 'RAD51', change: 'c.-98G>C' });
