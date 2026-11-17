@@ -2678,9 +2678,15 @@ function variantNameKeys(name) {
     return keys;
 }
 
-// What to ask ClinVar's search for, given a name: letters and digits only (its
-// search reads "*" as a wildcard), and a single-letter frameshift written out,
-// which is the form ClinVar indexes ("Gln1756ProfsTer74" finds one record).
+// What to ask ClinVar's search for, given a name: no "*" (its search reads it
+// as a wildcard), and a single-letter frameshift written out, which is the
+// form ClinVar indexes ("Gln1756ProfsTer74" finds one record).
+//
+// The marks a name is written with stay. ClinVar matches "621+1G>T" as it
+// stands (2 records) and has never seen "6211GT": stripped to letters and
+// digits, as this used to do, the name was dropped from the search and the
+// answer was CFTR's first 25 records of 9,631 — on the strength of which the
+// page said ClinVar listed no CFTR variant under that name.
 function clinvarSearchTextForName(name) {
     const text = String(name || '').trim()
         .replace(/^[A-Za-z]{2}_\d+(?:\.\d+)?(?:\([^)]*\))?:/, '')
@@ -2690,7 +2696,15 @@ function clinvarSearchTextForName(name) {
     if (fs && aaSingleToThree(fs[1]) && (!fs[3] || aaSingleToThree(fs[3]))) {
         return `${aaSingleToThree(fs[1])}${fs[2]}${fs[3] ? aaSingleToThree(fs[3]) : ''}fs${fs[4] ? `Ter${fs[4]}` : ''}`;
     }
-    return text.replace(/[^A-Za-z0-9]/g, '');
+    // Likewise a deletion, duplication or insertion over a range of residues:
+    // ClinVar's records carry it in three-letter codes ("Glu746_Ala750del", 3
+    // records) and it has never seen "E746_A750del".
+    const indel = text.match(/^([A-Z])(\d+)_([A-Z])(\d+)(delins|del|dup|ins)([A-Z]*)$/);
+    if (indel && [indel[1], indel[3], ...indel[6]].every(aa => aaSingleToThree(aa) && aa !== '*')) {
+        return `${aaSingleToThree(indel[1])}${indel[2]}_${aaSingleToThree(indel[3])}${indel[4]}${indel[5]}`
+            + [...indel[6]].map(aa => aaSingleToThree(aa)).join('');
+    }
+    return text.replace(/[^A-Za-z0-9+\->_]/g, '');
 }
 
 // "NM_007294.4(BRCA1):c.5266dup (p.Gln1756fs)" → { accession, gene, change }.
@@ -2704,33 +2718,136 @@ function parseClinvarTitle(title) {
 // record lists the name or more than one does. Records made of several
 // variants (haplotypes) and records of another gene do not count.
 function clinvarVariantNamed(variants, gene, name) {
-    const wanted = variantNameKeys(name);
-    if (!wanted.size) return null;
-    const matches = (variants || []).filter((variant) => {
-        if (variant?.variationCount !== 1) return false;
-        const titled = parseClinvarTitle(variant.title);
-        if (!titled || titled.gene !== String(gene).toUpperCase()) return false;
-        return [].concat(variant.aliases || []).some(alias => Array.from(variantNameKeys(alias)).some(key => wanted.has(key)));
-    });
+    const matches = clinvarVariantsNamed(variants, gene, name);
     if (matches.length !== 1) return null;
     const titled = parseClinvarTitle(matches[0].title);
     return { id: String(matches[0].id), title: matches[0].title, hgvs: `${titled.accession}:${titled.change}` };
 }
 
-// The variant of `gene` ClinVar lists under `name`; null when it lists none (or
-// more than one); undefined when ClinVar could not be asked. Never throws.
-async function resolveClinvarOtherName(gene, name, fetchVariants = fetchClinvarProteinVariants) {
+// Every single-variant record of `gene` among `variants` that goes by `name`.
+function clinvarVariantsNamed(variants, gene, name) {
+    const wanted = variantNameKeys(name);
+    if (!wanted.size) return [];
+    return (variants || []).filter((variant) => {
+        if (variant?.variationCount !== 1) return false;
+        const titled = parseClinvarTitle(variant.title);
+        if (!titled || titled.gene !== String(gene).toUpperCase()) return false;
+        return [].concat(variant.aliases || []).some(alias => Array.from(variantNameKeys(alias)).some(key => wanted.has(key)));
+    });
+}
+
+// Every single-variant record of `gene` whose own title gives `name` as its
+// protein change: "NM_005228.5(EGFR):c.2235_2249del (p.Glu746_Ala750del)".
+// That is a description several variants can share, not a name for one.
+function clinvarVariantsDescribed(variants, gene, name) {
+    const wanted = variantNameKeys(name);
+    if (!wanted.size) return [];
+    return (variants || []).filter((variant) => {
+        if (variant?.variationCount !== 1) return false;
+        const titled = parseClinvarTitle(variant.title);
+        if (!titled || titled.gene !== String(gene).toUpperCase()) return false;
+        const protein = (String(variant.title).match(/\((p\.[^()]+)\)\s*$/) || [])[1];
+        return Boolean(protein) && wanted.has(variantNameKey(protein));
+    });
+}
+
+// How many records an other-name search asks for. ClinVar returns the newest
+// first, so the variant a long-standing name belongs to comes LAST: of the 96
+// records for "CFTR F508del", c.1521_1523del (Variation 7105) is the 96th.
+const CLINVAR_NAME_SEARCH_SIZE = 200;
+
+/*
+ * The variant of `gene` ClinVar knows as `name`: { id, title, hgvs, basis }.
+ * null when it knows none, or more than one; undefined when that cannot be
+ * told. Never throws.
+ *
+ *   basis 'name'     exactly one record lists `name` among its other names
+ *                    ("F508del" for c.1521_1523del — though a second variant,
+ *                    c.1522_1524del, has the same protein change: the name is
+ *                    the first one's);
+ *   basis 'protein'  no record lists it as a name, and exactly one has it as
+ *                    the protein change in its title.
+ *
+ * "Knows none" is a statement about ClinVar and is made only on its word:
+ *   - ClinVar says it has never seen the text (esearch's phrasesnotfound,
+ *     passed on by the proxy as `notFound`). Asked that way it answers for
+ *     the gene alone — 85,659 records for "BRCA1 9999delT" — which says
+ *     nothing about the name; or
+ *   - everything the search found is in hand, with each record's names, and
+ *     none of it is this.
+ * A list cut short in which the name was not found, and an answer without the
+ * names (a backend deployed before it sent them), settle nothing.
+ *
+ * `told`, when given, receives how it went: { outcome, matches, returned,
+ * total, candidates }, outcome being 'found' | 'none' | 'several' (records
+ * that list the name) | 'described' (records with that protein change) |
+ * 'partial' | 'no-names' | 'failed'; `candidates` are the several, as
+ * { id, title, hgvs }.
+ */
+async function resolveClinvarOtherName(gene, name, fetchVariants = fetchClinvarProteinVariants, told = {}) {
     const text = clinvarSearchTextForName(name);
-    if (!gene || !text) return null;
+    if (!gene || !text) { told.outcome = 'none'; return null; }
     try {
-        // ClinVar drops a word it has never seen and answers for the gene alone;
-        // the variant being looked for is among the first few or not there.
-        const { variants } = await fetchVariants(gene, [text], 25);
-        return clinvarVariantNamed(variants, gene, name);
+        const { variants = [], total, notFound = [] } = await fetchVariants(gene, [text], CLINVAR_NAME_SEARCH_SIZE);
+        told.returned = variants.length;
+        told.total = Number.isFinite(Number(total)) ? Number(total) : variants.length;
+        if ([].concat(notFound || []).some(phrase => String(phrase).toLowerCase() === text.toLowerCase())) {
+            told.outcome = 'none';
+            return null;
+        }
+        const named = clinvarVariantsNamed(variants, gene, name);
+        told.matches = named.length;
+        if (named.length === 1) {
+            told.outcome = 'found';
+            return { ...clinvarVariantNamed(named, gene, name), basis: 'name' };
+        }
+        const listed = records => records.map((variant) => {
+            const titled = parseClinvarTitle(variant.title);
+            return { id: String(variant.id), title: variant.title, hgvs: `${titled.accession}:${titled.change}` };
+        });
+        if (named.length > 1) { told.outcome = 'several'; told.candidates = listed(named); return null; }
+        // Not among the names in hand. Is that all there is?
+        if (variants.length && !variants.some(v => Array.isArray(v?.aliases))) { told.outcome = 'no-names'; return undefined; }
+        if (told.total > variants.length) { told.outcome = 'partial'; return undefined; }
+        const described = clinvarVariantsDescribed(variants, gene, name);
+        told.matches = described.length;
+        if (described.length === 1) {
+            told.outcome = 'found';
+            const titled = parseClinvarTitle(described[0].title);
+            return { id: String(described[0].id), title: described[0].title, hgvs: `${titled.accession}:${titled.change}`, basis: 'protein' };
+        }
+        told.outcome = described.length ? 'described' : 'none';
+        told.candidates = listed(described);
+        return null;
     } catch (err) {
         console.warn('ClinVar other-name lookup failed', err);
+        told.outcome = 'failed';
         return undefined;
     }
+}
+
+// What the progress panel says about an other-name lookup that found no
+// single variant, from what resolveClinvarOtherName told.
+function otherNameOutcomeText(told, gene, name) {
+    switch (told && told.outcome) {
+    case 'several': return `${told.matches} ${gene} variants are listed under "${name}" — not for this page to choose between`;
+    case 'described': return `not a name ClinVar lists; ${told.matches} ${gene} variants have this protein change — it does not say which`;
+    case 'partial': return `ClinVar returned ${told.returned} of ${told.total} records for "${name}" and none of those goes by it — not settled`;
+    case 'no-names': return 'this backend does not pass on ClinVar\'s other names — could not be consulted';
+    case 'failed': return 'could not be consulted';
+    default: return `no ${gene} variant listed under "${name}"`;
+    }
+}
+
+// How a lookup run for the variant ClinVar knows a name by says so.
+function otherNameNote(renamed, long = false) {
+    if (renamed.basis === 'protein') {
+        return `"${renamed.name}" is the protein change of one variant in ClinVar, ${renamed.title} (Variation ${renamed.id})`
+            + (long ? ', which is what is shown here.' : '');
+    }
+    return long
+        ? `"${renamed.name}" is another name ClinVar lists for ${renamed.title} (Variation ${renamed.id}), which is what is shown here.`
+        : `"${renamed.name}" is another name for ${renamed.title} (Variation ${renamed.id})`;
 }
 
 // "BRCA1:c.5266dup" → { gene: 'BRCA1', change: 'c.5266dup' }: a coding change
@@ -3337,10 +3454,10 @@ async function fetchClinvarGeneVariants(gene, retmax = 500) {
 async function fetchClinvarProteinVariants(gene, changeForms, retmax = 0) {
     const safeGene = String(gene || '').replace(/[^A-Za-z0-9\-_.]/g, '');
     const change = (Array.isArray(changeForms) ? changeForms : [changeForms])
-        .map((s) => String(s || '').replace(/[^A-Za-z0-9*]/g, ''))
-        .filter(Boolean)
+        .map((s) => String(s || '').replace(/[^A-Za-z0-9*+\->_]/g, ''))
+        .filter((s) => /[A-Za-z0-9]/.test(s))
         .join(',');
-    if (!safeGene || !change) return { variants: [], total: 0 };
+    if (!safeGene || !change) return { variants: [], total: 0, notFound: [] };
     const endpoint = getConfiguredApiEndpoint('CLINVAR_PROTEIN_API_ENDPOINT', '/api/clinvar-protein');
     const params = new URLSearchParams({ gene: safeGene, change });
     if (retmax) params.set('retmax', String(retmax));
@@ -3348,7 +3465,9 @@ async function fetchClinvarProteinVariants(gene, changeForms, retmax = 0) {
     if (!res.ok) throw new Error(`ClinVar protein proxy error: ${res.status}`);
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
-    return { variants: data.variants || [], total: data.total ?? (data.variants || []).length };
+    // `notFound`: the words ClinVar said it has never seen (and dropped).
+    return { variants: data.variants || [], total: data.total ?? (data.variants || []).length,
+        notFound: Array.isArray(data.notFound) ? data.notFound : [] };
 }
 
 async function fetchClinvarVariant(variationId) {
@@ -8023,8 +8142,11 @@ const initVariantSearchUi = () => {
                 // residue; "185delAG" and "5382insC" are old nucleotide names, and
                 // reading them as "p.185delAG" sent nonsense to every service. They
                 // are left as typed and looked up among ClinVar's other names.
+                // The same goes for the old way of naming an intronic change by
+                // its intron, "IVS8-5T", "IVS4+1G>A": read as a protein change it
+                // became residue 8, and a codon nobody asked about was shown.
                 if (!/^p\./i.test(variantPart) && !/^c\./i.test(variantPart) && !/^g\./i.test(variantPart)
-                    && !/^\d/.test(variantPart)) {
+                    && !/^\d/.test(variantPart) && !/^IVS\d/i.test(variantPart)) {
                     variantPart = 'p.' + variantPart;
                 }
                 // One spelling for a substitution: three-letter codes, "Ter" for a stop.
@@ -8049,7 +8171,8 @@ const initVariantSearchUi = () => {
             return { gene: m[1].toUpperCase(), name: m[2] };
         })();
         // A name that is not HGVS at all: nothing to ask Ensembl or MyVariant.
-        const unreadableName = !rerun && /^[A-Za-z][A-Za-z0-9-]*:\d/.test(query) && !isGenomicVariant(query);
+        // ("GENE:185delAG"; "GENE:IVS8-5T", the old intron notation.)
+        const unreadableName = !rerun && /^[A-Za-z][A-Za-z0-9-]*:(?:\d|IVS\d)/i.test(query) && !isGenomicVariant(query);
         if (rerun) {
             // Running again: for the variant ClinVar lists the typed name
             // under, or for the name read on another transcript of the gene.
@@ -8075,7 +8198,7 @@ const initVariantSearchUi = () => {
         LookupProgress.step('parse', 'ok', query !== rawInput ? `read as ${query}` : 'HGVS input');
         if (renamed) {
             LookupProgress.step('clinvarName', 'ok',
-                `"${renamed.name}" is another name for ${renamed.title} (Variation ${renamed.id})`);
+                otherNameNote(renamed));
         }
         if (rerun && rerun.versionDropped) {
             LookupProgress.note('parse', `${rerun.versionDropped} is a newer version than GRCh37's annotation has `
@@ -8620,6 +8743,26 @@ const initVariantSearchUi = () => {
         let transcriptsPromise = geneSymbolName || unreadableName ? Promise.resolve([]) : askRecoder(query);
         // Set once ClinVar's other names have been consulted for this lookup.
         let otherNameAsked = false;
+        // The variants ClinVar has for the typed name, where they are several
+        // and it does not say which: { how: 'several' | 'described', variants }.
+        let nameShared = null;
+        const consultOtherNames = async () => {
+            otherNameAsked = true;
+            LookupProgress.step('clinvarName', 'running');
+            const told = {};
+            const known = await resolveClinvarOtherName(typedName.gene, typedName.name, undefined, told);
+            return { known, told };
+        };
+        // The lookup run again, for the variant ClinVar knows the name by.
+        const forOtherName = known => rerunWith({ query: known.hgvs, gene: typedName.gene,
+            otherName: { name: typedName.name, title: known.title, id: known.id, basis: known.basis } });
+        const otherNamesSettledNothing = (known, told) => {
+            LookupProgress.step('clinvarName', known === null ? 'empty' : 'warn',
+                otherNameOutcomeText(told, typedName.gene, typedName.name));
+            if ((told.outcome === 'described' || told.outcome === 'several') && told.candidates.length > 1) {
+                nameShared = { how: told.outcome, variants: told.candidates };
+            }
+        };
         if (!query) return;
         statusEl.textContent = 'Processing...';
         resultSection.classList.add('hidden');
@@ -9067,6 +9210,24 @@ const initVariantSearchUi = () => {
                     // could be: is one of them the variant, or only the codon known?
                     // (On a gene symbol only: the codon is found through the gene.)
                     const proteinOnly = isProteinVariant && !/c\./i.test(query) && Boolean(typedName) && !rerun;
+                    // First, though: the allele(s) are Ensembl's way of producing
+                    // the protein change, and the variant people mean by the name
+                    // can be another. "CFTR F508del" comes back as c.1522_1524del
+                    // (TTT removed); the variant known as F508del is
+                    // c.1521_1523del (CTT) — a different allele, the same protein,
+                    // and the one with the record. ClinVar's names say which.
+                    // Asked unless the allele is a single base with a record: a
+                    // substitution MyVariant holds is what a substitution's name
+                    // means, and that is most lookups.
+                    const chosenCandidate = selectedAnn ? selectedVar : uniqueCandidates[0];
+                    if (proteinOnly && !otherNameAsked && (!firstAnn || !isSingleBaseChange(chosenCandidate))) {
+                        const { known, told } = await consultOtherNames();
+                        if (!isCurrentSearch()) return;
+                        const inHand = String((selectedAnn && selectedAnn.clinvar && selectedAnn.clinvar.variant_id) || '');
+                        if (known && known.id !== inHand) return runLookup(null, forOtherName(known));
+                        if (known) LookupProgress.step('clinvarName', 'ok', `ClinVar knows this variant as "${typedName.name}"`);
+                        else otherNamesSettledNothing(known, told);
+                    }
                     const reading = !proteinOnly ? 'allele' : proteinNameReading({
                         typedX,
                         alleles: selectRecoderAlleles(recoderData, query).length,
@@ -9433,18 +9594,11 @@ const initVariantSearchUi = () => {
                     // determine the allele, but ClinVar may list exactly one
                     // variant of the gene under it (p.Gln1756ProfsTer74 is 5382insC
                     // and nothing else). Then that variant is what was meant.
-                    if (!renamed && typedName) {
-                        otherNameAsked = true;
-                        LookupProgress.step('clinvarName', 'running');
-                        const known = await resolveClinvarOtherName(typedName.gene, typedName.name);
+                    if (!renamed && typedName && !otherNameAsked) {
+                        const { known, told } = await consultOtherNames();
                         if (!isCurrentSearch()) return;
-                        if (known) {
-                            return runLookup(null, rerunWith({ query: known.hgvs, gene: typedName.gene,
-                                otherName: { name: typedName.name, title: known.title, id: known.id } }));
-                        }
-                        LookupProgress.step('clinvarName', known === null ? 'empty' : 'warn', known === null
-                            ? `no single ${typedName.gene} variant listed under "${typedName.name}"`
-                            : 'could not be consulted');
+                        if (known) return runLookup(null, forOtherName(known));
+                        otherNamesSettledNothing(known, told);
                     }
                     // "G12X" that came to no allele: X is left as what it is in
                     // HGVS, any amino acid, rather than shown as the stop it was
@@ -9928,6 +10082,33 @@ const initVariantSearchUi = () => {
                     span.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${value ? escapeHtml(value) : 'N/A'}`;
                     return span;
                 };
+                // Several ClinVar variants have the protein change that was typed
+                // and it is the name of none of them. Which one is shown (if
+                // any) was not the user's choice, so they are all offered.
+                const sharedProteinChangeNote = () => {
+                    if (!nameShared || !typedName) return null;
+                    const note = document.createElement('span');
+                    note.className = 'protein-change-shared-note';
+                    note.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                    const shownId = codonOnlyResolutionGlobal ? '' : String((annotation && annotation.clinvar && annotation.clinvar.variant_id) || '');
+                    const others = nameShared.variants.filter(v => v.id !== shownId);
+                    const all = `${nameShared.variants.length} ${typedName.gene} variants in ClinVar `
+                        + (nameShared.how === 'several' ? `go by "${typedName.name}"` : `have the protein change "${typedName.name}"`);
+                    note.appendChild(document.createTextNode(codonOnlyResolutionGlobal
+                        ? `${all}, and the name does not say which: `
+                        : others.length < nameShared.variants.length
+                            ? `${all}. Shown is the one Ensembl gives for it; the other${others.length === 1 ? ' is' : 's are'} `
+                            : `${all}, none of them the allele Ensembl gives for it, which is what is shown: `));
+                    others.slice(0, 6).forEach((variant, i) => {
+                        if (i) note.appendChild(document.createTextNode(', '));
+                        const link = document.createElement('a');
+                        link.setAttribute('href', `?variant=${encodeURIComponent(variant.hgvs)}`);
+                        link.textContent = variant.hgvs;
+                        note.appendChild(link);
+                    });
+                    note.appendChild(document.createTextNode(others.length > 6 ? ', …' : '.'));
+                    return note;
+                };
                 if (codonOnlyResolutionGlobal) {
                     // Not a variant coordinate — the span of the affected codon(s).
                     content.appendChild(makeLine('Codon region (hg19)', gVariant));
@@ -9960,6 +10141,8 @@ const initVariantSearchUi = () => {
                         }
                         content.appendChild(why);
                     }
+                    const sharedInCodon = sharedProteinChangeNote();
+                    if (sharedInCodon) content.appendChild(sharedInCodon);
                     const codonNote = document.createElement('span');
                     codonNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
                     codonNote.textContent = `Resolved to residue ${codonOnlyResolutionGlobal.residueStart}`
@@ -9989,6 +10172,8 @@ const initVariantSearchUi = () => {
                         }
                         content.appendChild(xNote);
                     }
+                    const sharedNote = sharedProteinChangeNote();
+                    if (sharedNote) content.appendChild(sharedNote);
                     if (rsidAlleles.length > 1) {
                         // An rsID with several alleles does not say which one is
                         // meant. The best documented one is shown; that is a choice
@@ -10033,8 +10218,7 @@ const initVariantSearchUi = () => {
                         const nameNote = document.createElement('span');
                         nameNote.className = 'other-name-note';
                         nameNote.style.cssText = 'font-size:0.78rem;color:#1e3a8a;background:#dbeafe;padding:3px 6px;border-radius:4px;';
-                        nameNote.textContent = `"${renamed.name}" is another name ClinVar lists for ${renamed.title} `
-                            + `(Variation ${renamed.id}), which is what is shown here.`;
+                        nameNote.textContent = otherNameNote(renamed, true);
                         content.appendChild(nameNote);
                     }
                 }
@@ -12467,18 +12651,18 @@ const initVariantSearchUi = () => {
             // under (see resolveClinvarOtherName). Asked once, and not when the
             // lookup failed because a service was down: then the name may be fine.
             if (!renamed && typedName && !otherNameAsked && !err.upstreamOutage) {
-                LookupProgress.step('clinvarName', 'running');
-                const known = await resolveClinvarOtherName(typedName.gene, typedName.name);
+                const { known, told } = await consultOtherNames();
                 if (!isCurrentSearch()) return;
-                if (known) {
-                    return runLookup(null, rerunWith({ query: known.hgvs, gene: typedName.gene,
-                        otherName: { name: typedName.name, title: known.title, id: known.id } }));
-                }
-                if (known === null) {
-                    LookupProgress.step('clinvarName', 'empty', `no single ${typedName.gene} variant listed under "${typedName.name}"`);
-                    if (err.unreadableName) err.message += ` ClinVar lists no ${typedName.gene} variant under that name either.`;
-                } else {
-                    LookupProgress.step('clinvarName', 'warn', 'could not be consulted');
+                if (known) return runLookup(null, forOtherName(known));
+                // What ClinVar lists is said only where ClinVar said it (see
+                // resolveClinvarOtherName): not after a list cut short, and not
+                // on an answer that came without the names.
+                otherNamesSettledNothing(known, told);
+                if (err.unreadableName && told.outcome === 'none') {
+                    err.message += ` ClinVar lists no ${typedName.gene} variant under that name either.`;
+                } else if (err.unreadableName && told.outcome === 'several') {
+                    err.message += ` ClinVar lists ${told.matches} ${typedName.gene} variants under that name, so it does not say which is meant: `
+                        + `${told.candidates.slice(0, 4).map(v => v.hgvs).join(', ')}${told.candidates.length > 4 ? ', …' : ''}.`;
                 }
             }
             // Logged only now: a name ClinVar knew the variant by is not an error.
@@ -12570,7 +12754,8 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         transcriptsFromRecoderAllele, transcriptsFromVep, buildTranscriptDisplay,
         maneSelectAccessions, markManeTranscripts, fetchManeSelectAccessions, geneSymbolCodingName,
         clinvarNamingTranscript, fetchClinvarNamingTranscript, standardTranscriptForGene, codingSubstitutionNotShown,
-        variantNameKey, variantNameKeys, clinvarSearchTextForName, parseClinvarTitle, clinvarVariantNamed, resolveClinvarOtherName,
+        variantNameKey, variantNameKeys, clinvarSearchTextForName, parseClinvarTitle, clinvarVariantNamed, clinvarVariantsNamed,
+        clinvarVariantsDescribed, resolveClinvarOtherName, otherNameOutcomeText, otherNameNote, CLINVAR_NAME_SEARCH_SIZE,
         referenceBaseRejection, transcriptsWithReferenceBase,
         buildCanonicalFromAnnotation, selectCanonicalTranscript, transcriptEffect,
         // HTML/URL escaping

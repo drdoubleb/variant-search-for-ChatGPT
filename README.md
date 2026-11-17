@@ -1151,9 +1151,11 @@ Queries that cannot even be resolved to a codon fail with a message naming the
 reason and pointing at c./g. notation, instead of the previous bare
 "Variant not found via Ensembl Variant Recoder".
 
-Before settling for the codon, the name is looked up among ClinVar's other names
+Before settling for the codon — or for an allele of Ensembl's that is not a
+single-base change on record — the name is looked up among ClinVar's other names
 (next section): `BRCA1 p.Gln1756ProfsTer74` is one ClinVar variant and nothing
-else, so it resolves to that variant, not to a region. (The region it used to
+else, so it resolves to that variant, not to a region; `CFTR F508del` is
+c.1521_1523del, not the c.1522_1524del Ensembl gives for that protein change. (The region it used to
 get was wrong as well: "Ter74", the distance to the new stop, was read as a
 residue, giving "residues 74–1756" — 47 kb of BRCA1.)
 
@@ -1171,6 +1173,9 @@ what a clinic letter says. No nomenclature service resolves them.
 | `BRCA2 6174delT` | `p.6174delT` | NM_000059.4:c.5946del · ClinVar 9325 |
 | `MTHFR C677T` | read as p.Cys677Thr; "could not resolve" | NM_005957.5:c.665C>T (p.Ala222Val) · ClinVar 3520 |
 | `BRCA1 p.Gln1756ProfsTer74`, `BRCA1 Q1756Pfs*74` | a 47 kb "codon region" | NM_007294.4:c.5266dup · ClinVar 17677 |
+| `CFTR 621+1G>T`, `CFTR 1717-1G>A`, `CFTR 3849+10kbC>T` | "could not resolve" | c.489+1G>T · 38799; c.1585-1G>A · 7112; c.3718-2477C>T · 7166 |
+| `BRCA1 IVS5+1G>A` | read as a protein change at "residue 5": a codon | NM_007294.4:c.212+1G>A · ClinVar 37446 |
+| `CFTR F508del`, `CFTR deltaF508` | **c.1522_1524del**, another allele with the same protein change | NM_000492.3:c.1521_1523del · ClinVar 7105 |
 
 ClinVar lists them: every record carries the other names its variant goes by
 (`aliases` — "5382insC", "5385insC", "p.Gln1756ProfsX74", and OMIM-style strings
@@ -1185,22 +1190,68 @@ record's `aliases` and `variationCount`) and accepts a record only if
   single-letter codes with one mark for a stop, and `C677T` = `677C>T` =
   `677C-T`), and
 - it is the only such record. Two variants under one name are not for the page
-  to choose between.
+  to choose between; they are named, with links, and neither is shown.
+
+Failing that, a record whose own title gives the name as its protein change
+(`… (p.Glu746_Ala750del)`) counts if it is the only one. A protein change is a
+description that several variants can share, though, not a name for one of
+them, so a name always wins over it — see F508del below.
 
 The lookup then runs again for that record's HGVS name, and says so in the
 progress panel and on the Variant card: *"5382insC" is another name ClinVar
 lists for NM_007294.4(BRCA1):c.5266dup (p.Gln1756fs) (Variation 17677), which
 is what is shown here.* What was typed stays in "You entered" and in the URL.
 
-This is a last resort, asked once per lookup and only after the ordinary route
-has failed — a name that resolves never consults it — and not when the failure
-was a service being down. A token that starts with a digit is no longer given a
-`p.`: `BRCA1 9999delT` is refused at once as *not a name this tool can read …
-ClinVar lists no BRCA1 variant under that name either*, without a request to
-Ensembl or MyVariant. If the proxy cannot be reached the panel says "could not
-be consulted" and no claim is made about what ClinVar lists; a backend deployed
-before this change sends no `aliases`, so nothing resolves and nothing is
-wrongly resolved.
+**When it is asked.** Once per lookup, after the ordinary route has failed — a
+name that resolves the ordinary way never consults it — and not when the
+failure was a service being down. A token that starts with a digit, or with
+`IVS` and a digit (the old way of naming an intronic change by its intron), is
+not given a `p.`: `BRCA1 9999delT` is refused at once as *not a name this tool
+can read … ClinVar lists no BRCA1 variant under that name either*, without a
+request to Ensembl or MyVariant.
+
+It is also asked before a protein-level name is settled on an allele that is
+not a single-base change MyVariant holds. Ensembl answers `p.Phe508del` with
+c.1522_1524del — TTT removed — which is a real variant (rs121909001), so it
+was shown, record and all. The variant everyone means by F508del is
+c.1521_1523del (CTT): another allele, the same protein. ClinVar lists
+"F508del" as a name of that one only. Where the name is nobody's and several
+variants have the protein change, Ensembl's allele is still what is shown and
+the card says so: *3 EGFR variants in ClinVar have the protein change
+"p.Glu746_Ala750del". Shown is the one Ensembl gives for it; the others are
+NM_005228.5:c.2235_2249del, NM_005228.5:c.2232_2249delinsAAA.* A substitution
+MyVariant holds (`BRAF V600E`, `TP53 R213X`) is what a substitution's name
+means, and ClinVar is not asked.
+
+**What ClinVar is asked, and what its answer is taken to show.** Three faults
+here were found in review; each had the page say *"ClinVar lists no … variant
+under that name either"* on no ground at all.
+
+- *The name as it is written.* It used to be stripped to letters and digits, so
+  `CFTR 621+1G>T` was searched as `6211GT` — a word ClinVar has never seen.
+  ClinVar matches `621+1G>T` as it stands (2 records); `+`, `-`, `>` and `_`
+  now survive, in the page and in the proxy. A protein-level indel over a
+  range goes in three-letter codes (`E746_A750del` → `Glu746_Ala750del`), which
+  is how ClinVar's records carry it.
+- *Everything it found.* ClinVar returns the newest record first, so the
+  variant a long-standing name belongs to comes **last**: of the 96 records
+  for `CFTR F508del`, Variation 7105 is the 96th. The first 25 used to be
+  asked for; now 200 are (`CLINVAR_NAME_SEARCH_SIZE`), and a list that is still
+  cut short, with the name not in the part that came, is reported as *"ClinVar
+  returned 200 of N records … and none of those goes by it — not settled"*
+  rather than as "none".
+- *A word ClinVar drops.* Asked for `BRCA1 9999delT`, ClinVar reports
+  `9999delT` as a phrase it does not know (`errorlist.phrasesnotfound`) and
+  answers for BRCA1 alone: 85,659 records. Those say nothing about the name —
+  and are not variants with the change that was asked for, so the proxy now
+  returns none of them, with the dropped word as `notFound`. That is ClinVar's
+  own statement that no record goes by the name, and the only other ground on
+  which the page says so is a complete list, names included, without it.
+
+If the proxy cannot be reached the panel says "could not be consulted". A
+backend deployed before this change sends no `aliases`: nothing resolves,
+nothing is wrongly resolved, and the panel says the names were not passed on
+rather than that ClinVar has none.
 
 See `tests/other-names.test.js`.
 

@@ -304,7 +304,7 @@ console.log('rsID unit checks passed');
     assert.match(page.panel, /You entered\s*BRCA1 c\.5382insC/);
     assert.match(page.variant, /c\.: c\.5266dup/);
     assert.match(page.clinvar, /Variation ID: 17677/);
-    assert.equal(page.api('clinvar-protein').filter(r => /retmax=25/.test(r)).length, 1, 'ClinVar\'s other names were asked');
+    assert.equal(page.api('clinvar-protein').filter(r => /retmax=200/.test(r)).length, 1, 'ClinVar\'s other names were asked');
     assert.doesNotMatch(page.panel, /Resolve nomenclature · Ensembl\s*HTTP 503/, 'the first lookup\'s failure is not on this panel');
     console.log('ok rsID lookup: a finished lookup\'s recoder does not fail the next one');
 }
