@@ -273,6 +273,21 @@ const unwaited = (label, lookup) => Promise.race([lookup, new Promise((resolve, 
     assertResolved(assert, failing, 'KRAS Y64*, residue query failing');
     assert.match(failing.variant, /g\.: chr12:g\.25380266G>C/);
     assert.match(failing.panel, /Resolve nomenclature · Ensembl\s*\d+ transcripts/);
+    // A list MyVariant cut short is no list either: with one of the two
+    // alleles missing from it, the other would have stood as "the" change.
+    {
+        const residueKey = Object.keys(cassettes.krasY64Stop.responses).find(key => /dbnsfp\.aa\.pos/.test(key));
+        const whole = cassettes.krasY64Stop.responses[residueKey].body;
+        const stopAlleles = h.proteinSubstitutionAlleles(whole.hits, 'KRAS', { ref: 'Y', pos: 64, alt: '*' }).alleles;
+        assert.deepEqual(stopAlleles, ['chr12:g.25380266G>C', 'chr12:g.25380266G>T']);
+        const cut = { ...whole, total: whole.hits.length, hits: whole.hits.filter(hit => hit._id !== 'chr12:g.25380266G>C') };
+        assert.equal(cut.hits.length, whole.hits.length - 1);
+        const short = await runLookup(cassettes.krasY64Stop, { route: (url, key, respond) => (key === residueKey ? respond(cut) : undefined) });
+        assertResolved(assert, short, 'KRAS Y64*, residue list cut short');
+        assert.match(short.panel, /Resolve nomenclature · Ensembl\s*\d+ transcripts/, 'Ensembl was waited for');
+        assert.doesNotMatch(short.panel, /not waited for/);
+        assert.match(short.variant, /p\.Tyr64Ter is 2 alleles on record/, 'and both alleles are known');
+    }
     // ...and with neither, the codon, after Ensembl's attempts — as it always was.
     const neither = await runLookup(cassettes.krasG12Stop, { input: 'KRAS G12*', without: ['dbnsfp.aa.pos', 'variant_recoder'] });
     assertResolved(assert, neither, 'KRAS G12*, neither source');

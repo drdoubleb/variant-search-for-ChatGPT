@@ -8061,7 +8061,12 @@ async function fetchProteinSubstitutionAlleles(gene, change) {
     const response = await fetchWithTimeout(url, {}, API_TIMEOUT_MS.proteinAlleles);
     if (!response.ok) return null;
     const data = await response.json();
-    return proteinSubstitutionAlleles(data && data.hits, gene, change);
+    // A list cut short is not a list: one allele of two would then stand as
+    // "the" change. (Nine single-base changes a codon; over 38 residues of
+    // genes with many transcripts the longest answer was 20 records.)
+    const hits = (data && Array.isArray(data.hits)) ? data.hits : [];
+    if (Number(data && data.total) > hits.length) return null;
+    return proteinSubstitutionAlleles(hits, gene, change);
 }
 
 // Those alleles in the shape the recoder's answer has, for the code that turns
