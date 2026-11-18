@@ -2825,9 +2825,15 @@ function clinicalTranscriptsFromReport(data, gene) {
     const wanted = String(gene || '').toUpperCase();
     // A symbol search also returns genes that merely have it as an alias
     // ("TTN" brings TTR first): only the gene of that name counts.
-    const product = [].concat(data?.reports || []).map(report => report?.product)
-        .find(candidate => String(candidate?.symbol || '').toUpperCase() === wanted);
-    if (!product) return { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [] };
+    const products = [].concat(data?.reports || []).map(report => report?.product).filter(Boolean);
+    const product = products.find(candidate => String(candidate?.symbol || '').toUpperCase() === wanted);
+    // (`knownAs`: where the name is no gene's symbol, the genes NCBI answers
+    // with are the ones it is another name for — KRAS2 brings KRAS, ABCC7
+    // brings CFTR, MLL2 brings KMT2D and KMT2B. See geneGivenBesideCoordinates.)
+    if (!product) {
+        const knownAs = products.map(candidate => String(candidate.symbol || '')).filter(symbol => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(symbol));
+        return { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [], knownAs: Array.from(new Set(knownAs)) };
+    }
     const rows = category => [].concat(product.transcripts || [])
         .filter(t => String(t?.select_category || '').toUpperCase() === category
             && /^NM_\d+\.\d+$/.test(String(t?.accession_version || '')));
@@ -2840,7 +2846,37 @@ function clinicalTranscriptsFromReport(data, gene) {
     const standard = rows('MANE_SELECT').concat(select ? [] : rows('REFSEQ_SELECT'), rows('MANE_PLUS_CLINICAL'));
     return { select, selectEnsembl: ensemblOf(rows('MANE_SELECT')[0]),
         plusClinical: tagged('MANE_PLUS_CLINICAL'), refseqSelect: select ? '' : (tagged('REFSEQ_SELECT')[0] || ''),
-        ensembl: Array.from(new Set(standard.map(ensemblOf).filter(Boolean).map(id => id.replace(/\.\d+$/, '')))) };
+        ensembl: Array.from(new Set(standard.map(ensemblOf).filter(Boolean).map(id => id.replace(/\.\d+$/, '')))),
+        knownAs: [] };
+}
+
+/*
+ * A gene named BESIDE coordinates — a row's gene column, "ATP6 m.8993T>G" —
+ * does not place the allele: the coordinates do. Where Ensembl puts the allele
+ * in transcripts of other genes only, the name given is another name for the
+ * gene (KRAS2 for KRAS, ABCC7 for CFTR, ATP6 for MT-ATP6) or it is a slip, and
+ * either way the allele's transcripts are the allele's. They used to be
+ * dropped for not being the named gene's: "12 25398285 KRAS2 C CACC" came out
+ * with its coding name and "p.: N/A · Effect: N/A", under "Gene: KRAS2", and
+ * every gene-level source was asked about a gene called KRAS2.
+ *
+ * `given` is the name given, `genes` the genes of VEP's transcript rows for the
+ * allele, `placed` the gene VEP's answer is about (resolveGeneSymbolFromVep),
+ * `knownAs` the genes NCBI says the name is another name for (null: it could
+ * not say). Returns null where the name is the allele's gene, or nothing says
+ * otherwise; else { given, gene, alias }: `alias` when the name is another name
+ * for `gene`, as far as anyone has said. The gene that takes the name's place
+ * is one of `genes`: only then are there transcripts of it to show.
+ */
+function geneGivenBesideCoordinates(given, genes, placed, knownAs = null) {
+    const name = String(given || '').trim().toUpperCase();
+    const gene = String(placed || '').trim();
+    const there = [].concat(genes || []).map(symbol => String(symbol || '').toUpperCase()).filter(Boolean);
+    if (!name || there.includes(name)) return null;
+    if (!gene || isChromosomeLikeGeneSymbol(gene) || !there.includes(gene.toUpperCase())) return null;
+    const alias = gene.toUpperCase() === `MT-${name}`
+        || [].concat(knownAs || []).some(symbol => String(symbol || '').toUpperCase() === gene.toUpperCase());
+    return { given: String(given).trim(), gene, alias };
 }
 async function fetchClinicalTranscripts(gene) {
     const symbol = String(gene || '').trim().toUpperCase();
@@ -9902,6 +9938,9 @@ const initVariantSearchUi = () => {
             // the ones not shown: { others: [id], tied }.
             const candidateAlleleIndex = new Map();
             let allelesOnRecord = null;
+            // A gene given beside coordinates that is not the allele's:
+            // { given, gene, alias } (see geneGivenBesideCoordinates).
+            let geneGivenElsewhere = null;
             const vepByVariant = new Map();
             const vepStartedAt = new Map();
             const fetchLookupVep = (variant, { leftAlignedToo = true } = {}) => {
@@ -11260,6 +11299,40 @@ const initVariantSearchUi = () => {
                     const namedRow = namedAccession
                         ? paired.find(t => String(t.transcript).toUpperCase().replace(/\.\d+$/, '') === namedAccession)
                         : null;
+                    // A gene given beside coordinates that is not one the allele
+                    // lies in (see geneGivenBesideCoordinates): the allele's own
+                    // gene takes its place, here and for everything after.
+                    if (geneHintGlobal && isGenomicVariant(query)
+                        && paired.length && !paired.some(t => t.gene.toUpperCase() === geneHintGlobal.toUpperCase())) {
+                        const placed = await resolveGeneSymbolFromVep(vep.consequences, recoderData, vep.mostSevere);
+                        if (!isCurrentSearch()) return;
+                        // (NCBI was asked about the name when the lookup began, for
+                        // the MANE label; its answer is waited for no longer than that is.)
+                        let knownAs = null;
+                        try {
+                            const listed = await settledWithin(Promise.resolve().then(() => fetchClinicalTranscripts(geneHintGlobal)),
+                                API_TIMEOUT_MS.maneLabel, 'NCBI did not say whose name that is in time');
+                            knownAs = listed ? listed.knownAs : null;
+                        } catch {
+                            // Not known: said as a difference, not as another name.
+                        }
+                        if (!isCurrentSearch()) return;
+                        const elsewhere = geneGivenBesideCoordinates(geneHintGlobal, paired.map(t => t.gene), placed, knownAs);
+                        if (elsewhere) {
+                            geneGivenElsewhere = elsewhere;
+                            // An allele without a record has an annotation made up
+                            // for it, whose only gene label is the name given.
+                            const label = annotation && annotation.dbnsfp;
+                            if (label && typeof label.genename === 'string' && Object.keys(label).length === 1
+                                && label.genename.toUpperCase() === elsewhere.given.toUpperCase()) {
+                                annotation.dbnsfp = { genename: elsewhere.gene };
+                            }
+                            geneHintGlobal = elsewhere.gene;
+                            LookupProgress.note('parse', elsewhere.alias
+                                ? `gene given as ${elsewhere.given}, another name for ${elsewhere.gene}`
+                                : `gene given as ${elsewhere.given} — the allele lies in ${elsewhere.gene}, which is what is shown`);
+                        }
+                    }
                     const namedGene = geneHintGlobal || (namedRow && namedRow.gene)
                         || (/^(?:N[MRP]_|ENS|LRG_|CHR)/i.test(intentGene) ? '' : intentGene);
                     let relevant;
@@ -11868,6 +11941,18 @@ const initVariantSearchUi = () => {
                     }
                 });
                 content.appendChild(makeLine('Gene', geneNames));
+                if (geneGivenElsewhere) {
+                    // The gene shown is not the one that was given with the
+                    // coordinates: say so, and whether it is the same gene.
+                    const { given, gene, alias } = geneGivenElsewhere;
+                    const geneNote = document.createElement('span');
+                    geneNote.className = 'gene-given-note';
+                    geneNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                    geneNote.textContent = alias
+                        ? `Given as ${given}, which is another name for ${gene}.`
+                        : `The gene given with these coordinates is ${given}, but the allele lies in ${gene} (Ensembl), which is what is shown. Check the row.`;
+                    content.appendChild(geneNote);
+                }
                 // All summary fields refer to this one transcript. A missing
                 // protein consequence must not be borrowed from another isoform.
                 const canonicalCVal = selectedTranscript?.cDNA || '';
@@ -14362,7 +14447,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
         ensemblRecoderAnswer, recoderPaneText, allelesNotAskedAbout, fetchProteinSubstitutionAlleles,
-        nomenclatureRefusal, refusedNameError,
+        nomenclatureRefusal, refusedNameError, geneGivenBesideCoordinates,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,
