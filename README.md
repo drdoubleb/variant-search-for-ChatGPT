@@ -49,8 +49,10 @@ base apart, which *are* different alleles, passed.
 
 `compareGenomicAlleles` settles it against the sequence instead: whenever a
 genomic input comes back spelled differently, both descriptions are applied to
-the same stretch of GRCh37 reference (Ensembl `/sequence/region`, one small
-request, started as soon as the recoder answers) and the results compared. No
+the same stretch of GRCh37 reference (Ensembl `/sequence/region` — or UCSC's
+copy of the assembly when Ensembl's does not answer, see *The reference bases
+have a second source* — one small request, started as soon as the recoder
+answers) and the results compared. No
 shifting or alignment heuristics are involved. The outcome is a row in the
 lookup progress panel, **Confirm allele · GRCh37 reference**:
 
@@ -1017,6 +1019,37 @@ did. Once NCBI's answer has been taken, Ensembl's remaining attempts are called
 off (`shouldStop` in `fetchWithRetry`): nothing reads their answer, and a
 service slow enough to be overtaken should not be asked three more times.
 
+### The reference bases have a second source
+
+Whatever reads the GRCh37 reference — confirming an allele, left-aligning a
+row's alleles, finding the allele's other MyVariant records, and deciding
+whether a spelling is left-aligned before Ensembl's protein name for a
+reverse-strand in-frame indel is shown — read it from one place, Ensembl's
+`/sequence/region`. That service fails on its own at times: HTTP 500 for every
+region, or answers that take 4 to 8 s (longer than an identity check waits),
+while the recoder and VEP go on answering. Everything above then went without:
+
+| `X 20156693 EIF1AX C CAGATTCATTCTCATTCTTACCCCTGCGTCT` | with the reference | without it |
+| --- | --- | --- |
+| Confirm allele | "chrX:g.20156694_20156723dup is the same allele as the input" | "not confirmed — reference sequence unavailable" |
+| p. | p.Arg12_Ser21dup | N/A — "protein change not shown: … no name could be had for it written that way" |
+
+`fetchGrch37ReferenceSequence` now has a second source: the UCSC Genome
+Browser's API (`api.genome.ucsc.edu/getData/sequence?genome=hg19`, CORS-open,
+independent infrastructure). hg19 is GRCh37's primary assembly base for base;
+the one difference is in naming the mitochondrial genome, where GRCh37's (the
+rCRS) is UCSC's `chrMT`, not its `chrM`. Ensembl goes first; UCSC is asked when
+Ensembl fails or has not answered after 1.5 s, and the first of the two to give
+the bases is taken — the same arrangement as the recoder's with NCBI. What UCSC
+sends is checked to be the stretch asked for (assembly, chromosome, start, end,
+length) before it is used, and both share the one deadline the read had before.
+
+With no reference from either, nothing changes: the allele is "not confirmed",
+and a reverse-strand protein name that could not be checked is still not shown.
+That is deliberate — Ensembl's name for a spelling that is not left-aligned is
+wrong often enough (`KRAS c.34_36dup` came out as another variant) that a
+missing name is the better answer. See `tests/reference-source.test.js`.
+
 The app previously made a single attempt behind a 6-7 second deadline, so a
 slow or unwell upstream produced:
 
@@ -1788,8 +1821,10 @@ request URL, plus the stretch of GRCh37 reference it read
 (`tests/fixtures/lookup-cassettes.json`). A request the recording does not hold
 gets what that service says when it has nothing (404, an empty hit list, 503),
 and a test can take a service away from a complete recording
-(`without: [/ensembl\.org/]`) or answer one of the site's own `/api` proxies
-(`backend: { pubmed: () => … }`). Each scenario was confirmed to fail on the
+(`without: [/ensembl\.org/]`), bring UCSC's copy of the reference up (`ucsc:
+true` serves the same recorded stretches; by default it is down, so that taking
+Ensembl's reference away leaves none) or answer one of the site's own `/api`
+proxies (`backend: { pubmed: () => … }`). Each scenario was confirmed to fail on the
 commit before its fix.
 
 The one remaining intentional re-composition is `buildChangeForms` in

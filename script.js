@@ -176,6 +176,9 @@ const API_TIMEOUT_MS = {
     dgidb: 12000,
     openFda: 12000,
     ensemblSequence: 8000,
+    // How long Ensembl's sequence service is given before UCSC's copy of the
+    // assembly is asked as well (it normally answers in well under a second).
+    referenceHeadStart: 1500,
     // The identity checks read a few dozen bases and normally get them in well
     // under a second. They sit in front of the result, so a hung Ensembl must
     // not hold it for long: past this they report "not checked" and step aside.
@@ -1168,10 +1171,8 @@ function reverseComplementSeq(seq) {
     return String(seq || '').toUpperCase().split('').reverse().map((b) => comp[b] || 'N').join('');
 }
 
-// Fetch GRCh37 reference bases for an inclusive 1-based interval.
-async function fetchGrch37ReferenceSequence(chrom, start, end, timeoutMs = API_TIMEOUT_MS.ensemblSequence) {
-    const c = String(chrom || '').replace(/^chr/i, '');
-    if (!c || !Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+// GRCh37 reference bases for an inclusive 1-based interval, as Ensembl serves them.
+async function fetchEnsemblReferenceSequence(c, start, end, timeoutMs) {
     const url = `https://grch37.rest.ensembl.org/sequence/region/human/${c}:${start}..${end}?content-type=text/plain`;
     const res = await fetchWithTimeout(url, { headers: { 'Accept': 'text/plain' } }, timeoutMs);
     if (!res.ok) throw new Error(`Ensembl sequence request failed (${res.status})`);
@@ -1180,6 +1181,86 @@ async function fetchGrch37ReferenceSequence(chrom, start, end, timeoutMs = API_T
         throw new Error('Unexpected Ensembl sequence payload');
     }
     return seq;
+}
+
+// UCSC's name for a GRCh37 chromosome, '' for anything else. hg19 is GRCh37's
+// primary assembly base for base; its "chrM" is an older mitochondrial sequence,
+// and the one GRCh37 (and Ensembl's "MT") uses, the rCRS, is its "chrMT".
+function ucscHg19Chromosome(c) {
+    const name = String(c || '').replace(/^chr/i, '').toUpperCase();
+    if (name === 'MT') return 'chrMT';
+    return /^(?:[1-9]|1\d|2[0-2]|X|Y)$/.test(name) ? `chr${name}` : '';
+}
+
+// The same bases from the UCSC Genome Browser's copy of the assembly (hg19).
+// Its API counts the start from 0, and writes repeats in lower case.
+async function fetchUcscReferenceSequence(c, start, end, timeoutMs) {
+    const chrom = ucscHg19Chromosome(c);
+    if (!chrom) throw new Error(`UCSC has no GRCh37 sequence named ${c}`);
+    const url = `https://api.genome.ucsc.edu/getData/sequence?genome=hg19&chrom=${chrom}&start=${start - 1}&end=${end}`;
+    const res = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, timeoutMs);
+    if (!res.ok) throw new Error(`UCSC sequence request failed (${res.status})`);
+    const data = await res.json();
+    const seq = String((data && data.dna) || '').trim().toUpperCase();
+    // (What it says it sent is what was asked for: the same stretch of the same assembly.)
+    const asAsked = data && data.genome === 'hg19' && data.chrom === chrom && Number(data.start) === start - 1 && Number(data.end) === end;
+    if (!asAsked || !/^[ACGTN]+$/.test(seq) || seq.length !== end - start + 1) {
+        throw new Error('Unexpected UCSC sequence payload');
+    }
+    return seq;
+}
+
+/*
+ * Fetch GRCh37 reference bases for an inclusive 1-based interval.
+ *
+ * Ensembl is asked first. Its sequence service fails on its own at times —
+ * HTTP 500 for every region, while its recoder and VEP go on answering — and
+ * everything that reads the reference then went without: an allele could not
+ * be confirmed, a row's alleles were not left-aligned, the allele's other
+ * records were not looked for, and an in-frame insertion on the reverse strand
+ * lost its protein name, which is shown only for a spelling known to be
+ * left-aligned ("X 20156693 EIF1AX C CAGATTC…TCT": p.Arg12_Ser21dup became
+ * "p.: N/A"). So where Ensembl fails, or has not answered after a short head
+ * start, UCSC's copy of the same assembly is asked as well, and the first of
+ * the two to give the bases is taken. Both get what is left of `timeoutMs`,
+ * counted from the start: a read is not waited for longer than before.
+ */
+async function fetchGrch37ReferenceSequence(chrom, start, end, timeoutMs = API_TIMEOUT_MS.ensemblSequence) {
+    const c = String(chrom || '').replace(/^chr/i, '');
+    if (!c || !Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+    const began = Date.now();
+    let ensemblErr = null;
+    const ensembl = fetchEnsemblReferenceSequence(c, start, end, timeoutMs).catch((err) => { ensemblErr = err; return null; });
+    const pending = Symbol('pending');
+    let headStart;
+    const early = await Promise.race([
+        ensembl,
+        new Promise((resolve) => { headStart = setTimeout(() => resolve(pending), API_TIMEOUT_MS.referenceHeadStart); })
+    ]);
+    clearTimeout(headStart);
+    if (early && early !== pending) return early;
+    const ucsc = fetchUcscReferenceSequence(c, start, end, Math.max(1000, timeoutMs - (Date.now() - began))).catch((err) => {
+        console.warn('UCSC reference sequence unavailable:', err);
+        return null;
+    });
+    const seq = early === pending
+        // Ensembl is still working: whichever of the two has the bases first.
+        ? await new Promise((resolve) => {
+            let left = 2;
+            for (const source of [ensembl, ucsc]) {
+                source.then((value) => {
+                    left -= 1;
+                    if (value || left === 0) resolve(value || null);
+                });
+            }
+        })
+        // Ensembl has already failed.
+        : await ucsc;
+    if (seq) return seq;
+    // Neither has them (the promise above resolves null only then). The error
+    // told is Ensembl's: it is the service the page reads the reference from.
+    await ensembl;
+    throw ensemblErr || new Error('GRCh37 reference sequence unavailable');
 }
 
 // Turn an HGVS g. descriptor into anchored VCF-style alleles using a reference
@@ -14480,6 +14561,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
         ensemblRecoderAnswer, recoderPaneText, allelesNotAskedAbout, fetchProteinSubstitutionAlleles,
         nomenclatureRefusal, refusedNameError, nameUnknownToEnsembl, geneGivenBesideCoordinates,
+        fetchGrch37ReferenceSequence, fetchUcscReferenceSequence, ucscHg19Chromosome,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,
