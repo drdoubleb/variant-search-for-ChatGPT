@@ -142,41 +142,47 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
         assert.deepEqual(asked, []);
 
         // Ensembl is given a head start, and UCSC is asked when it is over.
-        h.API_TIMEOUT_MS.referenceHeadStart = 60;
+        // (The times below are far enough apart for a slow machine: what is
+        // told apart is which of two answers, hundreds of milliseconds apart,
+        // was taken.)
+        h.API_TIMEOUT_MS.referenceHeadStart = 250;
         // (So that it can be told whose answer was taken, UCSC's differs here.)
         const other = 'ACGTACGTACGTACGTACGTACGTACGTACGTA';
         const ucscOther = json(ucscAnswer({ dna: other.toLowerCase() }));
         // Ensembl in good time: UCSC never hears of it.
         asked = serve({ ensembl: after(15, text(bases)), ucsc: ucscOther });
         assert.equal(await read(), bases);
-        await wait(90);
+        await wait(400);
         assert.deepEqual(asked, [ensemblUrl]);
         // Ensembl slow — its answers took 4 and 8 s that day: UCSC's is taken.
-        asked = serve({ ensembl: after(600, text(bases)), ucsc: after(20, ucscOther) });
+        asked = serve({ ensembl: after(2500, text(bases)), ucsc: after(20, ucscOther) });
         began = Date.now();
         assert.equal(await read(), other);
-        assert(Date.now() - began < 400, 'and Ensembl is not waited for');
+        assert(Date.now() - began < 1500, 'and Ensembl is not waited for');
         assert.deepEqual(asked, [ensemblUrl, ucscUrl]);
         // Ensembl slow, and still the first of the two.
-        asked = serve({ ensembl: after(120, text(bases)), ucsc: after(600, ucscOther) });
+        asked = serve({ ensembl: after(500, text(bases)), ucsc: after(2500, ucscOther) });
         began = Date.now();
         assert.equal(await read(), bases);
-        assert(Date.now() - began < 400);
+        assert(Date.now() - began < 1700, 'and UCSC is not waited for');
         assert.equal(asked.length, 2);
         // Ensembl slow and then failing: UCSC's answer is waited for.
-        asked = serve({ ensembl: after(100, down), ucsc: after(250, ucscOther) });
+        asked = serve({ ensembl: after(450, down), ucsc: after(500, ucscOther) });
         assert.equal(await read(), other);
+        assert.equal(asked.length, 2);
         // ...as Ensembl's is, when UCSC is the one that fails.
-        asked = serve({ ensembl: after(250, text(bases)), ucsc: after(80, json({ error: 'x' }, 500)) });
+        asked = serve({ ensembl: after(900, text(bases)), ucsc: after(50, json({ error: 'x' }, 500)) });
         assert.equal(await read(), bases);
+        assert.equal(asked.length, 2);
         // Neither answers: the read is given up when its time is up — the one
-        // stretch of time it was given, not one for each of them.
-        h.API_TIMEOUT_MS.referenceHeadStart = 400;
+        // stretch of time it was given, not one for each of them (which would
+        // be 600 ms more).
+        h.API_TIMEOUT_MS.referenceHeadStart = 600;
         asked = serve({ ensembl: never, ucsc: never });
         began = Date.now();
         await assert.rejects(read(1000), /aborted|timed out/i);
         const waited = Date.now() - began;
-        assert(waited >= 950 && waited < 1300, `given up after ${waited} ms`);
+        assert(waited >= 950 && waited < 1400, `given up after ${waited} ms`);
         assert.equal(asked.length, 2);
     } finally {
         globalThis.fetch = realFetch;
