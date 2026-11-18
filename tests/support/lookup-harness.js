@@ -21,7 +21,10 @@
  *      one and it answers (the page's document is there for a route that has
  *      to answer at a particular point in the lookup);
  *   2. the cassette's recorded response for that exact URL;
- *   3. a slice of a recorded reference window, for Ensembl sequence requests;
+ *   3. a slice of a recorded reference window, for Ensembl sequence requests
+ *      — and for UCSC's, the page's second source of those bases, where the
+ *      test says UCSC is up (`ucsc: true`). By default it is not: a scenario
+ *      that takes Ensembl's reference away is one without the reference;
  *      (MyVariant's batch POST is answered from the same per-id recordings);
  *   4. `backend[name](url)` for the site's own /api/<name> proxies;
  *   5. otherwise the failure that source gives when it has nothing: 404 for a
@@ -72,7 +75,9 @@ export async function runLookup(cassette, {
     timerCap = 5,
     // A second lookup on the same page, submitted once the first has finished:
     // { input }. What is returned then describes the page after the second.
-    followUp = null
+    followUp = null,
+    // UCSC's sequence service answers from the cassette's reference windows.
+    ucsc = false
 } = {}) {
     const { document } = parseHTML(html);
     addTableHelpers(document);
@@ -132,6 +137,20 @@ export async function runLookup(cassette, {
         if (seq && !withheld(key)) {
             const bases = referenceSlice(cassette.reference, seq[1], Number(seq[2]), Number(seq[3]));
             if (bases !== null) return respond(bases);
+        }
+        // UCSC's copy of the assembly, in the shape its API answers in: the
+        // start counted from 0, chromosomes named "chr…", and (as it writes
+        // repeats) lower case — here all of it, so that a page reading the
+        // bases as given would stumble.
+        if (ucsc && url.hostname === 'api.genome.ucsc.edu' && path === '/getData/sequence' && !withheld(key)) {
+            const asked = url.searchParams;
+            const start = Number(asked.get('start'));
+            const end = Number(asked.get('end'));
+            const bases = referenceSlice(cassette.reference, String(asked.get('chrom')).replace(/^chr/, ''), start + 1, end);
+            if (bases !== null) {
+                return respond({ downloadTime: '2026:11:18T14:40:07Z', downloadTimeStamp: 1795012807,
+                    genome: asked.get('genome'), chrom: asked.get('chrom'), start, end, dna: bases.toLowerCase() });
+            }
         }
         if (url.hostname === 'myvariant.info') {
             return path.startsWith('/v1/variant/') ? respond({ success: false, error: 'Not Found.' }, 404) : respond({ hits: [] });
