@@ -594,7 +594,8 @@ is now told as a refusal, with what Ensembl says is wrong (`nomenclatureRefusal`
 | --- | --- |
 | `chr12:g.25398280_25398285insCCA` — an insertion between positions five apart | *is not a readable insertion: an insertion is written between two neighbouring positions, and these have 4 bases between them. To insert CCA after 25398280, write chr12:g.25398280_25398281insCCA; if the bases in between are replaced, write a deletion-insertion: chr12:g.25398281_25398284delinsCCA. (Ensembl: "Start (25398285) must be less than or equal to end+1 (25398281)")* |
 | `NM_004985.5:c.99999A>T` | *could not be read as a variant: Ensembl refuses the name — "Unable to map the cDNA coordinates 99999-99999 to genomic coordinates for Transcript rna-NM_004985.5". That is an answer about the name, not an outage, and a second try will give the same one.* |
-| `KRAS2 c.35G>A` | *could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37 … a gene has to be given by its current symbol.* |
+| `KRAS2 c.35G>A` | *could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. … NCBI lists KRAS2 as another name for KRAS: a gene has to be given by its current symbol — enter KRAS:c.35G>A.* |
+| `NOTAGENE c.35G>A` | the same, ending *Check the symbol or accession — a gene has to be given by its current symbol.* — as for any name NCBI knows for no gene, or does not answer about |
 
 One refusal is enough, the recoder's or VEP's: they read names the same way. A
 service that does not answer is still an outage, and still says so.

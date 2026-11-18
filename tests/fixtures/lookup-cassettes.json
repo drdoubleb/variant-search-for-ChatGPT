@@ -780,6 +780,7 @@
  "refusedNames": {
   "input": "chr12:g.25398280_25398285insCCA",
   "reference": [{"chrom":"12","start":25398010,"seq":"CCCTGACATACTCCCAAGGAAAGTAAAGTTCCCATATTAATGGTTACATATAACTTGAAACCCAAGGTACATTTCAGATAACTTAACTTTCAGCATAATTATCTTGTAATAAGTACTCATGAAAATGGTCAGAGAAACCTTTATCTGTATCAAAGAATGGTCCTGCACCAGTAATATGCATATTAAAACAAGATTTACCTCTATTGTTGGATCATATTCGTCCACAAAATGATTCTGAATTAGCTGTATCGTCAAGGCACTCTTGCCTACGCCACCAGCTCCAACTACCACAAGTTTATATTCAGTCATTTTCAGCAGGCCTTATAATAAAAATAATGAAAATGTGACTATATTAGAACATGTCACACATAAGGTTAATACACTATCAAATACTCCACCAGTACCTTTTAATACAAACTCACCTTTATATGAAAAATTATTTCAAAATACCTTACAAAATTCAATCATGAAAATTCCAGTTGACTGCAGACGTGTATCGTAATGAACTGTACTTCATTTACAAACTCCTCCATCGACGCTTAAGAA"}],
+  "api": {"clinvar-protein?gene=KRAS2&change=35G>A&retmax=200":{"variants":[],"total":0,"notFound":[]}},
   "responses": {
    "myvariant.info/v1/variant/chr12:g.25398280_25398285insCCA": {"status":404,"body":{"success":false,"error":"Not Found."}},
    "grch37.rest.ensembl.org/variant_recoder/human/chr12:g.25398280_25398285insCCA?content-type=application/json": {"status":400,"body":{"error":"Unable to parse HGVS notation 'chr12:g.25398280_25398285insCCA': Start (25398285) must be less than or equal to end+1 (25398281)"}},
@@ -798,7 +799,15 @@
    "grch37.rest.ensembl.org/variant_recoder/human/NM_004985.5:c.99999A>T?content-type=application/json": {"status":400,"body":{"error":"Unable to parse HGVS notation 'NM_004985.5:c.99999A>T':  : Unable to map the cDNA coordinates 99999-99999 to genomic coordinates for Transcript rna-NM_004985.5"}},
    "api.ncbi.nlm.nih.gov/variation/v0/hgvs/NM_004985.5:c.99999A>T/contextuals": {"status":400,"body":{"error":{"code":400,"message":"Error while processing 'NM_004985.5:c.99999A>T': The input HGVS is invalid because the position is off the end of the sequence (the length of NM_004985.5 is 5306bp).","input_hgvs_validity":"invalid"}}},
    "grch37.rest.ensembl.org/vep/human/hgvs/NM_004985.5:c.99999A>T?content-type=application/json&hgvs=1&refseq=1&mane=1&canonical=1": {"status":400,"body":{"error":"Unable to parse HGVS notation 'NM_004985.5:c.99999A>T':  : Unable to map the cDNA coordinates 99999-99999 to genomic coordinates for Transcript rna-NM_004985.5"}},
-   "grch37.rest.ensembl.org/vep/human/hgvs/NM_004985.5:c.99999A>T?content-type=application/json&hgvs=1&mane=1&canonical=1": {"status":400,"body":{"error":"Unable to parse HGVS notation 'NM_004985.5:c.99999A>T':  : Unable to map the cDNA coordinates 99999-99999 to genomic coordinates for Transcript rna-NM_004985.5"}}
+   "grch37.rest.ensembl.org/vep/human/hgvs/NM_004985.5:c.99999A>T?content-type=application/json&hgvs=1&mane=1&canonical=1": {"status":400,"body":{"error":"Unable to parse HGVS notation 'NM_004985.5:c.99999A>T':  : Unable to map the cDNA coordinates 99999-99999 to genomic coordinates for Transcript rna-NM_004985.5"}},
+   "myvariant.info/v1/query?q=KRAS2:c.35G>A&size=20": {"status":200,"body":{"total":0,"hits":[]}},
+   "myvariant.info/v1/query?q=KRAS2 c.35G>A&size=20": {"status":200,"body":{"total":0,"hits":[]}},
+   "api.ncbi.nlm.nih.gov/datasets/v2/gene/symbol/KRAS2/taxon/9606/product_report": {"status":200,"body":{"reports":[{"product":{"symbol":"KRAS","transcripts":[{"accession_version":"NM_004985.5","select_category":"MANE_SELECT","ensembl_transcript":"ENST00000311936.8"},{"accession_version":"NM_033360.4","select_category":"MANE_PLUS_CLINICAL","ensembl_transcript":"ENST00000256078.10"}]}}]}},
+   "myvariant.info/v1/query?q=clinvar.gene.symbol:KRAS2 AND _exists_:clinvar.rcv.preferred_name&fields=clinvar.rcv.preferred_name&size=25": {"status":200,"body":{"total":0,"hits":[]}},
+   "rest.ensembl.org/lookup/symbol/homo_sapiens/KRAS2?content-type=application/json": {"status":400,"body":{"error":"No valid lookup found for symbol KRAS2"}},
+   "grch37.rest.ensembl.org/variant_recoder/human/KRAS2:c.35G>A?content-type=application/json": {"status":400,"body":{"error":"Unable to parse HGVS notation 'KRAS2:c.35G>A': Could not get a Transcript object for 'KRAS2'"}},
+   "grch37.rest.ensembl.org/vep/human/hgvs/KRAS2:c.35G>A?content-type=application/json&hgvs=1&refseq=1&mane=1&canonical=1": {"status":400,"body":{"error":"Unable to parse HGVS notation 'KRAS2:c.35G>A': Could not get a Transcript object for 'KRAS2'"}},
+   "grch37.rest.ensembl.org/vep/human/hgvs/KRAS2:c.35G>A?content-type=application/json&hgvs=1&mane=1&canonical=1": {"status":400,"body":{"error":"Unable to parse HGVS notation 'KRAS2:c.35G>A': Could not get a Transcript object for 'KRAS2'"}}
   }
  },
  "geneAliasRow": {

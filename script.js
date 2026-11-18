@@ -309,13 +309,21 @@ function nomenclatureRefusal(err) {
     return said.length > 200 ? `${said.slice(0, 199)}…` : said;
 }
 
+// The gene symbol or accession Ensembl says it does not have, from its refusal
+// (nomenclatureRefusal's `reason`); '' where the refusal is about anything else.
+function nameUnknownToEnsembl(reason) {
+    return (String(reason || '').match(/^Could not get a Transcript object for '([^']+)'$/) || [])[1] || '';
+}
+
 /*
  * The error for a name that was refused: that it is the name, what the service
  * said, and — for the commonest case, an insertion that does not name two
  * neighbouring positions — how such a change is written. `reason` is
- * nomenclatureRefusal's.
+ * nomenclatureRefusal's. `knownAs`: the genes NCBI says a name Ensembl does not
+ * have is another name for (clinicalTranscriptsFromReport), where it was asked
+ * and said — an older symbol is then answered with the one to enter.
  */
-function refusedNameError(query, reason) {
+function refusedNameError(query, reason, knownAs = null) {
     const quoted = reason ? ` (Ensembl: "${reason}")` : '';
     const desc = parseGenomicHgvs(query);
     if (desc && desc.type === 'ins' && desc.altSeq && desc.end !== desc.start + 1 && desc.end >= desc.start) {
@@ -334,12 +342,20 @@ function refusedNameError(query, reason) {
     }
     // A gene symbol or an accession Ensembl's GRCh37 annotation does not have
     // (a mistyped symbol; an older name for the gene, as KRAS2 is for KRAS).
-    const unknown = (reason.match(/^Could not get a Transcript object for '([^']+)'$/) || [])[1];
+    const unknown = nameUnknownToEnsembl(reason);
     if (unknown) {
+        const genes = [].concat(knownAs || []).map(symbol => String(symbol || ''))
+            .filter(symbol => symbol && symbol.toUpperCase() !== unknown.toUpperCase()).slice(0, 4);
+        // ("KRAS2:c.35G>A" with the gene's symbol where the older name is.)
+        const renamed = genes.length === 1 && query.toUpperCase().startsWith(`${unknown.toUpperCase()}:`)
+            ? `${genes[0]}${query.slice(unknown.length)}` : '';
         return new Error(
             `${query} could not be read as a variant: Ensembl has no gene or transcript named ${unknown} on GRCh37. `
             + 'That is an answer about the name, not an outage, and a second try will give the same one. '
-            + 'Check the symbol or accession — a gene has to be given by its current symbol.'
+            + (genes.length
+                ? `NCBI lists ${unknown} as another name for ${genes.length > 1 ? `${genes.slice(0, -1).join(', ')} and ${genes[genes.length - 1]}` : genes[0]}: `
+                    + `a gene has to be given by its current symbol${renamed ? ` — enter ${renamed}` : ''}.`
+                : 'Check the symbol or accession — a gene has to be given by its current symbol.')
         );
     }
     return new Error(
@@ -11021,7 +11037,23 @@ const initVariantSearchUi = () => {
                                         } else {
                                             LookupProgress.step('vep', 'fail', said);
                                         }
-                                        throw refusedNameError(query, reason);
+                                        // A gene Ensembl does not have by that name may be one
+                                        // NCBI knows it as another name for (KRAS2 for KRAS). It
+                                        // was asked about the name when the lookup began, for the
+                                        // gene's standard transcript: this seldom waits.
+                                        let knownAs = null;
+                                        const unknownName = nameUnknownToEnsembl(reason);
+                                        if (unknownName) {
+                                            try {
+                                                const listed = await settledWithin(Promise.resolve().then(() => fetchClinicalTranscripts(unknownName)),
+                                                    API_TIMEOUT_MS.maneLabel, 'NCBI did not say whose name that is in time');
+                                                knownAs = listed ? listed.knownAs : null;
+                                            } catch {
+                                                // Not known: the message says what Ensembl said.
+                                            }
+                                            if (!isCurrentSearch()) return;
+                                        }
+                                        throw refusedNameError(query, reason, knownAs);
                                     }
                                     // Nothing resolved. Which message is correct depends entirely on
                                     // *why* nothing resolved, so ask the progress panel rather than
@@ -14447,7 +14479,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
         ensemblRecoderAnswer, recoderPaneText, allelesNotAskedAbout, fetchProteinSubstitutionAlleles,
-        nomenclatureRefusal, refusedNameError, geneGivenBesideCoordinates,
+        nomenclatureRefusal, refusedNameError, nameUnknownToEnsembl, geneGivenBesideCoordinates,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,

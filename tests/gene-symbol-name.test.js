@@ -284,10 +284,36 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
         + 'That is an answer about the name, not an outage, and a second try will give the same one. '
         + 'Check the gene symbol or accession, the positions and the bases.');
     // A symbol or accession Ensembl's GRCh37 annotation does not have.
-    assert.equal(h.refusedNameError('KRAS2:c.35G>A', 'Could not get a Transcript object for \'KRAS2\'').message,
-        'KRAS2:c.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. '
-        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
-        + 'Check the symbol or accession — a gene has to be given by its current symbol.');
+    const noKras2 = 'Could not get a Transcript object for \'KRAS2\'';
+    const noSuchName = 'KRAS2:c.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. '
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. ';
+    assert.equal(h.refusedNameError('KRAS2:c.35G>A', noKras2).message,
+        `${noSuchName}Check the symbol or accession — a gene has to be given by its current symbol.`);
+    // ...which, for an older name of a gene, NCBI knows: the name to enter is said.
+    assert.equal(h.refusedNameError('KRAS2:c.35G>A', noKras2, ['KRAS']).message,
+        `${noSuchName}NCBI lists KRAS2 as another name for KRAS: a gene has to be given by its current symbol — enter KRAS:c.35G>A.`);
+    assert.match(h.refusedNameError('kras2:c.35G>A', noKras2, ['KRAS']).message, / — enter KRAS:c\.35G>A\.$/, 'whatever the case it was typed in');
+    // (The name to enter is the query with the symbol in the older name's
+    // place — said only where the query begins with that name.)
+    assert.match(h.refusedNameError('NM_004985.5(KRAS2):c.35G>A', noKras2, ['KRAS']).message,
+        /NCBI lists KRAS2 as another name for KRAS: a gene has to be given by its current symbol\.$/);
+    // (A name two genes have had: which of them is meant is not for this page to say.)
+    assert.match(h.refusedNameError('MLL2:c.100A>T', 'Could not get a Transcript object for \'MLL2\'', ['KMT2D', 'KMT2B']).message,
+        /NCBI lists MLL2 as another name for KMT2D and KMT2B: a gene has to be given by its current symbol\.$/);
+    assert.match(h.refusedNameError('X1:c.1A>T', 'Could not get a Transcript object for \'X1\'', ['A1', 'B1', 'C1']).message, /another name for A1, B1 and C1: /);
+    assert.match(h.refusedNameError('X1:c.1A>T', 'Could not get a Transcript object for \'X1\'', ['A1', 'B1', 'C1', 'D1', 'E1', 'F1']).message,
+        /another name for A1, B1, C1 and D1: /, 'no more than four are listed');
+    // NCBI could not say, or knows the name for no gene: Ensembl's answer is all there is.
+    for (const nothing of [null, [], ['KRAS2'], ['']]) {
+        assert.equal(h.refusedNameError('KRAS2:c.35G>A', noKras2, nothing).message,
+            `${noSuchName}Check the symbol or accession — a gene has to be given by its current symbol.`);
+    }
+    // (Only the name Ensembl says it does not have is looked up, and only that refusal names one.)
+    assert.equal(h.nameUnknownToEnsembl(noKras2), 'KRAS2');
+    assert.equal(h.nameUnknownToEnsembl('Could not get a Transcript object for \'NM_000000.1\''), 'NM_000000.1');
+    assert.deepEqual(['Start (25398285) must be less than or equal to end+1 (25398281)', '', null].map(h.nameUnknownToEnsembl), ['', '', '']);
+    assert.match(h.refusedNameError('NM_004985.5:c.99999A>T', 'Unable to map the cDNA coordinates', ['KRAS']).message,
+        /Ensembl refuses the name — "Unable to map the cDNA coordinates"/, 'another refusal is not about a name NCBI could know');
     // Where the base IS as stated: MyVariant holds c.512T>C on PTEN-L.
     const hits = cassettes.pten512.responses['myvariant.info/v1/query?q=PTEN c.512T>G&size=20'].body.hits;
     assert.deepEqual(h.transcriptsWithReferenceBase(hits, 'c.512T>G', 'NM_000314.8'), ['NM_001304717.5']);
@@ -535,6 +561,24 @@ assert.equal(h.geneSymbolCodingName('NM_001304717.5:c.512T>G'), null);
         + 'second try will give the same one. Check the gene symbol or accession, the positions and the bases.');
     assert.equal(cdna.hidden, true);
     assert.doesNotMatch(cdna.panel, retry);
+    // An older name of a gene: NCBI, asked about it for the gene's standard
+    // transcript, has said whose name it is — and the one to enter is said.
+    const older = await runLookup(refused, { input: 'KRAS2 c.35G>A' });
+    assert.equal(older.status, 'Error: KRAS2:c.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. '
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+        + 'NCBI lists KRAS2 as another name for KRAS: a gene has to be given by its current symbol — enter KRAS:c.35G>A.');
+    assert.match(older.panel, /Resolve nomenclature · Ensembl\s*refused the name — Could not get a Transcript object for 'KRAS2'/);
+    assert.equal(older.requests.filter(r => /datasets\/v2\/gene\/symbol\/KRAS2\//.test(r)).length, 1, 'NCBI is not asked a second time');
+    // (NCBI not answering, or never completing its answer: Ensembl's refusal
+    // is told all the same, and is not held for it.)
+    const unsaid = await runLookup(refused, { input: 'KRAS2 c.35G>A', without: [/\/datasets\//] });
+    assert.equal(unsaid.status, 'Error: KRAS2:c.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. '
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+        + 'Check the symbol or accession — a gene has to be given by its current symbol.');
+    const stalled = await runLookup(refused, { input: 'KRAS2 c.35G>A',
+        route: (url, key) => (/\/datasets\//.test(key) ? new Promise(() => {}) : undefined) });
+    assert.match(stalled.status, /^Error: KRAS2:c\.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37\. /);
+    assert.match(stalled.status, /Check the symbol or accession — a gene has to be given by its current symbol\.$/);
 
     // A service that does not answer is still an outage, and still says so.
     const down = await runLookup(refused, { without: [/ensembl\.org/] });
