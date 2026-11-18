@@ -115,21 +115,25 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
     const mecp2 = { reports: [report('MECP2', [['NM_001110792.2', 'MANE_SELECT', 'ENST00000453960.7'], ['NM_004992.4', 'MANE_PLUS_CLINICAL', 'ENST00000303391.11'], ['NM_001316337.2'], ['XM_011531166.3']])] };
     // (`ensembl`: all of them by Ensembl's ids, MANE Select first — the
     // transcripts a protein-level name may be counted on. See
-    // tests/protein-substitution-alleles.test.js.)
+    // tests/protein-substitution-alleles.test.js. `knownAs`: the genes the
+    // name is another name for, where it is no gene's symbol. See
+    // tests/gene-beside-coordinates.test.js.)
     assert.deepEqual(h.clinicalTranscriptsFromReport(mecp2, 'mecp2'),
         { select: 'NM_001110792.2', selectEnsembl: 'ENST00000453960.7', plusClinical: ['NM_004992.4'], refseqSelect: '',
-            ensembl: ['ENST00000453960', 'ENST00000303391'] });
+            ensembl: ['ENST00000453960', 'ENST00000303391'], knownAs: [] });
     const cdkn2a = { reports: [report('CDKN2A', [['NM_000077.6', 'REFSEQ_SELECT', 'ENST00000304494.10'], ['NM_058195.4', 'MANE_PLUS_CLINICAL', 'ENST00000579755.2']])] };
     assert.deepEqual(h.clinicalTranscriptsFromReport(cdkn2a, 'CDKN2A'), { select: '', selectEnsembl: '', plusClinical: ['NM_058195.4'], refseqSelect: 'NM_000077.6',
-        ensembl: ['ENST00000304494', 'ENST00000579755'] },
+        ensembl: ['ENST00000304494', 'ENST00000579755'], knownAs: [] },
     'RefSeq Select is not MANE Select, and is kept apart — but it is the transcript a name is counted on where there is no other');
     // (Where the gene has a MANE Select transcript, RefSeq's own pick is not one more.)
     assert.deepEqual(h.clinicalTranscriptsFromReport({ reports: [report('G1', [['NM_1.1', 'MANE_SELECT', 'ENST00000000001.1'],
         ['NM_2.1', 'REFSEQ_SELECT', 'ENST00000000002.1'], ['NM_3.1', 'MANE_PLUS_CLINICAL', 'ENST00000000001.4']])] }, 'G1').ensembl, ['ENST00000000001']);
     // A symbol search also returns genes that have the symbol as an alias.
     const ttn = { reports: [report('TTR', [['NM_000371.4', 'MANE_SELECT', 'ENST00000237014.8']]), report('TTN', [['NM_001267550.2', 'MANE_SELECT']])] };
-    assert.deepEqual(h.clinicalTranscriptsFromReport(ttn, 'TTN'), { select: 'NM_001267550.2', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [] });
-    assert.deepEqual(h.clinicalTranscriptsFromReport({}, 'NOSUCHGENE'), { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [] });
+    assert.deepEqual(h.clinicalTranscriptsFromReport(ttn, 'TTN'),
+        { select: 'NM_001267550.2', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [], knownAs: [] });
+    assert.deepEqual(h.clinicalTranscriptsFromReport({}, 'NOSUCHGENE'),
+        { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [], knownAs: [] });
     const odd = h.clinicalTranscriptsFromReport({ reports: [report('X1', [['NM_1.1', 'MANE_SELECT', '<img onerror=x>']])] }, 'X1');
     assert.deepEqual([odd.selectEnsembl, odd.ensembl], ['', []], 'only an Ensembl transcript id is taken for one');
 
@@ -166,7 +170,7 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
     try {
         assert.deepEqual(await h.fetchClinicalTranscripts('mecp2'),
             { select: 'NM_001110792.2', selectEnsembl: 'ENST00000453960.7', plusClinical: ['NM_004992.4'], refseqSelect: '',
-                ensembl: ['ENST00000453960', 'ENST00000303391'] });
+                ensembl: ['ENST00000453960', 'ENST00000303391'], knownAs: [] });
         assert.deepEqual(urls, ['https://api.ncbi.nlm.nih.gov/datasets/v2/gene/symbol/MECP2/taxon/9606/product_report']);
         await h.fetchClinicalTranscripts('MECP2');
         assert.equal(urls.length, 1, 'cached per gene');
@@ -229,6 +233,87 @@ for (const other of ['NM_007294.4:c.5266dup', 'ENST00000357654:c.5266dup', 'LRG_
     assert.equal(h.referenceBaseRejection(Object.assign(new Error('Could not get a Transcript object for NM_1.1'), { status: 400 })), null);
     assert.equal(h.referenceBaseRejection(Object.assign(new Error(ensembl.message), { status: 500 })), null, 'only a 400 is an answer about the name');
     assert.equal(h.referenceBaseRejection(null), null);
+
+    // Any other refusal: what the service says is wrong with the name, in its
+    // own words, without the name repeated in front. (Ensembl's answers, as
+    // recorded; the recoder's and VEP's are worded alike.)
+    const refused = (said, status = 400, service = 'Variant recoder') =>
+        Object.assign(new Error(`${service} request failed (${status}): ${JSON.stringify({ error: said })}`), { status });
+    const span = 'Unable to parse HGVS notation \'12:g.25398280_25398285insCCA\': Start (25398285) must be less than or equal to end+1 (25398281)';
+    assert.equal(h.nomenclatureRefusal(refused(span)), 'Start (25398285) must be less than or equal to end+1 (25398281)');
+    assert.equal(h.nomenclatureRefusal(refused(span, 400, 'VEP HGVS')), 'Start (25398285) must be less than or equal to end+1 (25398281)');
+    assert.equal(h.nomenclatureRefusal(refused('variant skipped (12:g.25398280insCCA): Alleles look like an insertion (-/CCA) but coordinates are not '
+        + 'start = end + 1 (START=25398280, END=25398280) for variant (12:g.25398280insCCA) ')),
+    'Alleles look like an insertion (-/CCA) but coordinates are not start = end + 1 (START=25398280, END=25398280)');
+    assert.equal(h.nomenclatureRefusal(refused('Unable to parse HGVS notation \'NM_004985.5:c.99999A>T\':  : Unable to map the cDNA coordinates '
+        + '99999-99999 to genomic coordinates for Transcript rna-NM_004985.5')),
+    'Unable to map the cDNA coordinates 99999-99999 to genomic coordinates for Transcript rna-NM_004985.5');
+    assert.equal(h.nomenclatureRefusal(refused('Unable to parse HGVS notation \'99:g.100A>T\'')), '', 'refused, and no reason given');
+    assert.equal(h.nomenclatureRefusal(Object.assign(new Error('Bad Request'), { status: 400 })), '', 'refused, and nothing to read');
+    const long = h.nomenclatureRefusal(refused(`Unable to parse HGVS notation 'x': ${'long '.repeat(60)}`));
+    assert.deepEqual([long.length, long.slice(-1)], [200, '…'], 'a long reason is cut');
+    // Only a 400 is an answer about the name: an outage, a timeout and a
+    // missing record are not.
+    assert.equal(h.nomenclatureRefusal(refused(span, 503)), null);
+    assert.equal(h.nomenclatureRefusal(refused(span, 404)), null);
+    assert.equal(h.nomenclatureRefusal(new Error('Request timed out after 12000ms')), null);
+    assert.equal(h.nomenclatureRefusal(null), null);
+
+    // ...and the error it becomes. An insertion that does not name two
+    // neighbouring positions is the commonest, and Ensembl's sentence about it
+    // is no help: how such a change IS written is said.
+    assert.equal(h.refusedNameError('chr12:g.25398280_25398285insCCA', 'Start (25398285) must be less than or equal to end+1 (25398281)').message,
+        'chr12:g.25398280_25398285insCCA is not a readable insertion: an insertion is written between two neighbouring positions, and these have 4 bases '
+        + 'between them. To insert CCA after 25398280, write chr12:g.25398280_25398281insCCA; if the bases in between are replaced, write a '
+        + 'deletion-insertion: chr12:g.25398281_25398284delinsCCA. (Ensembl: "Start (25398285) must be less than or equal to end+1 (25398281)")');
+    assert.equal(h.refusedNameError('chr12:g.25398280_25398282insCCA', '').message,
+        'chr12:g.25398280_25398282insCCA is not a readable insertion: an insertion is written between two neighbouring positions, and these have 1 base '
+        + 'between them. To insert CCA after 25398280, write chr12:g.25398280_25398281insCCA; if the base in between is replaced, write a '
+        + 'deletion-insertion: chr12:g.25398281delinsCCA.');
+    assert.equal(h.refusedNameError('chr12:g.25398280insCCA', '').message,
+        'chr12:g.25398280insCCA is not a readable insertion: an insertion is written between two neighbouring positions, and this names one. '
+        + 'To insert CCA after 25398280, write chr12:g.25398280_25398281insCCA.');
+    // (Positions the wrong way round are not something to suggest a spelling for.)
+    assert.match(h.refusedNameError('chr12:g.25398285_25398280insCCA', 'x').message, /^chr12:g\.25398285_25398280insCCA could not be read as a variant: Ensembl refuses the name — "x"\. /);
+    assert.equal(h.refusedNameError('NM_004985.5:c.99999A>T', 'Unable to map the cDNA coordinates').message,
+        'NM_004985.5:c.99999A>T could not be read as a variant: Ensembl refuses the name — "Unable to map the cDNA coordinates". '
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+        + 'Check the gene symbol or accession, the positions and the bases.');
+    assert.equal(h.refusedNameError('chr99:g.100A>T', '').message,
+        'chr99:g.100A>T could not be read as a variant: Ensembl refuses the name. '
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+        + 'Check the gene symbol or accession, the positions and the bases.');
+    // A symbol or accession Ensembl's GRCh37 annotation does not have.
+    const noKras2 = 'Could not get a Transcript object for \'KRAS2\'';
+    const noSuchName = 'KRAS2:c.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. '
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. ';
+    assert.equal(h.refusedNameError('KRAS2:c.35G>A', noKras2).message,
+        `${noSuchName}Check the symbol or accession — a gene has to be given by its current symbol.`);
+    // ...which, for an older name of a gene, NCBI knows: the name to enter is said.
+    assert.equal(h.refusedNameError('KRAS2:c.35G>A', noKras2, ['KRAS']).message,
+        `${noSuchName}NCBI lists KRAS2 as another name for KRAS: a gene has to be given by its current symbol — enter KRAS:c.35G>A.`);
+    assert.match(h.refusedNameError('kras2:c.35G>A', noKras2, ['KRAS']).message, / — enter KRAS:c\.35G>A\.$/, 'whatever the case it was typed in');
+    // (The name to enter is the query with the symbol in the older name's
+    // place — said only where the query begins with that name.)
+    assert.match(h.refusedNameError('NM_004985.5(KRAS2):c.35G>A', noKras2, ['KRAS']).message,
+        /NCBI lists KRAS2 as another name for KRAS: a gene has to be given by its current symbol\.$/);
+    // (A name two genes have had: which of them is meant is not for this page to say.)
+    assert.match(h.refusedNameError('MLL2:c.100A>T', 'Could not get a Transcript object for \'MLL2\'', ['KMT2D', 'KMT2B']).message,
+        /NCBI lists MLL2 as another name for KMT2D and KMT2B: a gene has to be given by its current symbol\.$/);
+    assert.match(h.refusedNameError('X1:c.1A>T', 'Could not get a Transcript object for \'X1\'', ['A1', 'B1', 'C1']).message, /another name for A1, B1 and C1: /);
+    assert.match(h.refusedNameError('X1:c.1A>T', 'Could not get a Transcript object for \'X1\'', ['A1', 'B1', 'C1', 'D1', 'E1', 'F1']).message,
+        /another name for A1, B1, C1 and D1: /, 'no more than four are listed');
+    // NCBI could not say, or knows the name for no gene: Ensembl's answer is all there is.
+    for (const nothing of [null, [], ['KRAS2'], ['']]) {
+        assert.equal(h.refusedNameError('KRAS2:c.35G>A', noKras2, nothing).message,
+            `${noSuchName}Check the symbol or accession — a gene has to be given by its current symbol.`);
+    }
+    // (Only the name Ensembl says it does not have is looked up, and only that refusal names one.)
+    assert.equal(h.nameUnknownToEnsembl(noKras2), 'KRAS2');
+    assert.equal(h.nameUnknownToEnsembl('Could not get a Transcript object for \'NM_000000.1\''), 'NM_000000.1');
+    assert.deepEqual(['Start (25398285) must be less than or equal to end+1 (25398281)', '', null].map(h.nameUnknownToEnsembl), ['', '', '']);
+    assert.match(h.refusedNameError('NM_004985.5:c.99999A>T', 'Unable to map the cDNA coordinates', ['KRAS']).message,
+        /Ensembl refuses the name — "Unable to map the cDNA coordinates"/, 'another refusal is not about a name NCBI could know');
     // Where the base IS as stated: MyVariant holds c.512T>C on PTEN-L.
     const hits = cassettes.pten512.responses['myvariant.info/v1/query?q=PTEN c.512T>G&size=20'].body.hits;
     assert.deepEqual(h.transcriptsWithReferenceBase(hits, 'c.512T>G', 'NM_000314.8'), ['NM_001304717.5']);
@@ -442,6 +527,81 @@ assert.equal(h.geneSymbolCodingName('NM_001304717.5:c.512T>G'), null);
         + 'position, not T. Check the position, the base and the transcript version.');
     assert.equal(page.hidden, true);
     console.log('ok accession name: a wrong reference base is reported as such');
+}
+
+// 6b. Any other name Ensembl reads and refuses is told so. HTTP 400 is an
+//     answer about the name; it used to get the words of a failure to answer —
+//     "Lookup could not complete: Resolve nomenclature · Ensembl, Consequences
+//     · Ensembl VEP failed. Please retry in a moment." — for a name no second
+//     try will make readable. (Ensembl's refusals below are as recorded.)
+{
+    const refused = cassettes.refusedNames;
+    const retry = /retry|could not complete|outage/i;
+    // An insertion between positions that are not neighbours.
+    const span = await runLookup(refused, {});
+    assert.equal(span.status, 'Error: chr12:g.25398280_25398285insCCA is not a readable insertion: an insertion is written between two neighbouring '
+        + 'positions, and these have 4 bases between them. To insert CCA after 25398280, write chr12:g.25398280_25398281insCCA; if the bases in between '
+        + 'are replaced, write a deletion-insertion: chr12:g.25398281_25398284delinsCCA. '
+        + '(Ensembl: "Start (25398285) must be less than or equal to end+1 (25398281)")');
+    assert.equal(span.hidden, true);
+    assert.match(span.panel, /^Lookup failed/);
+    assert.match(span.panel, /Resolve nomenclature · Ensembl\s*refused the name — Start \(25398285\) must be less than or equal to end\+1 \(25398281\)/);
+    assert.match(span.panel, /Consequences · Ensembl VEP\s*not asked further — the name was refused/);
+    assert.doesNotMatch(span.status + span.panel, retry);
+    // ...and one that names a single position.
+    const one = await runLookup(refused, { input: 'chr12:g.25398280insCCA' });
+    assert.equal(one.status, 'Error: chr12:g.25398280insCCA is not a readable insertion: an insertion is written between two neighbouring positions, '
+        + 'and this names one. To insert CCA after 25398280, write chr12:g.25398280_25398281insCCA. (Ensembl: "Alleles look like an insertion (-/CCA) '
+        + 'but coordinates are not start = end + 1 (START=25398280, END=25398280)")');
+    assert.doesNotMatch(one.status + one.panel, retry);
+    // A coding name past the end of its transcript: Ensembl's own reason.
+    const cdna = await runLookup(refused, { input: 'NM_004985.5:c.99999A>T' });
+    assert.equal(cdna.status, 'Error: NM_004985.5:c.99999A>T could not be read as a variant: Ensembl refuses the name — "Unable to map the cDNA '
+        + 'coordinates 99999-99999 to genomic coordinates for Transcript rna-NM_004985.5". That is an answer about the name, not an outage, and a '
+        + 'second try will give the same one. Check the gene symbol or accession, the positions and the bases.');
+    assert.equal(cdna.hidden, true);
+    assert.doesNotMatch(cdna.panel, retry);
+    // An older name of a gene: NCBI, asked about it for the gene's standard
+    // transcript, has said whose name it is — and the one to enter is said.
+    const older = await runLookup(refused, { input: 'KRAS2 c.35G>A' });
+    assert.equal(older.status, 'Error: KRAS2:c.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. '
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+        + 'NCBI lists KRAS2 as another name for KRAS: a gene has to be given by its current symbol — enter KRAS:c.35G>A.');
+    assert.match(older.panel, /Resolve nomenclature · Ensembl\s*refused the name — Could not get a Transcript object for 'KRAS2'/);
+    assert.equal(older.requests.filter(r => /datasets\/v2\/gene\/symbol\/KRAS2\//.test(r)).length, 1, 'NCBI is not asked a second time');
+    // (NCBI not answering, or never completing its answer: Ensembl's refusal
+    // is told all the same, and is not held for it.)
+    const unsaid = await runLookup(refused, { input: 'KRAS2 c.35G>A', without: [/\/datasets\//] });
+    assert.equal(unsaid.status, 'Error: KRAS2:c.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. '
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+        + 'Check the symbol or accession — a gene has to be given by its current symbol.');
+    const stalled = await runLookup(refused, { input: 'KRAS2 c.35G>A',
+        route: (url, key) => (/\/datasets\//.test(key) ? new Promise(() => {}) : undefined) });
+    assert.match(stalled.status, /^Error: KRAS2:c\.35G>A could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37\. /);
+    assert.match(stalled.status, /Check the symbol or accession — a gene has to be given by its current symbol\.$/);
+
+    // A service that does not answer is still an outage, and still says so.
+    const down = await runLookup(refused, { without: [/ensembl\.org/] });
+    assert.equal(down.status, 'Error: Lookup could not complete: Resolve nomenclature · Ensembl, Consequences · Ensembl VEP did not respond. '
+        + 'This is an upstream outage, not necessarily a problem with your variant — please retry in a moment.');
+    assert.match(down.panel, /^Upstream service unavailable/);
+    // One of the two refusing is enough — they read names the same way — and
+    // the other's outage stays on the panel as what it was.
+    const vepOnly = await runLookup(refused, { without: [/variant_recoder/] });
+    assert.match(vepOnly.status, /^Error: chr12:g\.25398280_25398285insCCA is not a readable insertion: /);
+    assert.match(vepOnly.panel, /Resolve nomenclature · Ensembl\s*HTTP 503/);
+    assert.match(vepOnly.panel, /Consequences · Ensembl VEP\s*refused the name — Start \(25398285\)/);
+    const recoderOnly = await runLookup(refused, { without: [/\/vep\//] });
+    assert.match(recoderOnly.status, /^Error: chr12:g\.25398280_25398285insCCA is not a readable insertion: /);
+    assert.match(recoderOnly.panel, /Resolve nomenclature · Ensembl\s*refused the name — Start \(25398285\)/);
+
+    // What Ensembl says is shown as text, whatever it echoes of the input.
+    const markup = 'Unable to parse HGVS notation \'x\': <img src=x onerror=alert(1)> is not a base';
+    const echoed = await runLookup(refused, { input: 'NM_004985.5:c.99999A>T',
+        route: (url, key, respond) => (/variant_recoder|\/vep\//.test(key) ? respond({ error: markup }, 400) : undefined) });
+    assert.match(echoed.status, /Ensembl refuses the name — "<img src=x onerror=alert\(1\)> is not a base"/);
+    assert.equal(echoed.document.querySelectorAll('img[src="x"]').length, 0, 'no element is made of it');
+    console.log('ok refused name: a name Ensembl refuses is told so, and what is wrong with it');
 }
 
 // 7. Neither source can say which transcript is standard. The old behaviour

@@ -591,17 +591,16 @@ const noReference = [/sequence\/region/];
 //     "chr12:g.25398280insCCA" are refused by Ensembl's recoder and by VEP
 //     alike, and the lookup fails. Left-aligning read both as "insert after
 //     25398280" and showed KRAS p.Gly13dup, "asked as … — the same allele".
-//     (Found in review. Ensembl's refusal is HTTP 400; a spelling this
-//     recording does not hold is answered as an outage, which fails the lookup
-//     the same way.)
+//     (Found in review. Ensembl's refusals are as recorded; what the page then
+//     says of such a name is in tests/gene-symbol-name.test.js, scenario 6b.)
 {
     for (const malformed of ['chr12:g.25398280_25398285insCCA', 'chr12:g.25398280insCCA']) {
-        const page = await runLookup(cassettes.krasDup, { input: malformed });
-        assert.match(page.status, /^Error: /, `${malformed}: not resolved`);
+        const page = await runLookup(cassettes.refusedNames, { input: malformed });
+        assert(page.status.startsWith(`Error: ${malformed} is not a readable insertion: `), `${malformed}: ${page.status.slice(0, 120)}`);
         assert.equal(page.hidden, true, `${malformed}: nothing is rendered`);
         assert.deepEqual(allelesAsked(page), [malformed.replace(/^chr/, '')], `${malformed}: VEP is asked about what was typed, and nothing else`);
         assert.doesNotMatch(page.panel + page.variant, /Gly13dup|asked as|the same allele/, malformed);
-        assert(!page.requests.some(r => r.includes('25398280_25398281insCCA')), `${malformed}: no allele is made of it`);
+        assert.deepEqual(page.requests.filter(r => r.includes('25398280_25398281insCCA')), [], `${malformed}: no allele is made of it`);
     }
     console.log('ok indel protein name: an insertion that names no place is refused, not re-spelled');
 }

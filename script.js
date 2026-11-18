@@ -268,6 +268,103 @@ function unknownTranscriptVersion(err) {
     return m ? m[1] : '';
 }
 
+/*
+ * Any other name a nomenclature service has read and refused (HTTP 400): what
+ * it says is wrong with it, in its own words, without the name repeated in
+ * front. null when the error is not a refusal; '' when it is one and gives no
+ * reason. Ensembl's, for the recoder and for VEP alike:
+ *
+ *   Unable to parse HGVS notation '12:g.25398280_25398285insCCA': Start
+ *     (25398285) must be less than or equal to end+1 (25398281)
+ *   variant skipped (12:g.25398280insCCA): Alleles look like an insertion
+ *     (-/CCA) but coordinates are not start = end + 1 (START=…, END=…) for
+ *     variant (12:g.25398280insCCA)
+ *   Unable to parse HGVS notation 'NM_004985.5:c.99999A>T':  : Unable to map
+ *     the cDNA coordinates 99999-99999 to genomic coordinates for Transcript …
+ *   Unable to parse HGVS notation '99:g.100A>T'
+ *
+ * Every one of these ended in "Lookup could not complete: … failed. Please
+ * retry in a moment." — for a name no second try will make readable.
+ */
+function nomenclatureRefusal(err) {
+    if (!err || err.status !== 400) return null;
+    const text = String(err.message || '');
+    // The service's answer follows the status: {"error": "…"}.
+    let said = '';
+    const json = text.indexOf('{');
+    if (json !== -1) {
+        try {
+            const body = JSON.parse(text.slice(json));
+            said = typeof body.error === 'string' ? body.error : '';
+        } catch {
+            said = '';
+        }
+    }
+    said = said
+        .replace(/^Unable to parse HGVS notation\s+'[^']*'(?:\s*:)*\s*/i, '')
+        .replace(/^variant skipped\s+\([^)]*\)(?:\s*:)*\s*/i, '')
+        .replace(/\s+for variant\s+\([^)]*\)\s*$/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return said.length > 200 ? `${said.slice(0, 199)}…` : said;
+}
+
+// The gene symbol or accession Ensembl says it does not have, from its refusal
+// (nomenclatureRefusal's `reason`); '' where the refusal is about anything else.
+function nameUnknownToEnsembl(reason) {
+    return (String(reason || '').match(/^Could not get a Transcript object for '([^']+)'$/) || [])[1] || '';
+}
+
+/*
+ * The error for a name that was refused: that it is the name, what the service
+ * said, and — for the commonest case, an insertion that does not name two
+ * neighbouring positions — how such a change is written. `reason` is
+ * nomenclatureRefusal's. `knownAs`: the genes NCBI says a name Ensembl does not
+ * have is another name for (clinicalTranscriptsFromReport), where it was asked
+ * and said — an older symbol is then answered with the one to enter.
+ */
+function refusedNameError(query, reason, knownAs = null) {
+    const quoted = reason ? ` (Ensembl: "${reason}")` : '';
+    const desc = parseGenomicHgvs(query);
+    if (desc && desc.type === 'ins' && desc.altSeq && desc.end !== desc.start + 1 && desc.end >= desc.start) {
+        const between = desc.end - desc.start - 1;
+        const insertion = `${desc.chrom}:g.${desc.start}_${desc.start + 1}ins${desc.altSeq}`;
+        return new Error(
+            `${query} is not a readable insertion: an insertion is written between two neighbouring positions, and `
+            + (between < 0 ? 'this names one' : `these have ${between} base${between === 1 ? '' : 's'} between them`)
+            + `. To insert ${desc.altSeq} after ${desc.start}, write ${insertion}`
+            + (between > 0
+                ? `; if the base${between === 1 ? '' : 's'} in between ${between === 1 ? 'is' : 'are'} replaced, write a deletion-insertion: `
+                    + `${desc.chrom}:g.${between === 1 ? desc.start + 1 : `${desc.start + 1}_${desc.end - 1}`}delins${desc.altSeq}`
+                : '')
+            + `.${quoted}`
+        );
+    }
+    // A gene symbol or an accession Ensembl's GRCh37 annotation does not have
+    // (a mistyped symbol; an older name for the gene, as KRAS2 is for KRAS).
+    const unknown = nameUnknownToEnsembl(reason);
+    if (unknown) {
+        const genes = [].concat(knownAs || []).map(symbol => String(symbol || ''))
+            .filter(symbol => symbol && symbol.toUpperCase() !== unknown.toUpperCase()).slice(0, 4);
+        // ("KRAS2:c.35G>A" with the gene's symbol where the older name is.)
+        const renamed = genes.length === 1 && query.toUpperCase().startsWith(`${unknown.toUpperCase()}:`)
+            ? `${genes[0]}${query.slice(unknown.length)}` : '';
+        return new Error(
+            `${query} could not be read as a variant: Ensembl has no gene or transcript named ${unknown} on GRCh37. `
+            + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+            + (genes.length
+                ? `NCBI lists ${unknown} as another name for ${genes.length > 1 ? `${genes.slice(0, -1).join(', ')} and ${genes[genes.length - 1]}` : genes[0]}: `
+                    + `a gene has to be given by its current symbol${renamed ? ` — enter ${renamed}` : ''}.`
+                : 'Check the symbol or accession — a gene has to be given by its current symbol.')
+        );
+    }
+    return new Error(
+        `${query} could not be read as a variant: Ensembl refuses the name${reason ? ` — "${reason}"` : ''}. `
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+        + 'Check the gene symbol or accession, the positions and the bases.'
+    );
+}
+
 // RefSeq transcripts on which the substitution `change` ("c.512T>G") names the
 // right reference base, judged from MyVariant's records of OTHER changes at the
 // same position ("NM_001304717.5:c.512T>C" shows c.512 is T there). Used only
@@ -2744,9 +2841,15 @@ function clinicalTranscriptsFromReport(data, gene) {
     const wanted = String(gene || '').toUpperCase();
     // A symbol search also returns genes that merely have it as an alias
     // ("TTN" brings TTR first): only the gene of that name counts.
-    const product = [].concat(data?.reports || []).map(report => report?.product)
-        .find(candidate => String(candidate?.symbol || '').toUpperCase() === wanted);
-    if (!product) return { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [] };
+    const products = [].concat(data?.reports || []).map(report => report?.product).filter(Boolean);
+    const product = products.find(candidate => String(candidate?.symbol || '').toUpperCase() === wanted);
+    // (`knownAs`: where the name is no gene's symbol, the genes NCBI answers
+    // with are the ones it is another name for — KRAS2 brings KRAS, ABCC7
+    // brings CFTR, MLL2 brings KMT2D and KMT2B. See geneGivenBesideCoordinates.)
+    if (!product) {
+        const knownAs = products.map(candidate => String(candidate.symbol || '')).filter(symbol => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(symbol));
+        return { select: '', selectEnsembl: '', plusClinical: [], refseqSelect: '', ensembl: [], knownAs: Array.from(new Set(knownAs)) };
+    }
     const rows = category => [].concat(product.transcripts || [])
         .filter(t => String(t?.select_category || '').toUpperCase() === category
             && /^NM_\d+\.\d+$/.test(String(t?.accession_version || '')));
@@ -2759,7 +2862,37 @@ function clinicalTranscriptsFromReport(data, gene) {
     const standard = rows('MANE_SELECT').concat(select ? [] : rows('REFSEQ_SELECT'), rows('MANE_PLUS_CLINICAL'));
     return { select, selectEnsembl: ensemblOf(rows('MANE_SELECT')[0]),
         plusClinical: tagged('MANE_PLUS_CLINICAL'), refseqSelect: select ? '' : (tagged('REFSEQ_SELECT')[0] || ''),
-        ensembl: Array.from(new Set(standard.map(ensemblOf).filter(Boolean).map(id => id.replace(/\.\d+$/, '')))) };
+        ensembl: Array.from(new Set(standard.map(ensemblOf).filter(Boolean).map(id => id.replace(/\.\d+$/, '')))),
+        knownAs: [] };
+}
+
+/*
+ * A gene named BESIDE coordinates — a row's gene column, "ATP6 m.8993T>G" —
+ * does not place the allele: the coordinates do. Where Ensembl puts the allele
+ * in transcripts of other genes only, the name given is another name for the
+ * gene (KRAS2 for KRAS, ABCC7 for CFTR, ATP6 for MT-ATP6) or it is a slip, and
+ * either way the allele's transcripts are the allele's. They used to be
+ * dropped for not being the named gene's: "12 25398285 KRAS2 C CACC" came out
+ * with its coding name and "p.: N/A · Effect: N/A", under "Gene: KRAS2", and
+ * every gene-level source was asked about a gene called KRAS2.
+ *
+ * `given` is the name given, `genes` the genes of VEP's transcript rows for the
+ * allele, `placed` the gene VEP's answer is about (resolveGeneSymbolFromVep),
+ * `knownAs` the genes NCBI says the name is another name for (null: it could
+ * not say). Returns null where the name is the allele's gene, or nothing says
+ * otherwise; else { given, gene, alias }: `alias` when the name is another name
+ * for `gene`, as far as anyone has said. The gene that takes the name's place
+ * is one of `genes`: only then are there transcripts of it to show.
+ */
+function geneGivenBesideCoordinates(given, genes, placed, knownAs = null) {
+    const name = String(given || '').trim().toUpperCase();
+    const gene = String(placed || '').trim();
+    const there = [].concat(genes || []).map(symbol => String(symbol || '').toUpperCase()).filter(Boolean);
+    if (!name || there.includes(name)) return null;
+    if (!gene || isChromosomeLikeGeneSymbol(gene) || !there.includes(gene.toUpperCase())) return null;
+    const alias = gene.toUpperCase() === `MT-${name}`
+        || [].concat(knownAs || []).some(symbol => String(symbol || '').toUpperCase() === gene.toUpperCase());
+    return { given: String(given).trim(), gene, alias };
 }
 async function fetchClinicalTranscripts(gene) {
     const symbol = String(gene || '').trim().toUpperCase();
@@ -9821,6 +9954,9 @@ const initVariantSearchUi = () => {
             // the ones not shown: { others: [id], tied }.
             const candidateAlleleIndex = new Map();
             let allelesOnRecord = null;
+            // A gene given beside coordinates that is not the allele's:
+            // { given, gene, alias } (see geneGivenBesideCoordinates).
+            let geneGivenElsewhere = null;
             const vepByVariant = new Map();
             const vepStartedAt = new Map();
             const fetchLookupVep = (variant, { leftAlignedToo = true } = {}) => {
@@ -10735,6 +10871,7 @@ const initVariantSearchUi = () => {
                                 // to retrieve transcript consequences for this genomic variant. This helps cover cases
                                 // where MyVariant.info does not index the deletion/indel but Ensembl VEP still recognises it.
                                 LookupProgress.step('vep', 'running');
+                                let lastResortVepError = null;
                                 try {
                                     // Use the currently normalised gVariant if available; otherwise fall back to the original query.
                                     const hgvsForVep = gVariant || query;
@@ -10810,6 +10947,7 @@ const initVariantSearchUi = () => {
                                     // below depends on whether this was an outage or a real miss.
                                     LookupProgress.step('vep', 'fail', describeUpstreamFailure(vepErr));
                                     if (vepErr && vepErr.retryable) LookupProgress.markUpstreamOutage('vep');
+                                    lastResortVepError = vepErr;
                                 }
                                 if (!altFound) {
                                     /*
@@ -10879,6 +11017,43 @@ const initVariantSearchUi = () => {
                                             readOn: nameReadOn,
                                             versionDropped: tooNew
                                         }));
+                                    }
+                                    /*
+                                     * Any other name that was read and refused — by the recoder,
+                                     * or by VEP, which reads names the same way — and that nobody
+                                     * else placed. That is an answer about the name. It used to
+                                     * get the words of a failure to answer: "chr12:g.25398280_
+                                     * 25398285insCCA" (an insertion between positions five apart)
+                                     * ended in "Ensembl … failed. Please retry in a moment."
+                                     */
+                                    const recoderRefusal = lastRecoderResult.query === query ? nomenclatureRefusal(lastRecoderResult.error) : null;
+                                    const vepRefusal = nomenclatureRefusal(lastResortVepError);
+                                    if (recoderRefusal !== null || vepRefusal !== null) {
+                                        const reason = recoderRefusal || vepRefusal || '';
+                                        const said = `refused the name${reason ? ` — ${reason}` : ''}`;
+                                        if (recoderRefusal !== null) {
+                                            LookupProgress.step('recoder', 'fail', said);
+                                            if (LookupProgress.stateOf('vep') === 'fail') LookupProgress.step('vep', 'empty', 'not asked further — the name was refused');
+                                        } else {
+                                            LookupProgress.step('vep', 'fail', said);
+                                        }
+                                        // A gene Ensembl does not have by that name may be one
+                                        // NCBI knows it as another name for (KRAS2 for KRAS). It
+                                        // was asked about the name when the lookup began, for the
+                                        // gene's standard transcript: this seldom waits.
+                                        let knownAs = null;
+                                        const unknownName = nameUnknownToEnsembl(reason);
+                                        if (unknownName) {
+                                            try {
+                                                const listed = await settledWithin(Promise.resolve().then(() => fetchClinicalTranscripts(unknownName)),
+                                                    API_TIMEOUT_MS.maneLabel, 'NCBI did not say whose name that is in time');
+                                                knownAs = listed ? listed.knownAs : null;
+                                            } catch {
+                                                // Not known: the message says what Ensembl said.
+                                            }
+                                            if (!isCurrentSearch()) return;
+                                        }
+                                        throw refusedNameError(query, reason, knownAs);
                                     }
                                     // Nothing resolved. Which message is correct depends entirely on
                                     // *why* nothing resolved, so ask the progress panel rather than
@@ -11156,6 +11331,40 @@ const initVariantSearchUi = () => {
                     const namedRow = namedAccession
                         ? paired.find(t => String(t.transcript).toUpperCase().replace(/\.\d+$/, '') === namedAccession)
                         : null;
+                    // A gene given beside coordinates that is not one the allele
+                    // lies in (see geneGivenBesideCoordinates): the allele's own
+                    // gene takes its place, here and for everything after.
+                    if (geneHintGlobal && isGenomicVariant(query)
+                        && paired.length && !paired.some(t => t.gene.toUpperCase() === geneHintGlobal.toUpperCase())) {
+                        const placed = await resolveGeneSymbolFromVep(vep.consequences, recoderData, vep.mostSevere);
+                        if (!isCurrentSearch()) return;
+                        // (NCBI was asked about the name when the lookup began, for
+                        // the MANE label; its answer is waited for no longer than that is.)
+                        let knownAs = null;
+                        try {
+                            const listed = await settledWithin(Promise.resolve().then(() => fetchClinicalTranscripts(geneHintGlobal)),
+                                API_TIMEOUT_MS.maneLabel, 'NCBI did not say whose name that is in time');
+                            knownAs = listed ? listed.knownAs : null;
+                        } catch {
+                            // Not known: said as a difference, not as another name.
+                        }
+                        if (!isCurrentSearch()) return;
+                        const elsewhere = geneGivenBesideCoordinates(geneHintGlobal, paired.map(t => t.gene), placed, knownAs);
+                        if (elsewhere) {
+                            geneGivenElsewhere = elsewhere;
+                            // An allele without a record has an annotation made up
+                            // for it, whose only gene label is the name given.
+                            const label = annotation && annotation.dbnsfp;
+                            if (label && typeof label.genename === 'string' && Object.keys(label).length === 1
+                                && label.genename.toUpperCase() === elsewhere.given.toUpperCase()) {
+                                annotation.dbnsfp = { genename: elsewhere.gene };
+                            }
+                            geneHintGlobal = elsewhere.gene;
+                            LookupProgress.note('parse', elsewhere.alias
+                                ? `gene given as ${elsewhere.given}, another name for ${elsewhere.gene}`
+                                : `gene given as ${elsewhere.given} — the allele lies in ${elsewhere.gene}, which is what is shown`);
+                        }
+                    }
                     const namedGene = geneHintGlobal || (namedRow && namedRow.gene)
                         || (/^(?:N[MRP]_|ENS|LRG_|CHR)/i.test(intentGene) ? '' : intentGene);
                     let relevant;
@@ -11764,6 +11973,18 @@ const initVariantSearchUi = () => {
                     }
                 });
                 content.appendChild(makeLine('Gene', geneNames));
+                if (geneGivenElsewhere) {
+                    // The gene shown is not the one that was given with the
+                    // coordinates: say so, and whether it is the same gene.
+                    const { given, gene, alias } = geneGivenElsewhere;
+                    const geneNote = document.createElement('span');
+                    geneNote.className = 'gene-given-note';
+                    geneNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                    geneNote.textContent = alias
+                        ? `Given as ${given}, which is another name for ${gene}.`
+                        : `The gene given with these coordinates is ${given}, but the allele lies in ${gene} (Ensembl), which is what is shown. Check the row.`;
+                    content.appendChild(geneNote);
+                }
                 // All summary fields refer to this one transcript. A missing
                 // protein consequence must not be borrowed from another isoform.
                 const canonicalCVal = selectedTranscript?.cDNA || '';
@@ -14258,6 +14479,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
         ensemblRecoderAnswer, recoderPaneText, allelesNotAskedAbout, fetchProteinSubstitutionAlleles,
+        nomenclatureRefusal, refusedNameError, nameUnknownToEnsembl, geneGivenBesideCoordinates,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,

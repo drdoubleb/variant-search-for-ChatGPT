@@ -583,6 +583,23 @@ Ensembl reads the accession without its version as the one it has, so that is
 looked up instead, and the panel says so: *"NM_000077.6 is a newer version than
 GRCh37's annotation has — read on the version it does have"* (`NM_000077.5`).
 
+**Every other refusal** got the words of a failure to answer — *"Lookup could
+not complete: Resolve nomenclature · Ensembl, Consequences · Ensembl VEP failed.
+Please retry in a moment."* — for a name no second try will make readable. It
+is now told as a refusal, with what Ensembl says is wrong (`nomenclatureRefusal`,
+`refusedNameError`), and the panel shows *refused the name — …* where it showed
+*HTTP 400*:
+
+| Input | now |
+| --- | --- |
+| `chr12:g.25398280_25398285insCCA` — an insertion between positions five apart | *is not a readable insertion: an insertion is written between two neighbouring positions, and these have 4 bases between them. To insert CCA after 25398280, write chr12:g.25398280_25398281insCCA; if the bases in between are replaced, write a deletion-insertion: chr12:g.25398281_25398284delinsCCA. (Ensembl: "Start (25398285) must be less than or equal to end+1 (25398281)")* |
+| `NM_004985.5:c.99999A>T` | *could not be read as a variant: Ensembl refuses the name — "Unable to map the cDNA coordinates 99999-99999 to genomic coordinates for Transcript rna-NM_004985.5". That is an answer about the name, not an outage, and a second try will give the same one.* |
+| `KRAS2 c.35G>A` | *could not be read as a variant: Ensembl has no gene or transcript named KRAS2 on GRCh37. … NCBI lists KRAS2 as another name for KRAS: a gene has to be given by its current symbol — enter KRAS:c.35G>A.* |
+| `NOTAGENE c.35G>A` | the same, ending *Check the symbol or accession — a gene has to be given by its current symbol.* — as for any name NCBI knows for no gene, or does not answer about |
+
+One refusal is enough, the recoder's or VEP's: they read names the same way. A
+service that does not answer is still an outage, and still says so.
+
 If neither source can say which transcript is standard, the old behaviour is all
 that is left — and is said: the panel warns that the name was read on whichever
 transcript matched first, and a typed substitution that is on none of the
@@ -605,6 +622,34 @@ of — beside the effect `upstream_gene_variant`. The gene named is now one the
 reported effect is about, and of several, the nearest
 (`resolveGeneSymbolFromVep`). A gene the variant is actually in still comes
 before any neighbour.
+
+### A gene given beside coordinates
+
+A pasted row usually has a gene column, and `ATP6 m.8993T>G` names a gene too.
+The coordinates place the allele; the gene is a label that came with them. It
+chooses among the transcripts VEP gives where two genes overlap (a row that says
+`EGFR-AS1` is shown on EGFR-AS1's transcript) — and where it matched none of
+VEP's transcripts, all of them used to be dropped:
+
+| Input | was | now |
+| --- | --- | --- |
+| `12 25398285 KRAS2 C CACC` | Gene: KRAS2 · c.36_38dup · p.: N/A · Effect: N/A; CIViC and the rest asked about "KRAS2" | Gene: KRAS · p.Gly13dup · inframe_insertion · *Given as KRAS2, which is another name for KRAS.* |
+| `12 25398284 KRAS2 C T` (KRAS G12D) | p.: N/A · Effect: N/A | p.Gly12Asp · missense_variant, the same note |
+| `ATP6 m.8993T>G` | no transcript · c.: N/A · p.: N/A · Effect: NON_SYNONYMOUS | ENST00000361899.2 · c.467T>G · p.Leu156Arg · *Given as ATP6, which is another name for MT-ATP6.* |
+| `12 25398284 TP53 C T` | Gene: KRAS · p.: N/A · Effect: N/A | p.Gly12Asp · *The gene given with these coordinates is TP53, but the allele lies in KRAS (Ensembl), which is what is shown. Check the row.* |
+
+Where the gene given is not one VEP places the allele in, the allele's own gene
+takes its place — for the transcripts, for the card and for every gene-level
+source (`geneGivenBesideCoordinates`). Which of the two cases it is, NCBI's gene
+records say: asked for a name that is no gene's symbol, they answer with the
+genes it is another name for (KRAS2 → KRAS, ABCC7 → CFTR, P53 → TP53; a
+mitochondrial gene without its `MT-` is recognised without asking). When NCBI
+does not answer, the allele is shown all the same, as a gene that differs from
+the one given, which is all that is then known.
+
+Nothing changes where the gene given is one the allele lies in, where none was
+given, or where VEP places the allele in no transcript at all (a variant between
+genes keeps the gene it came with). See `tests/gene-beside-coordinates.test.js`.
 
 ### Mitochondrial variants
 
