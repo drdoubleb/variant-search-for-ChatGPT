@@ -268,6 +268,87 @@ function unknownTranscriptVersion(err) {
     return m ? m[1] : '';
 }
 
+/*
+ * Any other name a nomenclature service has read and refused (HTTP 400): what
+ * it says is wrong with it, in its own words, without the name repeated in
+ * front. null when the error is not a refusal; '' when it is one and gives no
+ * reason. Ensembl's, for the recoder and for VEP alike:
+ *
+ *   Unable to parse HGVS notation '12:g.25398280_25398285insCCA': Start
+ *     (25398285) must be less than or equal to end+1 (25398281)
+ *   variant skipped (12:g.25398280insCCA): Alleles look like an insertion
+ *     (-/CCA) but coordinates are not start = end + 1 (START=…, END=…) for
+ *     variant (12:g.25398280insCCA)
+ *   Unable to parse HGVS notation 'NM_004985.5:c.99999A>T':  : Unable to map
+ *     the cDNA coordinates 99999-99999 to genomic coordinates for Transcript …
+ *   Unable to parse HGVS notation '99:g.100A>T'
+ *
+ * Every one of these ended in "Lookup could not complete: … failed. Please
+ * retry in a moment." — for a name no second try will make readable.
+ */
+function nomenclatureRefusal(err) {
+    if (!err || err.status !== 400) return null;
+    const text = String(err.message || '');
+    // The service's answer follows the status: {"error": "…"}.
+    let said = '';
+    const json = text.indexOf('{');
+    if (json !== -1) {
+        try {
+            const body = JSON.parse(text.slice(json));
+            said = typeof body.error === 'string' ? body.error : '';
+        } catch {
+            said = '';
+        }
+    }
+    said = said
+        .replace(/^Unable to parse HGVS notation\s+'[^']*'(?:\s*:)*\s*/i, '')
+        .replace(/^variant skipped\s+\([^)]*\)(?:\s*:)*\s*/i, '')
+        .replace(/\s+for variant\s+\([^)]*\)\s*$/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return said.length > 200 ? `${said.slice(0, 199)}…` : said;
+}
+
+/*
+ * The error for a name that was refused: that it is the name, what the service
+ * said, and — for the commonest case, an insertion that does not name two
+ * neighbouring positions — how such a change is written. `reason` is
+ * nomenclatureRefusal's.
+ */
+function refusedNameError(query, reason) {
+    const quoted = reason ? ` (Ensembl: "${reason}")` : '';
+    const desc = parseGenomicHgvs(query);
+    if (desc && desc.type === 'ins' && desc.altSeq && desc.end !== desc.start + 1 && desc.end >= desc.start) {
+        const between = desc.end - desc.start - 1;
+        const insertion = `${desc.chrom}:g.${desc.start}_${desc.start + 1}ins${desc.altSeq}`;
+        return new Error(
+            `${query} is not a readable insertion: an insertion is written between two neighbouring positions, and `
+            + (between < 0 ? 'this names one' : `these have ${between} base${between === 1 ? '' : 's'} between them`)
+            + `. To insert ${desc.altSeq} after ${desc.start}, write ${insertion}`
+            + (between > 0
+                ? `; if the base${between === 1 ? '' : 's'} in between ${between === 1 ? 'is' : 'are'} replaced, write a deletion-insertion: `
+                    + `${desc.chrom}:g.${between === 1 ? desc.start + 1 : `${desc.start + 1}_${desc.end - 1}`}delins${desc.altSeq}`
+                : '')
+            + `.${quoted}`
+        );
+    }
+    // A gene symbol or an accession Ensembl's GRCh37 annotation does not have
+    // (a mistyped symbol; an older name for the gene, as KRAS2 is for KRAS).
+    const unknown = (reason.match(/^Could not get a Transcript object for '([^']+)'$/) || [])[1];
+    if (unknown) {
+        return new Error(
+            `${query} could not be read as a variant: Ensembl has no gene or transcript named ${unknown} on GRCh37. `
+            + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+            + 'Check the symbol or accession — a gene has to be given by its current symbol.'
+        );
+    }
+    return new Error(
+        `${query} could not be read as a variant: Ensembl refuses the name${reason ? ` — "${reason}"` : ''}. `
+        + 'That is an answer about the name, not an outage, and a second try will give the same one. '
+        + 'Check the gene symbol or accession, the positions and the bases.'
+    );
+}
+
 // RefSeq transcripts on which the substitution `change` ("c.512T>G") names the
 // right reference base, judged from MyVariant's records of OTHER changes at the
 // same position ("NM_001304717.5:c.512T>C" shows c.512 is T there). Used only
@@ -10735,6 +10816,7 @@ const initVariantSearchUi = () => {
                                 // to retrieve transcript consequences for this genomic variant. This helps cover cases
                                 // where MyVariant.info does not index the deletion/indel but Ensembl VEP still recognises it.
                                 LookupProgress.step('vep', 'running');
+                                let lastResortVepError = null;
                                 try {
                                     // Use the currently normalised gVariant if available; otherwise fall back to the original query.
                                     const hgvsForVep = gVariant || query;
@@ -10810,6 +10892,7 @@ const initVariantSearchUi = () => {
                                     // below depends on whether this was an outage or a real miss.
                                     LookupProgress.step('vep', 'fail', describeUpstreamFailure(vepErr));
                                     if (vepErr && vepErr.retryable) LookupProgress.markUpstreamOutage('vep');
+                                    lastResortVepError = vepErr;
                                 }
                                 if (!altFound) {
                                     /*
@@ -10879,6 +10962,27 @@ const initVariantSearchUi = () => {
                                             readOn: nameReadOn,
                                             versionDropped: tooNew
                                         }));
+                                    }
+                                    /*
+                                     * Any other name that was read and refused — by the recoder,
+                                     * or by VEP, which reads names the same way — and that nobody
+                                     * else placed. That is an answer about the name. It used to
+                                     * get the words of a failure to answer: "chr12:g.25398280_
+                                     * 25398285insCCA" (an insertion between positions five apart)
+                                     * ended in "Ensembl … failed. Please retry in a moment."
+                                     */
+                                    const recoderRefusal = lastRecoderResult.query === query ? nomenclatureRefusal(lastRecoderResult.error) : null;
+                                    const vepRefusal = nomenclatureRefusal(lastResortVepError);
+                                    if (recoderRefusal !== null || vepRefusal !== null) {
+                                        const reason = recoderRefusal || vepRefusal || '';
+                                        const said = `refused the name${reason ? ` — ${reason}` : ''}`;
+                                        if (recoderRefusal !== null) {
+                                            LookupProgress.step('recoder', 'fail', said);
+                                            if (LookupProgress.stateOf('vep') === 'fail') LookupProgress.step('vep', 'empty', 'not asked further — the name was refused');
+                                        } else {
+                                            LookupProgress.step('vep', 'fail', said);
+                                        }
+                                        throw refusedNameError(query, reason);
                                     }
                                     // Nothing resolved. Which message is correct depends entirely on
                                     // *why* nothing resolved, so ask the progress panel rather than
@@ -14258,6 +14362,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
         ensemblRecoderAnswer, recoderPaneText, allelesNotAskedAbout, fetchProteinSubstitutionAlleles,
+        nomenclatureRefusal, refusedNameError,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
         parseClinvarEventKind, getQueryAffectedSpan,
