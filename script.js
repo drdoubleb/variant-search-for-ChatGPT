@@ -1239,7 +1239,7 @@ async function fetchGrch37ReferenceSequence(chrom, start, end, timeoutMs = API_T
     ]);
     clearTimeout(headStart);
     if (early && early !== pending) return early;
-    const ucsc = fetchUcscReferenceSequence(c, start, end, Math.max(1000, timeoutMs - (Date.now() - began))).catch((err) => {
+    const ucsc = fetchUcscReferenceSequence(c, start, end, timeoutMs - (Date.now() - began)).catch((err) => {
         console.warn('UCSC reference sequence unavailable:', err);
         return null;
     });

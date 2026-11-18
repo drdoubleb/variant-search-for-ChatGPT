@@ -119,6 +119,9 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
         }
         serve({ ensembl: down, ucsc: text('not json') });
         await assert.rejects(read(), /Ensembl sequence request failed \(500\)/);
+        // (A failure is a failure, whatever comes with it.)
+        serve({ ensembl: down, ucsc: json(ucscAnswer(), 503) });
+        await assert.rejects(read(), /Ensembl sequence request failed \(500\)/);
         // (Bases the assembly does not know are N in both.)
         serve({ ensembl: down, ucsc: json(ucscAnswer({ dna: 'nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn' })) });
         assert.equal(await read(), 'N'.repeat(33));
@@ -166,13 +169,14 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
         // ...as Ensembl's is, when UCSC is the one that fails.
         asked = serve({ ensembl: after(250, text(bases)), ucsc: after(80, json({ error: 'x' }, 500)) });
         assert.equal(await read(), bases);
-        // Neither answers: the read is given up when its time is up — once, not
-        // once for each of them.
+        // Neither answers: the read is given up when its time is up — the one
+        // stretch of time it was given, not one for each of them.
+        h.API_TIMEOUT_MS.referenceHeadStart = 400;
         asked = serve({ ensembl: never, ucsc: never });
         began = Date.now();
-        await assert.rejects(read(1300), /aborted|timed out/i);
+        await assert.rejects(read(1000), /aborted|timed out/i);
         const waited = Date.now() - began;
-        assert(waited >= 1200 && waited < 1900, `given up after ${waited} ms`);
+        assert(waited >= 950 && waited < 1300, `given up after ${waited} ms`);
         assert.equal(asked.length, 2);
     } finally {
         globalThis.fetch = realFetch;
