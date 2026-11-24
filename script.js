@@ -2739,7 +2739,7 @@ function appendTp53PromoterActivity(parent, match, source) {
 function appendTp53AssayComparison(parent, comparison) {
     if (!comparison?.studies?.length) return;
     const details = appendEvidenceDetails(parent, `Assay comparison · ${comparison.protein}`);
-    appendEvidenceText(details, 'The studies report different endpoints and scales. Submitter interpretations appear in the ClinVar card.');
+    if (comparison.studies.length > 1) appendEvidenceText(details, 'Endpoints and scales vary by study.');
     for (const study of comparison.studies) {
         const heading = document.createElement('h4');
         heading.className = 'evidence-heading';
@@ -2749,12 +2749,20 @@ function appendTp53AssayComparison(parent, comparison) {
         appendEvidenceText(details, `${scope} · ${study.variant}`);
         appendEvidenceText(details, study.system);
         appendEvidenceText(details, study.endpoint);
-        appendEvidenceText(details, study.comparator);
-        appendTp53Table(details, study.measurements.map(({ label, value, units }) =>
-            [label, `${Number(value.toFixed(3))} ${units}`]));
+        if (study.comparator) appendEvidenceText(details, study.comparator);
+        const results = [...study.measurements, ...(study.classifications || [])];
+        appendTp53Table(details, results.map(({ label, value, units, source_records }) => {
+            const formatted = Number.isFinite(value) ? String(Number(value.toFixed(3))) : value;
+            const result = [formatted, units].filter(Boolean).join(' ');
+            const records = source_records?.join(', ');
+            return [label, records ? `${result} · ${records}` : result];
+        }));
         const links = document.createElement('div');
         links.className = 'evidence-links';
-        for (const [label, value] of [['Article', study.article], [study.dataLabel, study.dataUrl], ['Correction', study.correctionUrl]]) {
+        for (const [label, value] of [
+            ['Article', study.article], [study.dataLabel, study.dataUrl],
+            ['Supplementary Table 3', study.supplementUrl], ['Correction', study.correctionUrl]
+        ]) {
             const url = safeUrl(value);
             if (url) appendEvidenceLink(links, `${label} ↗`, url);
         }
@@ -2769,10 +2777,12 @@ function appendTp53Results(parent, data) {
         return;
     }
     const exact = selection.status === 'exact' ? matches[0] : null;
+    const usesLegacyAssayPanels = !data.assay_comparison?.includes_mutation_view;
+    const known = value => value && !/^N\/?A$/i.test(value);
     appendEvidenceText(parent, data.note, 'evidence-heading');
     if (data.dataset_stale) appendEvidenceText(parent, 'Showing the last available TP53 dataset.');
     if (exact) {
-        const compact = [exact.transcript_hgvs || exact.cdna_or_genomic, exact.ta_class && `Yeast transactivation · ${exact.ta_class}`].filter(Boolean);
+        const compact = [exact.transcript_hgvs || exact.cdna_or_genomic, known(exact.ta_class) && `Yeast transactivation · ${exact.ta_class}`].filter(Boolean);
         if (compact.length) appendEvidenceText(parent, compact.join(' — '));
         const occurrences = [exact.somatic_count && `Somatic · ${exact.somatic_count}`, exact.germline_count && `Germline · ${exact.germline_count}`].filter(Boolean);
         if (occurrences.length) appendEvidenceText(parent, `MutationView occurrences — ${occurrences.join(' | ')}`);
@@ -2788,17 +2798,18 @@ function appendTp53Results(parent, data) {
             ['Somatic occurrences', exact.somatic_count], ['Germline occurrences', exact.germline_count],
             ['TCGA/ICGC/GENIE count', exact.tcga_icgc_genie_count]
         ].filter(([, value]) => value || value === 0));
-        appendTp53PromoterActivity(parent, exact, sources.transactivation);
-        const known = value => value && !/^N\/?A$/i.test(value);
-        const cellular = [
-            ['Giacomelli growth-suppression and dominant-negative class', exact.lof_class],
-            ['Curated dominant-negative transactivation class', exact.dne_class]
-        ].filter(([, value]) => known(value));
-        if (cellular.length) {
-            const details = appendEvidenceDetails(parent, 'Cellular functional classifications');
-            if (known(exact.lof_class)) appendTp53Source(details, sources.cellular_dne_lof);
-            if (known(exact.dne_class)) appendTp53Source(details, sources.dominant_negative);
-            appendTp53Table(details, cellular);
+        if (usesLegacyAssayPanels) {
+            appendTp53PromoterActivity(parent, exact, sources.transactivation);
+            const cellular = [
+                ['Giacomelli growth-suppression and dominant-negative class', exact.lof_class],
+                ['Curated dominant-negative transactivation class', exact.dne_class]
+            ].filter(([, value]) => known(value));
+            if (cellular.length) {
+                const details = appendEvidenceDetails(parent, 'Cellular functional classifications');
+                if (known(exact.lof_class)) appendTp53Source(details, sources.cellular_dne_lof);
+                if (known(exact.dne_class)) appendTp53Source(details, sources.dominant_negative);
+                appendTp53Table(details, cellular);
+            }
         }
         const predictions = [
             ['Structure-based computational prediction', exact.structural_class], ['Align-GVGD', exact.agvgd_class],
@@ -2819,7 +2830,7 @@ function appendTp53Results(parent, data) {
         const details = appendEvidenceDetails(parent, `Other MutationView records (${related.length}${omitted ? ` of ${related.length + omitted}` : ''})`);
         for (const match of related) {
             const label = [TP53_MATCH_LABELS[match.match_type], match.transcript_hgvs || match.cdna_or_genomic, match.protein].filter(Boolean).join(' · ');
-            if (!exact && match.match_type === 'same_protein') {
+            if (usesLegacyAssayPanels && !exact && match.match_type === 'same_protein') {
                 const entry = appendEvidenceDetails(details, label);
                 if (match.ta_class) appendEvidenceText(entry, `Yeast transactivation · ${match.ta_class}`);
                 appendTp53PromoterActivity(entry, match, sources.transactivation);

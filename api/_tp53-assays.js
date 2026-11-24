@@ -1,50 +1,111 @@
-// A small comparison checked against the source tables. See README.md for row
-// identifiers and links. The H1299 result is specific to the reported construct.
+const PERCENT_WT = '% of wild type';
+const NCI_DATA = { dataLabel: 'NCI TP53 data dictionary', dataUrl: 'https://tp53.cancer.gov/help' };
+
+const KATO = {
+    ...NCI_DATA,
+    study: 'Kato et al. (2003)',
+    article: 'https://pubmed.ncbi.nlm.nih.gov/12826609/',
+    system: 'Yeast reporter assay with eight p53-responsive promoters',
+    endpoint: 'Promoter transactivation relative to wild-type p53',
+    comparator: 'Each promoter’s wild-type p53 activity is 100%.'
+};
+const KAKUDO = {
+    ...NCI_DATA,
+    study: 'Kakudo et al. (2005)',
+    article: 'https://pubmed.ncbi.nlm.nih.gov/15781620/',
+    system: 'Human Saos-2 cells',
+    endpoint: 'Promoter transactivation and sub-G1 apoptosis readout',
+    comparator: 'The reporter results use p53-null vector normalization. Values are expressed relative to wild-type p53.'
+};
+const GIACOMELLI = {
+    ...NCI_DATA,
+    study: 'Giacomelli et al. (2018)',
+    article: 'https://pubmed.ncbi.nlm.nih.gov/30224644/',
+    system: 'Isogenic human A549 cells with wild-type or null p53',
+    endpoint: 'Variant enrichment or depletion after treatment relative to the early sample',
+    comparator: 'NCI derives the combined classification from growth-suppression and dominant-negative assay results. DNE means dominant-negative effect. LOF means loss of function.'
+};
+const CURATED_DNE = {
+    ...NCI_DATA,
+    study: 'Dominant-negative transactivation',
+    system: 'Multiple transactivation studies curated by the NCI TP53 Database',
+    endpoint: 'Dominant-negative effect on wild-type p53 transactivation'
+};
+
+// These supplemental results were checked independently of MutationView. The
+// general panel uses the measurements and classifications in that dataset.
+// Kotler’s values apply to the specified coding construct and backbone only.
+const M237L_SCORES = [
+    { label: 'p53 WT · nutlin-3', value: 0.7432024599950522, units: 'Z-score' },
+    { label: 'p53 null · nutlin-3', value: -0.1555150626148093, units: 'Z-score' },
+    { label: 'p53 null · etoposide', value: 0.2662258591870247, units: 'Z-score' }
+];
+const GIACOMELLI_TABLE = 'https://media.springernature.com/full/springer-static/esm/art%3A10.1038%2Fs41588-018-0204-y/MediaObjects/41588_2018_204_MOESM6_ESM.xlsx';
 const KOTLER_CONSTRUCTS = new Map([
     ['C.709A>C', { id: '302463', score: -1.779194794 }],
     ['C.709A>T', { id: '302465', score: -1.666323792 }]
 ]);
 
-const M237L_PROTEIN_ASSAYS = [
-    {
-        study: 'Kato et al. (2003)',
-        article: 'https://pubmed.ncbi.nlm.nih.gov/12826609/',
-        dataLabel: 'NCI TP53 Database r21',
-        dataUrl: 'https://tp53.cancer.gov/static/data/FunctionIshiokaDownload_r21.csv',
-        scope: 'protein',
-        variant: 'p.Met237Leu',
-        system: 'Yeast reporter assay with eight p53-responsive promoters',
-        endpoint: 'Promoter transactivation relative to wild-type p53',
-        comparator: 'Each promoter’s wild-type p53 activity is 100%.',
-        measurements: [
-            { label: 'Median across eight promoters', value: 40.6, units: '% of wild type' },
-            { label: 'Lowest promoter activity', value: 6.6, units: '% of wild type' },
-            { label: 'Highest promoter activity', value: 78.2, units: '% of wild type' }
-        ]
-    },
-    {
-        study: 'Giacomelli et al. (2018)',
-        article: 'https://pubmed.ncbi.nlm.nih.gov/30224644/',
-        dataLabel: 'Supplementary Table 3',
-        dataUrl: 'https://media.springernature.com/full/springer-static/esm/art%3A10.1038%2Fs41588-018-0204-y/MediaObjects/41588_2018_204_MOESM6_ESM.xlsx',
-        scope: 'protein',
-        variant: 'p.Met237Leu',
-        system: 'Isogenic human A549 cells with wild-type or null p53',
-        endpoint: 'Variant enrichment or depletion after treatment relative to the early sample',
-        comparator: 'Synonymous variants were included for comparison. Table 3 reports scores by amino-acid change.',
-        measurements: [
-            { label: 'p53 WT · nutlin-3', value: 0.7432024599950522, units: 'Z-score' },
-            { label: 'p53 null · nutlin-3', value: -0.1555150626148093, units: 'Z-score' },
-            { label: 'p53 null · etoposide', value: 0.2662258591870247, units: 'Z-score' }
-        ]
-    }
-];
+function numericValue(text) {
+    if (text == null || String(text).trim() === '') return null;
+    const value = Number(text);
+    return Number.isFinite(value) ? value : null;
+}
 
-export function tp53AssayComparison(protein, exactTranscriptHgvs) {
-    if (protein !== 'M237L') return null;
-    const studies = [...M237L_PROTEIN_ASSAYS];
+function classificationValue(text) {
+    const value = String(text || '').trim();
+    if (!value || /^(?:N\/?A|ND|-+)$/i.test(value)) return null;
+    return /^unclass\.?$/i.test(value) ? 'Unclassified' : value;
+}
+
+function studyResults(matches, readFields, readValue, units = '') {
+    const targets = new Map();
+    for (const match of matches) {
+        const accession = match.transcript_hgvs || match.cdna_or_genomic;
+        const source = [match.mut_id && `MutationView ${match.mut_id}`, accession].filter(Boolean).join(' · ');
+        for (const [label, raw] of Object.entries(readFields(match))) {
+            const value = readValue(raw);
+            if (value === null) continue;
+            if (!targets.has(label)) targets.set(label, new Map());
+            const results = targets.get(label);
+            if (!results.has(value)) results.set(value, new Set());
+            if (source) results.get(value).add(source);
+        }
+    }
+    return [...targets].flatMap(([label, results]) => [...results].map(([value, references]) => ({
+        label, value, units,
+        ...(results.size > 1 && references.size ? { source_records: [...references] } : {})
+    })));
+}
+
+export function tp53AssayComparison({ protein, proteinKey, matches, exactTranscriptHgvs }) {
+    const studies = [];
+    const addProteinStudy = (study, measurements, classifications = []) => {
+        if (measurements.length || classifications.length) {
+            studies.push({
+                ...study, scope: 'protein', variant: protein, measurements,
+                ...(classifications.length ? { classifications } : {})
+            });
+        }
+    };
+
+    const yeast = studyResults(matches, match => match.ta_targets, numericValue, PERCENT_WT);
+    if (yeast.length === 8 && new Set(yeast.map(m => m.label)).size === 8) {
+        const sorted = yeast.map(m => m.value).sort((a, b) => a - b);
+        yeast.unshift({ label: 'Median across eight promoters', value: (sorted[3] + sorted[4]) / 2, units: PERCENT_WT });
+    }
+    addProteinStudy(KATO, yeast);
+    addProteinStudy(KAKUDO, studyResults(matches, match => match.saos2_targets, numericValue, PERCENT_WT));
+
+    const growthClass = studyResults(matches, match => ({ 'NCI combined DNE/LOF class': match.lof_class }), classificationValue);
+    const isM237L = proteinKey === 'M237L';
+    addProteinStudy(isM237L ? { ...GIACOMELLI, supplementUrl: GIACOMELLI_TABLE } : GIACOMELLI,
+        isM237L ? M237L_SCORES : [], growthClass);
+    const dneClass = studyResults(matches, match => ({ 'NCI dominant-negative class': match.dne_class }), classificationValue);
+    addProteinStudy(CURATED_DNE, [], dneClass);
+
     const cdna = String(exactTranscriptHgvs || '').toUpperCase().match(/^NM_000546\.[56]:(C\.709A>[CT])$/)?.[1];
-    const construct = KOTLER_CONSTRUCTS.get(cdna);
+    const construct = isM237L && KOTLER_CONSTRUCTS.get(cdna);
     if (construct) {
         studies.push({
             study: 'Kotler et al. (2018)',
@@ -60,5 +121,5 @@ export function tp53AssayComparison(protein, exactTranscriptHgvs) {
             measurements: [{ label: 'H1299 relative fitness score', value: construct.score, units: 'log₂ scale' }]
         });
     }
-    return { protein: 'p.Met237Leu', studies };
+    return studies.length ? { protein, includes_mutation_view: true, studies } : null;
 }

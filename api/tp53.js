@@ -542,6 +542,15 @@ function buildMatches(rows, query) {
         NOXA: taNoxa || '',
         P53R2: taP53r2 || '',
       },
+      saos2_targets: {
+        WAF1: pickValue(row, ['waf1nwtsaos2']),
+        MDM2: pickValue(row, ['mdm2nwtsaos2']),
+        BAX: pickValue(row, ['baxnwtsaos2']),
+        '14-3-3σ': pickValue(row, ['h1433snwtsaos2']),
+        AIP1: pickValue(row, ['aip1nwtsaos2']),
+        PUMA: pickValue(row, ['pumanwtsaos2']),
+        'Sub-G1 apoptosis': pickValue(row, ['subg1nwtsaos2']),
+      },
       splice_ai: {
         DS_AL: spliceAiDsAl || '',
         DS_AG: spliceAiDsAg || '',
@@ -552,6 +561,24 @@ function buildMatches(rows, query) {
   }
   matches.sort((a, b) => MATCH_RANK[b.match_type] - MATCH_RANK[a.match_type]);
   return matches;
+}
+
+function buildAssayComparison(rows, matches, candidates, exact, queryProtein) {
+  const anchors = candidates.length ? candidates : matches.filter(match => match.match_type === 'same_protein');
+  const proteinKey = toProteinCompact(anchors[0]?.protein);
+  if (!proteinCodonKey(proteinKey) || anchors.some(match => toProteinCompact(match.protein) !== proteinKey)) return null;
+
+  // An allele-only lookup can identify the protein without having searched
+  // for the other alleles that encode it. Use the full set of protein matches.
+  const queriedProtein = toProteinCompact(queryProtein) === proteinKey;
+  const protein = queriedProtein ? queryProtein : anchors[0].protein;
+  const proteinMatches = queriedProtein ? matches : buildMatches(rows, { protein });
+  return tp53AssayComparison({
+    protein: `p.${stripProteinPrefix(protein)}`,
+    proteinKey,
+    matches: proteinMatches.filter(match => toProteinCompact(match.protein) === proteinKey),
+    exactTranscriptHgvs: exact?.transcript_hgvs
+  });
 }
 
 import { rejectDisallowedOrigin } from './_origin.js';
@@ -648,7 +675,7 @@ export default async function handler(req, res) {
       omitted_match_count: matches.length - top.length,
       selection: { status, match_type: candidates[0]?.match_type ?? null, candidate_count: candidates.length },
       functional_sources: FUNCTIONAL_SOURCES,
-      assay_comparison: tp53AssayComparison(toProteinCompact(best ? best.protein : body.protein), best?.transcript_hgvs),
+      assay_comparison: buildAssayComparison(rows, matches, candidates, best, body.protein),
       dataset_stale: Boolean(staleSince),
       pathogenicity: pathogenicitySummary,
       classification: best?.exon_intron || '',

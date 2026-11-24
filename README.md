@@ -1108,19 +1108,22 @@ The regression case is TP53 `NM_000546.6:c.709A>T` (p.Met237Leu), VCV002774649. 
 
 A versioned genomic HGVS such as `NC_000017.10:g.7577572T>A` also carries the assembly. A chromosome-based HGVS requires the separate `assembly` field. MutationView often omits reference bases for indels. Those rows can match through an exact versioned cDNA change. The coding sequences of NM_000546.5 and NM_000546.6 are identical across 1,182 bases, so those versions are compatible for coding SNVs. Other transcript versions require exact agreement. [NM_000546.5](https://www.ncbi.nlm.nih.gov/nuccore/NM_000546.5), [NM_000546.6](https://www.ncbi.nlm.nih.gov/nuccore/NM_000546.6)
 
-The response reports `selection`, `matches` with match types, and `omitted_match_count`. A unique exact record supplies the allele-specific summary, including occurrence counts and splice predictions. Same-protein, same-codon and coordinate matches provide context. Multiple exact candidates produce an ambiguous selection. The TP53 card shows Kato's yeast reporter activity as percent of wild type and labels the separate Mathe structure-based computational prediction. The latter was trained on Kato's data. [NCI TP53 data dictionary](https://tp53.cancer.gov/help), [structure-based method](https://tp53.cancer.gov/dt_method)
+The response reports `selection`, `matches` with match types, and `omitted_match_count`. A unique exact record supplies the allele-specific summary, including occurrence counts and splice predictions. Same-protein, same-codon and coordinate matches provide context. Multiple exact candidates produce an ambiguous selection. The card separately labels the Mathe structure-based computational prediction, which was trained on Kato's assay data. [Structure-based method](https://tp53.cancer.gov/dt_method)
 
-### M237L assay comparison
+### TP53 assay comparison
 
-The collapsed **Assay comparison** shows the measured endpoint and comparator for each study. Kato and Giacomelli results are keyed to the protein change. Kotler values are shown when an exact match identifies a tested coding construct. Both AI paths receive the same comparison and the separately attributed ClinVar comments.
+When MutationView has assay evidence for a matched protein change, the collapsed **Assay comparison** shows the available Kato yeast reporter values, Kakudo Saos-2 reporter and apoptosis values, and NCI cellular functional classifications. Each study lists its endpoint and units. Identical observations across alleles that encode the same protein change appear once. If records disagree, the table retains each value and its source records. Both AI paths receive the comparison even when the section is closed. [MutationView r21](https://tp53.cancer.gov/static/data/MutationView_r21.csv), [NCI TP53 data dictionary](https://tp53.cancer.gov/help)
 
-| Study | Checked source row |
+The M237L comparison also includes independently checked Giacomelli Z-scores. The two Kotler scores each require an exact match to the corresponding M237L allele.
+
+| Study | Source |
 | --- | --- |
-| Kato 2003 | `M237L` in the NCI TP53 Database r21 yeast dataset. The eight reporter values run from 6.6% to 78.2% of wild type, with a median of 40.6%. [NCI data](https://tp53.cancer.gov/static/data/FunctionIshiokaDownload_r21.csv) |
+| Kato 2003 | The NCI TP53 Database r21 yeast dataset is curated into MutationView. For `M237L`, the eight reporter values run from 6.6% to 78.2% of wild type, with a median of 40.6%. [NCI data](https://tp53.cancer.gov/static/data/FunctionIshiokaDownload_r21.csv) |
+| Kakudo 2005 | NCI curates the human Saos-2 reporter measurements and sub-G1 apoptosis readout as percentages of wild-type p53 activity. [Article](https://pubmed.ncbi.nlm.nih.gov/15781620/) · [NCI TP53 data dictionary](https://tp53.cancer.gov/help) |
 | Giacomelli 2018 | `M237L` in Supplementary Table 3, row 4957. Scores are grouped by amino-acid change. [Publisher table](https://media.springernature.com/full/springer-static/esm/art%3A10.1038%2Fs41588-018-0204-y/MediaObjects/41588_2018_204_MOESM6_ESM.xlsx) |
 | Kotler 2018 | Wild-type-backbone constructs 302465 (`c.709A>T`) and 302463 (`c.709A>C`) in the current Table S3. The current publisher workbook matches the author-deposited GEO workbook. MaveDB reports the same scores at residue 136 of the fragment, with a 101-residue offset to full-length p53. [GEO data](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE115072) · [MaveDB score set](https://mavedb.org/score-sets/urn%3Amavedb%3A00000059-a-1) · [Correction](https://pubmed.ncbi.nlm.nih.gov/30193102/) |
 
-Sources checked November 24, 2026. The Kato comparison uses the NCI curation of the published assay.
+Sources checked November 24, 2026.
 
 ### Dataset source links
 

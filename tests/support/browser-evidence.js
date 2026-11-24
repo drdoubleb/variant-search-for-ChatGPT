@@ -8,12 +8,13 @@ import { captureResponse } from './api-response.js';
 import { checkM237lRelease, checkReleaseAssets } from './m237l-release.js';
 
 const fixture = name => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8');
-const annotation = JSON.parse(fixture('myvariant-m237l.json'));
+const m237lAnnotation = JSON.parse(fixture('myvariant-m237l.json'));
+const r175hAnnotation = JSON.parse(fixture('lookup-cassettes.json')).rs28934578.responses['myvariant.info/v1/variant/chr17:g.7578406C>T'].body;
 const clinvarXml = fixture('clinvar-2774649.xml');
 const markedClinvarXml = clinvarXml.replace('</Comment>', ' &lt;strong&gt;literal&lt;/strong&gt;</Comment>');
 const pubmedXml = fixture('pubmed-tp53-functional.xml');
 const pubmedRecords = parsePubmedRecords(pubmedXml);
-const tp53Csv = fixture('tp53-m237-r21.csv');
+const tp53Csv = fixture('tp53-mutationview-r21.csv');
 const datasetUrl = 'https://tp53.cancer.gov/static/data/MutationView_r21.csv';
 const transcript = { seq_id: 'NM_000546.6', position: 850, deleted_sequence: 'A', inserted_sequence: 'T' };
 const grch37 = { seq_id: 'NC_000017.10', position: 7577571, deleted_sequence: 'T', inserted_sequence: 'A' };
@@ -45,7 +46,9 @@ function pageEvidence(context, { citationFailure = false } = {}) {
     assert.equal(supplemental.tp53_mutation_database.selection.match_type, 'exact_genomic');
     assert.equal(supplemental.tp53_mutation_database.pathogenicity.somatic_count, '3');
     assert.equal(supplemental.tp53_mutation_database.pathogenicity.splice_ai.DS_AG, '0.08');
-    assert.match(supplemental.tp53_mutation_database.assay_comparison.studies.at(-1).variant, /c\.709A>T.*302465/);
+    const studies = supplemental.tp53_mutation_database.assay_comparison.studies;
+    assert.equal(studies.find(study => study.study.startsWith('Giacomelli')).classifications[0].value, 'Unclassified');
+    assert.match(studies.at(-1).variant, /c\.709A>T.*302465/);
 }
 
 export async function runEvidenceSmoke(newPage, base, check) {
@@ -81,12 +84,13 @@ export async function runEvidenceSmoke(newPage, base, check) {
         throw new Error(`Unexpected server request to ${url.hostname}${url.pathname}`);
     };
     try {
-        for (const scenario of ['complete', 'pubmed-failure', 'superseded']) {
+        for (const scenario of ['complete', 'pubmed-failure', 'superseded', 'r175h']) {
             citationFailure = scenario === 'pubmed-failure';
+            const annotation = scenario === 'r175h' ? r175hAnnotation : m237lAnnotation;
             const page = await newPage();
             await page.setViewportSize({ width: 390, height: 844 });
             const requests = { clinvar: 0, search: 0, pubmed: 0, tp53: [], ai: [] };
-            const gated = scenario !== 'pubmed-failure';
+            const gated = scenario === 'complete' || scenario === 'superseded';
             let release = () => {};
             let settledClinvar = () => {};
             const arrived = new Promise(resolve => { settledClinvar = resolve; });
@@ -137,8 +141,23 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 return route.fallback();
             });
             try {
-                const variant = encodeURIComponent('NM_000546.6:c.709A>T');
+                const variant = encodeURIComponent(scenario === 'r175h' ? annotation._id : 'NM_000546.6:c.709A>T');
                 await page.goto(`${base}/?variant=${variant}`, { waitUntil: 'domcontentloaded' });
+                const tp53Card = page.locator('[data-card="tp53-database"]');
+                if (scenario === 'r175h') {
+                    const comparison = tp53Card.getByText(/^Assay comparison · p\.(?:Arg175His|R175H)$/);
+                    await comparison.waitFor({ timeout: 30000 });
+                    assert.equal(await comparison.evaluate(summary => summary.parentElement.open), false);
+                    await comparison.press('Enter');
+                    assert.ok(await tp53Card.getByRole('heading', { name: 'Kato et al. (2003)' }).isVisible());
+                    assert.ok(await tp53Card.getByRole('heading', { name: 'Kakudo et al. (2005)' }).isVisible());
+                    assert.ok(await tp53Card.getByRole('cell', { name: '-2.2 % of wild type', exact: true }).isVisible());
+                    assert.ok(await tp53Card.getByRole('cell', { name: '0 % of wild type', exact: true }).isVisible());
+                    assert.ok(await tp53Card.getByRole('cell', { name: 'DNE_LOF', exact: true }).isVisible());
+                    assert.equal(await tp53Card.getByRole('heading', { name: /Kotler/ }).count(), 0);
+                    check('evidence: a separate TP53 variant displays its own Kato, Kakudo and Giacomelli results', true);
+                    continue;
+                }
                 const ai = page.locator('[data-card="optional-ai-review"]');
                 const copy = ai.getByRole('button', { name: 'Copy prompt', exact: true });
                 const run = ai.getByRole('button', { name: 'Run AI review', exact: true });
@@ -223,17 +242,14 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 assert.ok(await comment.isVisible());
                 assert.ok((await comment.textContent()).includes('<strong>literal</strong>'));
                 assert.equal(await comment.locator('strong').count(), 0);
-                const kato = page.getByText('Kato promoter activity', { exact: true });
-                assert.equal(await kato.evaluate(summary => summary.parentElement.open), false);
-                await kato.press('Enter');
-                assert.ok(await page.getByRole('columnheader', { name: 'Activity (% of wild type)' }).isVisible());
-                assert.ok(await page.getByRole('cell', { name: '78.2' }).isVisible());
-                const comparison = page.getByText('Assay comparison · p.Met237Leu', { exact: true });
+                const comparison = tp53Card.getByText('Assay comparison · p.Met237Leu', { exact: true });
                 assert.equal(await comparison.evaluate(summary => summary.parentElement.open), false);
                 await comparison.press('Enter');
-                const tp53Card = page.locator('[data-card="tp53-database"]');
+                assert.ok(await tp53Card.getByRole('heading', { name: 'Kato et al. (2003)' }).isVisible());
+                assert.ok(await tp53Card.getByRole('cell', { name: '78.2 % of wild type' }).isVisible());
+                assert.ok(await tp53Card.getByRole('cell', { name: 'Unclassified', exact: true }).isVisible());
                 assert.ok(await tp53Card.getByText(/c\.709A>T.*construct 302465/).isVisible());
-                assert.ok(await page.getByRole('cell', { name: '-1.666 log₂ scale' }).isVisible());
+                assert.ok(await tp53Card.getByRole('cell', { name: '-1.666 log₂ scale' }).isVisible());
                 const predictions = page.getByText('Computational predictions', { exact: true }).last();
                 await predictions.click();
                 assert.ok(await page.getByText('Structure-based computational prediction', { exact: true }).isVisible());
