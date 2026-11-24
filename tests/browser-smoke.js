@@ -17,6 +17,7 @@
 // Where Playwright is installed outside the repo (that sandbox keeps it in
 // /opt/node-tools), say where: NODE_PATH=/opt/node-tools/node_modules node …
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { runEvidenceSmoke } from './support/browser-evidence.js';
 
 // package.json declares "type": "module", so this file is an ES module and a
@@ -28,6 +29,7 @@ const { chromium } = require('playwright-core');
 const CHROMIUM_PATH = process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium';
 
 const BASE = 'http://127.0.0.1:8123';
+const brafMap = JSON.parse(readFileSync(new URL('./fixtures/ensembl-gene-maps.json', import.meta.url), 'utf8')).BRAF;
 const results = [];
 let failures = 0;
 function check(name, cond, detail) {
@@ -154,8 +156,21 @@ async function installRoutes(page) {
     // ── Gene-only mode ──────────────────────────────────────────────────────
     {
         const page = await newPage();
+        for (const [path, body] of [
+            ['lookup/symbol/homo_sapiens/BRAF', brafMap.gene], ['lookup/id/' + brafMap.transcript.id, brafMap.transcript],
+            ['overlap/translation/' + brafMap.transcript.Translation.id, brafMap.domains]
+        ]) {
+            await page.route(url => url.hostname === 'rest.ensembl.org' && url.pathname === `/${path}`,
+                route => route.fulfill({ json: body }));
+        }
         await page.goto(`${BASE}/?variant=BRAF`, { waitUntil: 'domcontentloaded' });
         await page.waitForSelector('#cardsContainer .card', { timeout: 30000 });
+        const map = page.getByRole('region', { name: 'BRAF gene map' });
+        await map.getByRole('img', { name: /766 amino acids/ }).waitFor();
+        check('gene map: BRAF gene-only search shows GRCh38 exons and protein domains',
+            await map.getByRole('heading', { name: /Exons · GRCh38/ }).isVisible()
+            && await map.getByRole('link', { name: /Raf-like Ras-binding/ }).first().isVisible()
+            && await map.locator('.gene-map-pointer').count() === 0);
         await page.waitForTimeout(3000);
         const titles = await page.$$eval('#cardsContainer .card > h3', els => els.map(e => e.textContent));
         check('gene-only: card set', JSON.stringify(titles) === JSON.stringify(

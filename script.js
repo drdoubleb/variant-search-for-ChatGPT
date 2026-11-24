@@ -912,6 +912,276 @@ function parseGenomicHgvs(gVariant) {
     return null;
 }
 
+const geneMapRequests = new Map();
+const GENE_MAP_DOMAIN_TYPES = { Pfam: /^PF\d+$/, SMART: /^SM\d+$/, Prosite_profiles: /^PS\d+$/ };
+const GENE_MAP_COLORS = ['#3b62a1', '#087e79', '#7456a6', '#a85426', '#516e32', '#466579'];
+
+function geneMapRequest(assembly, path) {
+    const host = assembly === 'GRCh37' ? 'https://grch37.rest.ensembl.org' : 'https://rest.ensembl.org';
+    const url = `${host}/${path}${path.includes('?') ? '&' : '?'}content-type=application/json`;
+    if (!geneMapRequests.has(url)) {
+        if (geneMapRequests.size >= 96) geneMapRequests.delete(geneMapRequests.keys().next().value);
+        const request = fetchWithTimeout(url, { headers: { Accept: 'application/json' } }, API_TIMEOUT_MS.ensemblLookup)
+            .then(response => {
+                if (!response.ok) throw new Error('Ensembl gene map request failed');
+                return response.json();
+            }).catch(error => {
+                if (geneMapRequests.get(url) === request) geneMapRequests.delete(url);
+                throw error;
+            });
+        geneMapRequests.set(url, request);
+    }
+    return geneMapRequests.get(url);
+}
+
+function geneMapInterval(value) {
+    const { start, end } = value || {};
+    return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start > 0 && end >= start ? { start, end } : null;
+}
+
+function geneMapOverlap(a, b) {
+    return a && b ? geneMapInterval({ start: Math.max(a.start, b.start), end: Math.min(a.end, b.end) }) : null;
+}
+
+function geneMapTranscript(record, assembly) {
+    const bounds = geneMapInterval(record);
+    if (!bounds || record.assembly_name !== assembly || !/^ENST\d+$/.test(record.id)
+        || ![1, -1].includes(record.strand) || !record.seq_region_name || !Array.isArray(record.Exon)) return null;
+    const exons = record.Exon.map(geneMapInterval);
+    if (!exons.length || exons.some(exon => !exon || exon.start < bounds.start || exon.end > bounds.end)) return null;
+    exons.sort((a, b) => a.start - b.start);
+    if (exons.some((exon, index) => index > 0 && exons[index - 1].end >= exon.start)) return null;
+    if (record.strand === -1) exons.reverse();
+    const translation = record.Translation;
+    const protein = /^ENSP\d+$/.test(translation?.id) && Number.isSafeInteger(translation.length) && translation.length > 0
+        ? { id: translation.id, version: translation.version, length: translation.length } : null;
+    const codingBounds = protein && geneMapInterval(translation);
+    const coding = codingBounds ? exons.map(exon => geneMapOverlap(exon, codingBounds)).filter(Boolean) : [];
+    return {
+        ...bounds, assembly, exons, coding, protein, strand: record.strand,
+        id: record.id, version: record.version, chrom: record.seq_region_name
+    };
+}
+
+async function loadGeneMapTranscript(gene, assembly, selected) {
+    const lookup = async accession => {
+        const match = /^(ENST\d+)(?:\.(\d+))?$/.exec(accession || '');
+        if (!match) return null;
+        const record = await geneMapRequest(assembly, `lookup/id/${match[1]}?expand=1`);
+        const transcript = geneMapTranscript(record, assembly);
+        return transcript?.id === match[1] && (!match[2] || Number(match[2]) === transcript.version) ? transcript : null;
+    };
+    const chosen = await lookup(selected).catch(() => null);
+    if (chosen) return { gene, transcript: chosen, canonical: false };
+    const record = await geneMapRequest(assembly, `lookup/symbol/homo_sapiens/${encodeURIComponent(gene)}`);
+    const transcript = await lookup(record?.canonical_transcript);
+    return transcript ? { gene: record.display_name || gene, transcript, canonical: true } : null;
+}
+
+function geneMapVariantLocus(transcript, genomic) {
+    const chrom = name => String(name || '').replace(/^chr/i, '').toUpperCase().replace(/^M$/, 'MT');
+    return genomic && chrom(genomic.chrom) === chrom(transcript.chrom) ? geneMapOverlap(transcript, genomic) : null;
+}
+
+function geneMapProteinSpan(transcript, genomic) {
+    const { protein, coding, strand } = transcript;
+    if (!protein || !geneMapVariantLocus(transcript, genomic)) return null;
+    const codingLength = coding.reduce((length, exon) => length + exon.end - exon.start + 1, 0);
+    const translatedLength = protein.length * 3;
+    // Expanded Ensembl transcripts put the translation on genomic coordinates.
+    // Project only complete CDS spans, allowing a terminal stop codon.
+    if (codingLength !== translatedLength && codingLength !== translatedLength + 3) return null;
+    if (genomic.type === 'ins' && !coding.some(exon => exon.start <= genomic.start && exon.end >= genomic.end)) return null;
+    let before = 0;
+    let first = null;
+    let last = null;
+    for (const exon of coding) {
+        const overlap = geneMapOverlap(exon, genomic);
+        if (overlap) {
+            const left = before + (strand === -1 ? exon.end - overlap.end : overlap.start - exon.start);
+            const right = before + (strand === -1 ? exon.end - overlap.start : overlap.end - exon.start);
+            if (left < translatedLength) {
+                first ??= Math.floor(left / 3) + 1;
+                last = Math.min(protein.length, Math.floor(right / 3) + 1);
+            }
+        }
+        before += exon.end - exon.start + 1;
+    }
+    return first === null ? null : { start: first, end: last };
+}
+
+function geneMapDomains(features, length) {
+    if (!Array.isArray(features)) throw new Error('Unexpected Ensembl domain response');
+    const domains = [];
+    // Domain signatures from these databases describe discrete protein regions.
+    // Prefer Pfam coordinates when sources describe the same InterPro domain.
+    for (const [type, pattern] of Object.entries(GENE_MAP_DOMAIN_TYPES)) {
+        for (const feature of features) {
+            if (feature?.type !== type || !pattern.test(feature.id)) continue;
+            const span = geneMapInterval(feature);
+            if (!span || span.end > length) continue;
+            const interpro = /^IPR\d+$/.test(feature.interpro) ? feature.interpro : '';
+            const key = interpro || feature.id;
+            if (domains.some(domain => domain.key === key && geneMapOverlap(domain, span))) continue;
+            domains.push({ ...span, key, interpro, type, id: feature.id, name: String(feature.description || '').trim() || feature.id });
+        }
+    }
+    const laneEnds = [];
+    return domains.sort((a, b) => a.start - b.start || a.end - b.end).map((domain, index) => {
+        let lane = laneEnds.findIndex(end => end < domain.start);
+        if (lane === -1) lane = laneEnds.length;
+        laneEnds[lane] = domain.end;
+        return { ...domain, lane, color: GENE_MAP_COLORS[index % GENE_MAP_COLORS.length] };
+    });
+}
+
+function geneMapGeometry(bounds, span, reverse = false) {
+    const length = bounds.end - bounds.start + 1;
+    return {
+        left: 100 * (reverse ? bounds.end - span.end : span.start - bounds.start) / length,
+        width: 100 * (span.end - span.start + 1) / length
+    };
+}
+
+function geneMapDiagram(parent, { bounds, blocks, marker, label, reverse = false, shadeMarker = true }) {
+    const plot = document.createElement('div');
+    plot.className = 'gene-map-diagram';
+    plot.setAttribute('role', 'img');
+    plot.setAttribute('aria-label', label);
+    plot.style.setProperty('--map-lanes', Math.max(1, ...blocks.map(block => (block.lane || 0) + 1)));
+    const segment = (className, span) => {
+        const element = document.createElement('span');
+        element.className = className;
+        const { left, width } = geneMapGeometry(bounds, span, reverse);
+        element.style.setProperty('--map-left', `${left}%`);
+        element.style.setProperty('--map-width', `${width}%`);
+        plot.appendChild(element);
+        return element;
+    };
+    for (const block of blocks) {
+        const element = segment('gene-map-segment', block);
+        element.style.setProperty('--map-lane', block.lane || 0);
+        if (block.color) element.style.setProperty('--map-color', block.color);
+        if (block.name) element.title = block.name;
+    }
+    if (marker) {
+        if (shadeMarker && marker.end > marker.start) segment('gene-map-affected-span', marker);
+        segment('gene-map-pointer', marker);
+    }
+    parent.appendChild(plot);
+}
+
+function geneMapAxis(parent, left, right) {
+    const axis = document.createElement('div');
+    axis.className = 'gene-map-axis';
+    for (const edge of [left, right]) {
+        const label = document.createElement('span');
+        label.textContent = edge;
+        axis.appendChild(label);
+    }
+    parent.appendChild(axis);
+}
+
+function geneMapTrack(parent, title, markerText) {
+    const track = document.createElement('section');
+    track.className = 'gene-map-track';
+    const header = document.createElement('h4');
+    header.textContent = title;
+    track.appendChild(header);
+    if (markerText) appendEvidenceText(track, markerText, 'gene-map-position');
+    parent.appendChild(track);
+    return track;
+}
+
+function renderGeneMapExons(parent, transcript, genomic, markerLabel) {
+    const marker = geneMapVariantLocus(transcript, genomic);
+    const reverse = transcript.strand === -1;
+    const number = value => value.toLocaleString('en-US');
+    let position = '';
+    if (genomic) {
+        const range = genomic.start === genomic.end ? number(genomic.start) : `${number(genomic.start)}–${number(genomic.end)}`;
+        position = `${markerLabel} · ${genomic.chrom}:${range}${marker ? '' : ' · Outside the mapped transcript'}`;
+    }
+    const title = `Exons · ${transcript.assembly} chr${transcript.chrom} · ${reverse ? '−' : '+'} strand`;
+    const track = geneMapTrack(parent, title, position);
+    const hasCoding = transcript.coding.length > 0;
+    const left = number(reverse ? transcript.end : transcript.start);
+    const right = number(reverse ? transcript.start : transcript.end);
+    geneMapDiagram(track, {
+        bounds: transcript, reverse, marker, shadeMarker: genomic?.type !== 'ins',
+        label: `${transcript.exons.length} exons, 5′ ${left} to 3′ ${right}${position ? `. ${position}` : ''}`,
+        blocks: [...transcript.exons.map((exon, index) => ({ ...exon, name: `Exon ${index + 1}` })),
+            ...transcript.coding.map(exon => ({ ...exon, color: '#315b8b' }))]
+    });
+    geneMapAxis(track, `5′ ${left}`, `${right} 3′`);
+    if (hasCoding) appendEvidenceText(track, 'Darker blocks show the coding sequence.', 'gene-map-note');
+}
+
+function renderGeneMapProtein(track, protein, domains, marker, position, showVariant) {
+    geneMapDiagram(track, {
+        bounds: { start: 1, end: protein.length }, marker, blocks: domains,
+        label: `${protein.length} amino acids, ${domains.length} annotated domains${position ? `. ${position}` : ''}`
+    });
+    geneMapAxis(track, '1 aa', `${protein.length.toLocaleString('en-US')} aa`);
+    if (showVariant && !marker) appendEvidenceText(track, 'Protein location unavailable for this variant.', 'gene-map-note');
+    if (!domains.length) return;
+    const list = document.createElement('ul');
+    list.className = 'gene-map-domains';
+    for (const domain of domains) {
+        const item = document.createElement('li');
+        item.style.setProperty('--map-color', domain.color);
+        const overlaps = geneMapOverlap(domain, marker);
+        if (overlaps) item.classList.add('gene-map-domain-hit');
+        const url = domain.interpro ? `https://www.ebi.ac.uk/interpro/entry/interpro/${domain.interpro}/`
+            : domain.type === 'Prosite_profiles' ? `https://prosite.expasy.org/${domain.id}`
+                : `https://www.ebi.ac.uk/interpro/entry/${domain.type.toLowerCase()}/${domain.id}/`;
+        appendEvidenceLink(item, `${domain.name} (${domain.start}–${domain.end} aa)${overlaps ? ' · overlaps query' : ''}`, url);
+        list.appendChild(item);
+    }
+    if (domains.length > 8) appendEvidenceDetails(track, `Annotated domains (${domains.length})`).appendChild(list);
+    else track.appendChild(list);
+}
+
+async function showGeneMap(panel, { gene, assembly, selected, genomic, markerLabel, unresolved = false }, isCurrentSearch) {
+    if (!panel || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(gene || '') || isChromosomeLikeGeneSymbol(gene)) return;
+    panel.classList.remove('hidden');
+    const heading = document.createElement('h3');
+    heading.id = 'geneMapHeading';
+    heading.textContent = `${gene} gene map`;
+    panel.replaceChildren(heading);
+    const status = appendEvidenceText(panel, 'Loading Ensembl transcript…', 'gene-map-note');
+    status.setAttribute('role', 'status');
+    const model = await loadGeneMapTranscript(gene, assembly, selected).catch(() => null);
+    if (!isCurrentSearch()) return;
+    if (!model) {
+        status.textContent = 'Ensembl transcript map unavailable.';
+        return;
+    }
+    status.remove();
+    heading.textContent = `${model.gene} gene map`;
+    const { transcript, canonical } = model;
+    const accession = [transcript.id, transcript.version].filter(Boolean).join('.');
+    const host = assembly === 'GRCh37' ? 'https://grch37.ensembl.org' : 'https://www.ensembl.org';
+    const metadata = appendEvidenceText(panel, canonical ? 'Ensembl canonical transcript · ' : 'Mapped Ensembl transcript · ', 'gene-map-note');
+    appendEvidenceLink(metadata, accession, `${host}/Homo_sapiens/Transcript/Summary?t=${encodeURIComponent(transcript.id)}`);
+    renderGeneMapExons(panel, transcript, genomic, markerLabel);
+    if (unresolved) appendEvidenceText(panel, 'Genomic position unresolved for this query.', 'gene-map-note');
+    if (!transcript.protein) return;
+
+    const { protein } = transcript;
+    const marker = geneMapProteinSpan(transcript, genomic);
+    const position = marker ? `${markerLabel} · ${marker.start === marker.end ? `residue ${marker.start}` : `residues ${marker.start}–${marker.end}`}` : '';
+    const track = geneMapTrack(panel, `Protein domains · ${[protein.id, protein.version].filter(Boolean).join('.')}`, position);
+    const loading = appendEvidenceText(track, 'Loading Ensembl protein domains…', 'gene-map-note');
+    const domains = await geneMapRequest(assembly, `overlap/translation/${protein.id}?feature=protein_feature`)
+        .then(features => geneMapDomains(features, protein.length)).catch(() => null);
+    if (!isCurrentSearch()) return;
+    loading.remove();
+    renderGeneMapProtein(track, protein, domains || [], marker, position, Boolean(genomic));
+    if (!domains?.length) appendEvidenceText(track, domains ? 'Ensembl lists no Pfam, SMART, or PROSITE domains for this protein.'
+        : 'Ensembl protein domains unavailable.', 'gene-map-note');
+}
+
 /*
  * ── Coordinate-row parsing ──────────────────────────────────────────────────
  *
@@ -9526,6 +9796,7 @@ const initVariantSearchUi = () => {
     const grch38Toggle = document.getElementById('grch38Toggle');
     const statusEl = document.getElementById('status');
     const resultSection = document.getElementById('resultSection');
+    const geneMap = document.getElementById('geneMap');
     const summaryTable = document.getElementById('summaryTable');
     const rawOutput = document.getElementById('rawOutput');
     // Pre element to display the Ensembl variant_recoder JSON response
@@ -9652,6 +9923,8 @@ const initVariantSearchUi = () => {
         // after a newer one and overwrite the newer results with stale cards.
         const mySeq = ++searchSeq;
         const isCurrentSearch = () => mySeq === searchSeq;
+        geneMap?.replaceChildren();
+        geneMap?.classList.add('hidden');
         // Reset any previous gene hint.  Without resetting, a prior search that
         // included a gene symbol could incorrectly influence the next query.
         geneHintGlobal = null;
@@ -9928,6 +10201,7 @@ const initVariantSearchUi = () => {
             LookupProgress.hide();
             statusEl.textContent = '';
             resultSection.classList.remove('hidden');
+            void showGeneMap(geneMap, { gene, assembly: 'GRCh38' }, isCurrentSearch);
 
             const detailsContainer = document.getElementById('detailsContainer');
             if (detailsContainer) {
@@ -12299,6 +12573,14 @@ const initVariantSearchUi = () => {
             const effect = selectedTranscript
                 ? transcriptEffect(selectedTranscript)
                 : getSummaryValue('Consequence') || getSummaryValue('Variant Type');
+            const mapGene = selectedTranscript?.gene || geneNames.split(',')
+                .map(gene => gene.trim()).find(gene => gene && !isChromosomeLikeGeneSymbol(gene)) || geneHintGlobal;
+            const mapPosition = nameShared ? null : parseGenomicHgvs(gVariant);
+            void showGeneMap(geneMap, {
+                gene: mapGene, assembly: 'GRCh37', selected: selectedTranscript?.transcript,
+                genomic: mapPosition, unresolved: !mapPosition,
+                markerLabel: codonOnlyResolutionGlobal ? 'Codon region' : mapPosition?.type === 'region' ? 'Queried region' : 'Variant'
+            }, isCurrentSearch);
             // Card: Variant info
             {
                 const card = document.createElement('div');
@@ -14779,6 +15061,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         clinvarVariantsDescribed, resolveClinvarOtherName, otherNameOutcomeText, otherNameNote, CLINVAR_NAME_SEARCH_SIZE,
         referenceBaseRejection, transcriptsWithReferenceBase,
         buildCanonicalFromAnnotation, selectCanonicalTranscript, transcriptEffect,
+        geneMapTranscript, geneMapVariantLocus, geneMapProteinSpan, geneMapDomains, geneMapGeometry,
         // HTML/URL escaping
         escapeHtml, safeUrl,
         // openFDA label filtering

@@ -15,6 +15,7 @@ const markedClinvarXml = clinvarXml.replace('</Comment>', ' &lt;strong&gt;litera
 const pubmedXml = fixture('pubmed-tp53-functional.xml');
 const pubmedRecords = parsePubmedRecords(pubmedXml);
 const tp53Csv = fixture('tp53-mutationview-r21.csv');
+const tp53Map = JSON.parse(fixture('ensembl-gene-maps.json')).TP53;
 const datasetUrl = 'https://tp53.cancer.gov/static/data/MutationView_r21.csv';
 const transcript = { seq_id: 'NM_000546.6', position: 850, deleted_sequence: 'A', inserted_sequence: 'T' };
 const grch37 = { seq_id: 'NC_000017.10', position: 7577571, deleted_sequence: 'T', inserted_sequence: 'A' };
@@ -108,6 +109,16 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 const request = route.request();
                 const url = new URL(request.url());
                 const path = decodeURIComponent(url.pathname);
+                if (url.hostname === 'grch37.rest.ensembl.org') {
+                    if (path === '/lookup/symbol/homo_sapiens/TP53') return json(route, tp53Map.gene);
+                    if (path === `/lookup/id/${tp53Map.transcript.id}` && url.searchParams.get('expand') === '1') {
+                        return json(route, tp53Map.transcript);
+                    }
+                    if (path === `/overlap/translation/${tp53Map.transcript.Translation.id}`) {
+                        if (scenario === 'superseded') await withheld;
+                        return json(route, tp53Map.domains);
+                    }
+                }
                 if (url.hostname === 'myvariant.info' && path === `/v1/variant/${annotation._id}`) return json(route, annotation);
                 if (url.hostname === 'api.ncbi.nlm.nih.gov' && path.includes('/hgvs/NM_000546.6:c.709A>T/')) {
                     return json(route, { data: { spdis: [transcript], input_hgvs_validity: 'valid' } });
@@ -176,6 +187,8 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 if (gated) assert.equal(requests.ai.length, 0, 'both buttons wait for the pending ClinVar request');
 
                 if (scenario === 'superseded') {
+                    const map = page.locator('#geneMap');
+                    await map.getByText('Loading Ensembl protein domains…', { exact: true }).waitFor();
                     await page.locator('#variantInput').fill('BRAF V600E');
                     await page.locator('#variantForm button[type="submit"]').click();
                     await page.locator('[data-card="variant"]').getByText(/p\.Val600Glu/).first().waitFor({ timeout: 30000 });
@@ -187,6 +200,8 @@ export async function runEvidenceSmoke(newPage, base, check) {
                     assert.equal(requests.ai.length, 0);
                     assert.equal(requests.pubmed, 0);
                     assert.equal(await submissions.count(), 0);
+                    assert.equal(await map.getByText('TP53 gene map', { exact: true }).count(), 0);
+                    assert.equal(await map.getByText(/p53, DNA-binding domain/).count(), 0);
                     check('evidence: superseded lookup neither rendered nor sent stale evidence', true);
                     continue;
                 }
@@ -226,6 +241,22 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 }
                 await checkReleaseAssets(page);
                 await checkM237lRelease(page);
+                const map = page.getByRole('region', { name: 'TP53 gene map' });
+                const exonPlot = map.getByRole('img', { name: /11 exons.*chr17:7,577,572/ });
+                const proteinPlot = map.getByRole('img', { name: /393 amino acids.*residue 237/ });
+                await proteinPlot.waitFor();
+                assert.ok(await exonPlot.locator('.gene-map-pointer').isVisible());
+                assert.ok(await proteinPlot.locator('.gene-map-pointer').evaluate(el => {
+                    const track = el.parentElement.getBoundingClientRect();
+                    const pointer = el.getBoundingClientRect();
+                    const fraction = (pointer.left + pointer.width / 2 - track.left) / track.width;
+                    return fraction > 0.60 && fraction < 0.61;
+                }));
+                assert.ok(await map.getByRole('link', { name: /p53, DNA-binding domain.*95–288/ }).isVisible());
+                assert.ok(await map.evaluate(el => el.scrollWidth <= el.clientWidth
+                    && el.getBoundingClientRect().right <= innerWidth
+                    && Boolean(el.compareDocumentPosition(document.querySelector('#cardsContainer')) & Node.DOCUMENT_POSITION_FOLLOWING)));
+                check('gene map: M237L is marked on the reverse-strand exon track and in the DNA-binding domain at 390px', true);
                 assert.ok(await tp53Card.getByText('DNE · Unavailable | DNE/LOF class · Unclassified', { exact: true }).isVisible());
                 check('release smoke: expected assets, exact M237L and live-evidence card contract', true);
                 const secondCopy = ai.getByRole('button', { name: 'Copy prompt', exact: true });
