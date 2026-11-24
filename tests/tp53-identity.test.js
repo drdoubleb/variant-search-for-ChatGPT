@@ -1,7 +1,26 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import handler from '../api/tp53.js';
+import { assayScoreInterpretation } from '../api/_tp53-assays.js';
 import { captureResponse } from './support/api-response.js';
+
+for (const [assay, value, expected] of [
+    ['katoMedian', 20, 'Non-functional'],
+    ['katoMedian', 20.01, 'Partially functional'],
+    ['katoMedian', 75, 'Partially functional'],
+    ['katoMedian', 75.01, 'Functional'],
+    ['katoMedian', 140, 'Functional'],
+    ['katoMedian', 140.01, 'Supertransactivation'],
+    ['wtNutlin', 0.609, 'Below DNE cutoff'],
+    ['wtNutlin', 0.61, 'Meets DNE cutoff'],
+    ['nullEtoposide', -0.21, 'LOF in this assay'],
+    ['nullEtoposide', -0.209, 'No LOF in this assay'],
+    ['h1299Rfs', -1.001, 'No LOF in this assay'],
+    ['h1299Rfs', -1, 'LOF in this assay']
+]) {
+    assert.equal(assayScoreInterpretation(value, assay).label, expected, `${assay} at ${value}`);
+}
+assert.equal(assayScoreInterpretation(null, 'h1299Rfs'), null);
 
 const csv = readFileSync(new URL('./fixtures/tp53-mutationview-r21.csv', import.meta.url), 'utf8');
 const datasetUrl = 'https://tp53.cancer.gov/static/data/MutationView_r21.csv';
@@ -37,13 +56,16 @@ try {
     const [kato, giacomelli, kotler] = exact.assay_comparison.studies;
     assert.equal(exact.assay_comparison.includes_mutation_view, true);
     assert.equal(kato.measurements[0].value, 40.6);
+    assert.deepEqual(kato.measurements[0].interpretation, { label: 'Partially functional', tone: 'orange' });
     assert.deepEqual(kato.measurements.filter(m => m.label === 'WAF1').map(m => m.value), [6.6]);
     assert.equal(giacomelli.scope, 'protein');
     assert.equal(giacomelli.classifications[0].value, 'Unclassified');
     assert.equal(giacomelli.measurements.find(m => m.label === 'p53 WT · nutlin-3').value, 0.7432024599950522);
+    assert.deepEqual(giacomelli.measurements.map(m => m.interpretation?.label), ['Meets DNE cutoff', undefined, 'No LOF in this assay']);
     assert.equal(kotler.scope, 'coding_construct');
     assert.match(kotler.variant, /c\.709A>T.*302465/);
     assert.equal(kotler.measurements[0].value, -1.666323792);
+    assert.equal(kotler.measurements[0].interpretation.tone, 'green');
     const otherLeu = exact.matches.find(m => m.mut_id === '3080');
     assert.equal(otherLeu.match_type, 'same_protein');
     assert.equal(otherLeu.somatic_count, '2');
@@ -59,6 +81,7 @@ try {
     assert.equal(exactC.matches[0].mut_id, '3080');
     assert.match(exactC.assay_comparison.studies.at(-1).variant, /c\.709A>C.*302463/);
     assert.equal(exactC.assay_comparison.studies.at(-1).measurements[0].value, -1.779194794);
+    assert.equal(exactC.assay_comparison.studies.at(-1).measurements[0].interpretation.tone, 'green');
     assert.ok((await query({ protein })).assay_comparison.studies.every(study => study.scope === 'protein'));
     const exactG = await query({ protein, genomic_allele: { ...g37, alt: 'C' } });
     assert.equal(exactG.assay_comparison.protein, 'p.M237V');
@@ -123,6 +146,7 @@ try {
         [6.6, ['MutationView 3080 · NM_000546.5:c.709A>C']], [7.1, ['MutationView 3082 · NM_000546.5:c.709A>T']]
     ]);
     assert.ok(!measurements.some(m => m.label.startsWith('Median')));
+    assert.equal(disagreement.assay_comparison.studies[0].scoreRanges, undefined);
 } finally {
     globalThis.fetch = originalFetch;
     if (previousUrl === undefined) delete process.env.TP53_MUTATION_DATASET_URL;
