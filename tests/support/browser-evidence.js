@@ -156,8 +156,10 @@ export async function runEvidenceSmoke(newPage, base, check) {
                     assert.ok(await tp53Card.getByRole('cell', { name: '0 % of wild type', exact: true }).isVisible());
                     assert.ok(await tp53Card.getByRole('cell', { name: /DNE_LOF.*DNE and LOF/ }).isVisible());
                     assert.ok(await tp53Card.locator('.tp53-assay-label[data-tone="red"]').filter({ hasText: 'Non-functional' }).isVisible());
-                    assert.equal(await tp53Card.getByRole('heading', { name: /Kotler/ }).count(), 0);
-                    check('evidence: a separate TP53 variant displays its own Kato, Kakudo and Giacomelli results', true);
+                    assert.ok(await tp53Card.getByRole('cell', { name: /1\.791 Z-score.*Meets DNE cutoff/ }).isVisible());
+                    assert.ok(await tp53Card.getByText(/c\.524G>A.*construct 200956/).isVisible());
+                    assert.ok(await tp53Card.getByRole('cell', { name: /-0\.145 log₂ scale.*LOF in this assay/ }).isVisible());
+                    check('evidence: R175H displays its own Giacomelli Z-scores and exact Kotler construct', true);
                     continue;
                 }
                 const ai = page.locator('[data-card="optional-ai-review"]');

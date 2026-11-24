@@ -85,9 +85,11 @@ try {
     assert.ok((await query({ protein })).assay_comparison.studies.every(study => study.scope === 'protein'));
     const exactG = await query({ protein, genomic_allele: { ...g37, alt: 'C' } });
     assert.equal(exactG.assay_comparison.protein, 'p.M237V');
-    assert.equal(exactG.assay_comparison.studies.length, 2);
+    assert.equal(exactG.assay_comparison.studies.length, 3);
     assert.equal(exactG.assay_comparison.studies[0].measurements.find(m => m.label === 'WAF1').value, 22.8);
     assert.deepEqual(exactG.assay_comparison.studies[1].classifications.map(m => m.value), ['DNE_LOF']);
+    assert.match(exactG.assay_comparison.studies[2].variant, /c\.709A>G.*302464/);
+    assert.equal(exactG.assay_comparison.studies[2].measurements[0].value, -0.665048572);
     const conflicting = await query({ protein, cdna, genomic_allele: { ...g37, ref: 'C' } });
     assert.equal(conflicting.selection.status, 'related_only');
     assert.equal(conflicting.pathogenicity, null);
@@ -105,13 +107,49 @@ try {
     const studies = r175hProtein.assay_comparison.studies;
     assert.deepEqual(studies.map(s => s.study), ['Kato et al. (2003)', 'Kakudo et al. (2005)', 'Giacomelli et al. (2018)', 'Dominant-negative transactivation']);
     const results = ({ measurements, classifications }) => ({ measurements, classifications });
-    assert.deepEqual(studies.map(results), r175hGenomic.assay_comparison.studies.map(results));
+    assert.deepEqual(studies.map(results), r175hGenomic.assay_comparison.studies.filter(s => s.scope === 'protein').map(results));
+    assert.match(r175hGenomic.assay_comparison.studies.at(-1).variant, /c\.524G>A.*200956/);
+    assert.equal(r175hGenomic.assay_comparison.studies.at(-1).measurements[0].value, -0.144946858);
     const saos2 = studies[1].measurements;
     assert.equal(saos2.find(m => m.label === 'WAF1').value, -2.2);
     assert.equal(saos2.find(m => m.label === 'BAX').value, 0);
     assert.equal(saos2.find(m => m.label === 'Sub-G1 apoptosis').value, 30);
     assert.deepEqual(studies[2].classifications.map(m => m.value), ['DNE_LOF']);
     assert.ok(studies.every(study => study.measurements.every(result => Number.isFinite(result.value))));
+
+    for (const [change, proteinKey, zScores, constructId, rfs] of [
+        ['c.818G>A', 'R273H', [1.145500820068768, 1.0778441621853185, -1.4383870935120846], '402737', 0.250309596],
+        ['c.743G>A', 'R248Q', [1.2334798699180733, 0.21705344063477885, -0.9853848254821235], '400524', -0.039587248],
+        ['c.659A>G', 'Y220C', [1.5263833946091867, 0.6339840875061972, -1.1463242807029397], '301872', 0.219064031],
+        ['c.824G>A', 'C275Y', [1.8454773193772798, 1.1847885489578713, -1.4399010615648338], '402806', 0.405502556],
+        ['c.1010G>A', 'R337H', [-0.9647075350841217, -0.21328710172708565, 0.20040232381638787]]
+    ]) {
+        const response = await query({ cdna: `NM_000546.6:${change}` });
+        assert.equal(response.selection.status, 'exact');
+        assert.equal(response.assay_comparison.protein, `p.${proteinKey}`);
+        const giacomelli = response.assay_comparison.studies.find(s => s.study.startsWith('Giacomelli'));
+        assert.deepEqual(giacomelli.measurements.map(m => m.value), zScores);
+        const kotler = response.assay_comparison.studies.find(s => s.scope === 'coding_construct');
+        if (constructId) {
+            assert.ok(kotler.variant.includes(`${change} · wild-type backbone · construct ${constructId}`));
+            assert.equal(kotler.measurements[0].value, rfs);
+        } else {
+            assert.equal(kotler, undefined);
+        }
+    }
+    const r175hDelins = await query({ cdna: 'NM_000546.5:c.524_525delinsAT' });
+    assert.equal(r175hDelins.selection.status, 'exact');
+    assert.ok(r175hDelins.assay_comparison.studies.every(study => study.scope === 'protein'));
+    assert.equal((await query({ protein: 'p.Arg275His' })).assay_comparison, null);
+
+    const p72r = await query({ cdna: 'NM_000546.6:c.215C>G' });
+    assert.equal(p72r.selection.status, 'exact');
+    assert.ok(!p72r.assay_comparison?.studies.some(study => study.study.startsWith('Giacomelli') && study.measurements.length));
+    const s20m = await query({ protein: 'p.Ser20Met' });
+    const nearCutoff = s20m.assay_comparison.studies.find(s => s.study.startsWith('Giacomelli')).measurements[0];
+    assert.equal(nearCutoff.displayValue, 0.6096299666776949);
+    assert.equal(nearCutoff.interpretation.label, 'Below DNE cutoff');
+
     for (const input of [
         { genomic: 'chr17:g.7577572T>A' },
         { genomic: 'chr17:g.7577572T>A', assembly: 'GRCh38' },

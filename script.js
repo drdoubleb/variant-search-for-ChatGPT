@@ -2752,8 +2752,8 @@ function appendTp53AssayComparison(parent, comparison) {
         appendEvidenceText(details, study.endpoint);
         if (study.comparator) appendEvidenceText(details, study.comparator);
         const results = [...study.measurements, ...(study.classifications || [])];
-        appendTp53Table(details, results.map(({ label, value, units, source_records, interpretation }) => {
-            const formatted = Number.isFinite(value) ? String(Number(value.toFixed(3))) : value;
+        appendTp53Table(details, results.map(({ label, value, units, source_records, interpretation, displayValue }) => {
+            const formatted = displayValue ?? (Number.isFinite(value) ? String(Number(value.toFixed(3))) : value);
             const result = [formatted, units].filter(Boolean).join(' ');
             const records = source_records?.join(', ');
             const row = [label, records ? `${result} · ${records}` : result];
