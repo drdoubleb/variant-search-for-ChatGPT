@@ -26,6 +26,7 @@ export async function checkM237lRelease(page, timeout = 45000) {
     const tp53 = page.locator('[data-card="tp53-database"]');
     const exact = tp53.getByText('Exact genomic allele matched by assembly, chromosome, position, REF and ALT.', { exact: true });
     await exact.waitFor({ timeout });
+    await tp53.getByText(/^DNE · .+ \| DNE\/LOF class · .+$/).waitFor({ timeout });
     const detail = tp53.getByText('Exact allele details', { exact: true });
     await detail.click();
     const mutationRow = tp53.getByRole('row').filter({ hasText: 'MutationView ID' });

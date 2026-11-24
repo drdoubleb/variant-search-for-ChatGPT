@@ -148,6 +148,7 @@ export async function runEvidenceSmoke(newPage, base, check) {
                     const comparison = tp53Card.getByText(/^Assay comparison · p\.(?:Arg175His|R175H)$/);
                     await comparison.waitFor({ timeout: 30000 });
                     assert.equal(await comparison.evaluate(summary => summary.parentElement.open), false);
+                    assert.ok(await tp53Card.getByText('DNE · Yes | DNE/LOF class · DNE_LOF', { exact: true }).isVisible());
                     await comparison.press('Enter');
                     assert.ok(await tp53Card.getByRole('heading', { name: 'Kato et al. (2003)' }).isVisible());
                     assert.ok(await tp53Card.getByRole('heading', { name: 'Kakudo et al. (2005)' }).isVisible());
@@ -222,6 +223,7 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 }
                 await checkReleaseAssets(page);
                 await checkM237lRelease(page);
+                assert.ok(await tp53Card.getByText('DNE · Unavailable | DNE/LOF class · Unclassified', { exact: true }).isVisible());
                 check('release smoke: expected assets, exact M237L and live-evidence card contract', true);
                 const secondCopy = ai.getByRole('button', { name: 'Copy prompt', exact: true });
                 await Promise.all([
