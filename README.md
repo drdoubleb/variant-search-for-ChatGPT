@@ -968,6 +968,12 @@ is carried over byte-for-byte. Helpers: `splitGenomicHgvsPositions`,
 `tests/genomic-coordinates.test.js`, browser coverage in
 `tests/browser-smoke.js`.
 
+## Gene map
+
+The top of the results shows an Ensembl exon map in 5′ to 3′ transcript order. Variant queries use the resolved GRCh37 coordinate. Gene-only queries show Ensembl's current GRCh38 canonical transcript. The map uses the selected Ensembl transcript when that version is available and labels the canonical model when it is used. [Ensembl transcript lookup](https://rest.ensembl.org/documentation/info/lookup)
+
+The protein track shows Pfam, SMART, and PROSITE domains for the mapped translation. The arrow on that track is projected through the transcript's coding exons, so an intronic or untranslated position appears on the genomic track alone. The feature links show the annotated residue ranges and their source. The map loads alongside the existing results. [Ensembl protein features](https://rest.ensembl.org/documentation/info/overlap_translation)
+
 ## Upstream reliability and the lookup progress panel
 
 Every nomenclature lookup depends on `grch37.rest.ensembl.org`. That host

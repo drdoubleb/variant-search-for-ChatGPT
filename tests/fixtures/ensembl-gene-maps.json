@@ -1,0 +1,865 @@
+{
+  "TP53": {
+    "transcript": {
+      "id": "ENST00000269305",
+      "version": 4,
+      "display_name": "TP53-001",
+      "assembly_name": "GRCh37",
+      "seq_region_name": "17",
+      "strand": -1,
+      "start": 7571720,
+      "end": 7590856,
+      "biotype": "protein_coding",
+      "Translation": {
+        "object_type": "Translation",
+        "end": 7579912,
+        "species": "homo_sapiens",
+        "length": 393,
+        "start": 7572927,
+        "id": "ENSP00000269305",
+        "version": 4,
+        "db_type": "core",
+        "Parent": "ENST00000269305"
+      },
+      "Exon": [
+        {
+          "start": 7590695,
+          "end": 7590856
+        },
+        {
+          "start": 7579839,
+          "end": 7579940
+        },
+        {
+          "start": 7579700,
+          "end": 7579721
+        },
+        {
+          "start": 7579312,
+          "end": 7579590
+        },
+        {
+          "start": 7578371,
+          "end": 7578554
+        },
+        {
+          "start": 7578177,
+          "end": 7578289
+        },
+        {
+          "start": 7577499,
+          "end": 7577608
+        },
+        {
+          "start": 7577019,
+          "end": 7577155
+        },
+        {
+          "start": 7576853,
+          "end": 7576926
+        },
+        {
+          "start": 7573927,
+          "end": 7574033
+        },
+        {
+          "start": 7571720,
+          "end": 7573008
+        }
+      ]
+    },
+    "gene": {
+      "id": "ENSG00000141510",
+      "display_name": "TP53",
+      "assembly_name": "GRCh37",
+      "canonical_transcript": "ENST00000269305.4"
+    },
+    "domains": [
+      {
+        "type": "PANTHER",
+        "id": "PTHR11447",
+        "description": "p53 tumour suppressor family",
+        "interpro": "IPR002117",
+        "start": 1,
+        "end": 393
+      },
+      {
+        "type": "PANTHER",
+        "id": "PTHR11447:SF6",
+        "description": "",
+        "interpro": "",
+        "start": 1,
+        "end": 393
+      },
+      {
+        "type": "Pfam",
+        "id": "PF00870",
+        "description": "p53, DNA-binding domain",
+        "interpro": "IPR011615",
+        "start": 95,
+        "end": 288
+      },
+      {
+        "type": "Pfam",
+        "id": "PF07710",
+        "description": "p53, tetramerisation domain",
+        "interpro": "IPR010991",
+        "start": 318,
+        "end": 358
+      },
+      {
+        "type": "Pfam",
+        "id": "PF08563",
+        "description": "p53 transactivation domain",
+        "interpro": "IPR013872",
+        "start": 6,
+        "end": 29
+      },
+      {
+        "type": "Prosite_patterns",
+        "id": "PS00348",
+        "description": "p53 tumour suppressor family",
+        "interpro": "IPR002117",
+        "start": 237,
+        "end": 249
+      },
+      {
+        "type": "Seg",
+        "id": "seg",
+        "description": "",
+        "interpro": "",
+        "start": 63,
+        "end": 89
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00386",
+        "description": "p53 tumour suppressor family",
+        "interpro": "IPR002117",
+        "start": 116,
+        "end": 142
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00386",
+        "description": "p53 tumour suppressor family",
+        "interpro": "IPR002117",
+        "start": 158,
+        "end": 179
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00386",
+        "description": "p53 tumour suppressor family",
+        "interpro": "IPR002117",
+        "start": 213,
+        "end": 234
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00386",
+        "description": "p53 tumour suppressor family",
+        "interpro": "IPR002117",
+        "start": 236,
+        "end": 258
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00386",
+        "description": "p53 tumour suppressor family",
+        "interpro": "IPR002117",
+        "start": 264,
+        "end": 286
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00386",
+        "description": "p53 tumour suppressor family",
+        "interpro": "IPR002117",
+        "start": 326,
+        "end": 350
+      },
+      {
+        "type": "Gene3D",
+        "id": "1olgA00",
+        "description": "p53, tetramerisation domain",
+        "interpro": "IPR010991",
+        "start": 319,
+        "end": 359
+      },
+      {
+        "type": "Gene3D",
+        "id": "2.60.40.720",
+        "description": "p53/RUNT-type transcription factor, DNA-binding domain",
+        "interpro": "IPR012346",
+        "start": 94,
+        "end": 297
+      },
+      {
+        "type": "Superfamily",
+        "id": "SSF47719",
+        "description": "p53, tetramerisation domain",
+        "interpro": "IPR010991",
+        "start": 319,
+        "end": 357
+      },
+      {
+        "type": "Superfamily",
+        "id": "SSF49417",
+        "description": "p53-like transcription factor, DNA-binding",
+        "interpro": "IPR008967",
+        "start": 97,
+        "end": 287
+      }
+    ]
+  },
+  "BRAF": {
+    "transcript": {
+      "id": "ENST00000646891",
+      "version": 2,
+      "display_name": "BRAF-220",
+      "assembly_name": "GRCh38",
+      "seq_region_name": "7",
+      "strand": -1,
+      "start": 140730665,
+      "end": 140924929,
+      "biotype": "protein_coding",
+      "Translation": {
+        "species": "homo_sapiens",
+        "start": 140734597,
+        "id": "ENSP00000493543",
+        "Parent": "ENST00000646891",
+        "version": 1,
+        "length": 766,
+        "db_type": "core",
+        "end": 140924703,
+        "object_type": "Translation"
+      },
+      "Exon": [
+        {
+          "start": 140924566,
+          "end": 140924929
+        },
+        {
+          "start": 140850111,
+          "end": 140850212
+        },
+        {
+          "start": 140834609,
+          "end": 140834872
+        },
+        {
+          "start": 140808892,
+          "end": 140808995
+        },
+        {
+          "start": 140807960,
+          "end": 140808062
+        },
+        {
+          "start": 140801412,
+          "end": 140801560
+        },
+        {
+          "start": 140800362,
+          "end": 140800481
+        },
+        {
+          "start": 140794308,
+          "end": 140794467
+        },
+        {
+          "start": 140787548,
+          "end": 140787584
+        },
+        {
+          "start": 140783021,
+          "end": 140783157
+        },
+        {
+          "start": 140781576,
+          "end": 140781693
+        },
+        {
+          "start": 140777991,
+          "end": 140778075
+        },
+        {
+          "start": 140776912,
+          "end": 140777088
+        },
+        {
+          "start": 140754187,
+          "end": 140754233
+        },
+        {
+          "start": 140753275,
+          "end": 140753393
+        },
+        {
+          "start": 140749287,
+          "end": 140749418
+        },
+        {
+          "start": 140739812,
+          "end": 140739946
+        },
+        {
+          "start": 140730665,
+          "end": 140734770
+        }
+      ]
+    },
+    "gene": {
+      "id": "ENSG00000157764",
+      "display_name": "BRAF",
+      "assembly_name": "GRCh38",
+      "canonical_transcript": "ENST00000646891.2"
+    },
+    "domains": [
+      {
+        "type": "Pfam",
+        "id": "PF00130",
+        "description": "Protein kinase C-like, phorbol ester/diacylglycerol-binding domain",
+        "interpro": "IPR002219",
+        "start": 235,
+        "end": 281
+      },
+      {
+        "type": "Pfam",
+        "id": "PF02196",
+        "description": "Raf-like Ras-binding",
+        "interpro": "IPR003116",
+        "start": 157,
+        "end": 225
+      },
+      {
+        "type": "Pfam",
+        "id": "PF07714",
+        "description": "Serine-threonine/tyrosine-protein kinase, catalytic domain",
+        "interpro": "IPR001245",
+        "start": 457,
+        "end": 712
+      },
+      {
+        "type": "Prosite_profiles",
+        "id": "PS50011",
+        "description": "Protein kinase domain",
+        "interpro": "IPR000719",
+        "start": 457,
+        "end": 717
+      },
+      {
+        "type": "Prosite_profiles",
+        "id": "PS50081",
+        "description": "Protein kinase C-like, phorbol ester/diacylglycerol-binding domain",
+        "interpro": "IPR002219",
+        "start": 234,
+        "end": 280
+      },
+      {
+        "type": "Prosite_profiles",
+        "id": "PS50898",
+        "description": "Raf-like Ras-binding",
+        "interpro": "IPR003116",
+        "start": 155,
+        "end": 227
+      }
+    ]
+  },
+  "EGFR": {
+    "transcript": {
+      "id": "ENST00000275493",
+      "version": 2,
+      "display_name": "EGFR-001",
+      "assembly_name": "GRCh37",
+      "seq_region_name": "7",
+      "strand": 1,
+      "start": 55086794,
+      "end": 55279321,
+      "biotype": "protein_coding",
+      "Translation": {
+        "end": 55273310,
+        "species": "homo_sapiens",
+        "id": "ENSP00000275493",
+        "start": 55086971,
+        "version": 2,
+        "Parent": "ENST00000275493",
+        "object_type": "Translation",
+        "db_type": "core",
+        "length": 1210
+      },
+      "Exon": [
+        {
+          "start": 55086794,
+          "end": 55087058
+        },
+        {
+          "start": 55209979,
+          "end": 55210130
+        },
+        {
+          "start": 55210998,
+          "end": 55211181
+        },
+        {
+          "start": 55214299,
+          "end": 55214433
+        },
+        {
+          "start": 55218987,
+          "end": 55219055
+        },
+        {
+          "start": 55220239,
+          "end": 55220357
+        },
+        {
+          "start": 55221704,
+          "end": 55221845
+        },
+        {
+          "start": 55223523,
+          "end": 55223639
+        },
+        {
+          "start": 55224226,
+          "end": 55224352
+        },
+        {
+          "start": 55224452,
+          "end": 55224525
+        },
+        {
+          "start": 55225356,
+          "end": 55225446
+        },
+        {
+          "start": 55227832,
+          "end": 55228031
+        },
+        {
+          "start": 55229192,
+          "end": 55229324
+        },
+        {
+          "start": 55231426,
+          "end": 55231516
+        },
+        {
+          "start": 55232973,
+          "end": 55233130
+        },
+        {
+          "start": 55238868,
+          "end": 55238906
+        },
+        {
+          "start": 55240676,
+          "end": 55240817
+        },
+        {
+          "start": 55241614,
+          "end": 55241736
+        },
+        {
+          "start": 55242415,
+          "end": 55242513
+        },
+        {
+          "start": 55248986,
+          "end": 55249171
+        },
+        {
+          "start": 55259412,
+          "end": 55259567
+        },
+        {
+          "start": 55260459,
+          "end": 55260534
+        },
+        {
+          "start": 55266410,
+          "end": 55266556
+        },
+        {
+          "start": 55268009,
+          "end": 55268106
+        },
+        {
+          "start": 55268881,
+          "end": 55269048
+        },
+        {
+          "start": 55269428,
+          "end": 55269475
+        },
+        {
+          "start": 55270210,
+          "end": 55270318
+        },
+        {
+          "start": 55272949,
+          "end": 55279321
+        }
+      ]
+    },
+    "domains": [
+      {
+        "type": "Seg",
+        "id": "seg",
+        "description": "",
+        "interpro": "",
+        "start": 7,
+        "end": 25
+      },
+      {
+        "type": "Seg",
+        "id": "seg",
+        "description": "",
+        "interpro": "",
+        "start": 651,
+        "end": 666
+      },
+      {
+        "type": "Seg",
+        "id": "seg",
+        "description": "",
+        "interpro": "",
+        "start": 675,
+        "end": 692
+      },
+      {
+        "type": "Seg",
+        "id": "seg",
+        "description": "",
+        "interpro": "",
+        "start": 1002,
+        "end": 1015
+      },
+      {
+        "type": "Seg",
+        "id": "seg",
+        "description": "",
+        "interpro": "",
+        "start": 1025,
+        "end": 1046
+      },
+      {
+        "type": "Gene3D",
+        "id": "3.30.200.20",
+        "description": "",
+        "interpro": "",
+        "start": 715,
+        "end": 791
+      },
+      {
+        "type": "Gene3D",
+        "id": "2.10.220.10",
+        "description": "",
+        "interpro": "",
+        "start": 528,
+        "end": 581
+      },
+      {
+        "type": "Gene3D",
+        "id": "2.10.220.10",
+        "description": "",
+        "interpro": "",
+        "start": 583,
+        "end": 646
+      },
+      {
+        "type": "Gene3D",
+        "id": "3.80.20.20",
+        "description": "EGF receptor, L domain",
+        "interpro": "IPR000494",
+        "start": 29,
+        "end": 199
+      },
+      {
+        "type": "Gene3D",
+        "id": "2.10.220.10",
+        "description": "",
+        "interpro": "",
+        "start": 268,
+        "end": 327
+      },
+      {
+        "type": "Gene3D",
+        "id": "1z9iA01",
+        "description": "",
+        "interpro": "",
+        "start": 677,
+        "end": 714
+      },
+      {
+        "type": "Gene3D",
+        "id": "3.80.20.20",
+        "description": "EGF receptor, L domain",
+        "interpro": "IPR000494",
+        "start": 328,
+        "end": 519
+      },
+      {
+        "type": "Gene3D",
+        "id": "2.10.220.10",
+        "description": "",
+        "interpro": "",
+        "start": 200,
+        "end": 267
+      },
+      {
+        "type": "Gene3D",
+        "id": "1.10.510.10",
+        "description": "",
+        "interpro": "",
+        "start": 794,
+        "end": 968
+      },
+      {
+        "type": "PANTHER",
+        "id": "PTHR24416:SF91",
+        "description": "",
+        "interpro": "",
+        "start": 34,
+        "end": 1078
+      },
+      {
+        "type": "PANTHER",
+        "id": "PTHR24416",
+        "description": "",
+        "interpro": "",
+        "start": 34,
+        "end": 1078
+      },
+      {
+        "type": "Tmhmm",
+        "id": "TMhelix",
+        "description": "",
+        "interpro": "",
+        "start": 773,
+        "end": 795
+      },
+      {
+        "type": "Tmhmm",
+        "id": "TMhelix",
+        "description": "",
+        "interpro": "",
+        "start": 646,
+        "end": 668
+      },
+      {
+        "type": "Prosite_profiles",
+        "id": "PS50011",
+        "description": "Protein kinase domain",
+        "interpro": "IPR000719",
+        "start": 712,
+        "end": 979
+      },
+      {
+        "type": "Prosite_patterns",
+        "id": "PS00107",
+        "description": "Protein kinase, ATP binding site",
+        "interpro": "IPR017441",
+        "start": 718,
+        "end": 745
+      },
+      {
+        "type": "Prosite_patterns",
+        "id": "PS00109",
+        "description": "Tyrosine-protein kinase, active site",
+        "interpro": "IPR008266",
+        "start": 833,
+        "end": 845
+      },
+      {
+        "type": "Superfamily",
+        "id": "SSF57184",
+        "description": "Insulin-like growth factor binding protein, N-terminal",
+        "interpro": "IPR009030",
+        "start": 186,
+        "end": 339
+      },
+      {
+        "type": "Superfamily",
+        "id": "SSF57184",
+        "description": "Insulin-like growth factor binding protein, N-terminal",
+        "interpro": "IPR009030",
+        "start": 505,
+        "end": 636
+      },
+      {
+        "type": "Superfamily",
+        "id": "SSF52058",
+        "description": "",
+        "interpro": "",
+        "start": 328,
+        "end": 520
+      },
+      {
+        "type": "Superfamily",
+        "id": "SSF56112",
+        "description": "Protein kinase-like domain",
+        "interpro": "IPR011009",
+        "start": 708,
+        "end": 1003
+      },
+      {
+        "type": "Superfamily",
+        "id": "SSF52058",
+        "description": "",
+        "interpro": "",
+        "start": 31,
+        "end": 209
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00109",
+        "description": "Serine-threonine/tyrosine-protein kinase catalytic domain",
+        "interpro": "IPR001245",
+        "start": 827,
+        "end": 845
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00109",
+        "description": "Serine-threonine/tyrosine-protein kinase catalytic domain",
+        "interpro": "IPR001245",
+        "start": 876,
+        "end": 886
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00109",
+        "description": "Serine-threonine/tyrosine-protein kinase catalytic domain",
+        "interpro": "IPR001245",
+        "start": 939,
+        "end": 961
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00109",
+        "description": "Serine-threonine/tyrosine-protein kinase catalytic domain",
+        "interpro": "IPR001245",
+        "start": 790,
+        "end": 803
+      },
+      {
+        "type": "PRINTS",
+        "id": "PR00109",
+        "description": "Serine-threonine/tyrosine-protein kinase catalytic domain",
+        "interpro": "IPR001245",
+        "start": 895,
+        "end": 917
+      },
+      {
+        "type": "SignalP",
+        "id": "SignalP-noTM",
+        "description": "",
+        "interpro": "",
+        "start": 1,
+        "end": 24
+      },
+      {
+        "type": "Pfam",
+        "id": "PF00757",
+        "description": "Furin-like cysteine-rich domain",
+        "interpro": "IPR006211",
+        "start": 185,
+        "end": 338
+      },
+      {
+        "type": "Pfam",
+        "id": "PF07714",
+        "description": "Serine-threonine/tyrosine-protein kinase catalytic domain",
+        "interpro": "IPR001245",
+        "start": 713,
+        "end": 965
+      },
+      {
+        "type": "Pfam",
+        "id": "PF14843",
+        "description": "",
+        "interpro": "",
+        "start": 505,
+        "end": 636
+      },
+      {
+        "type": "Pfam",
+        "id": "PF01030",
+        "description": "EGF receptor, L domain",
+        "interpro": "IPR000494",
+        "start": 57,
+        "end": 167
+      },
+      {
+        "type": "Pfam",
+        "id": "PF01030",
+        "description": "EGF receptor, L domain",
+        "interpro": "IPR000494",
+        "start": 361,
+        "end": 480
+      },
+      {
+        "type": "Smart",
+        "id": "SM00261",
+        "description": "Furin-like repeat",
+        "interpro": "IPR006212",
+        "start": 496,
+        "end": 547
+      },
+      {
+        "type": "Smart",
+        "id": "SM00261",
+        "description": "Furin-like repeat",
+        "interpro": "IPR006212",
+        "start": 552,
+        "end": 601
+      },
+      {
+        "type": "Smart",
+        "id": "SM00261",
+        "description": "Furin-like repeat",
+        "interpro": "IPR006212",
+        "start": 228,
+        "end": 270
+      },
+      {
+        "type": "Smart",
+        "id": "SM00219",
+        "description": "Tyrosine-protein kinase, catalytic domain",
+        "interpro": "IPR020635",
+        "start": 712,
+        "end": 968
+      },
+      {
+        "type": "PIRSF",
+        "id": "PIRSF000619",
+        "description": "Tyrosine protein kinase, EGF/ERB/XmrK receptor",
+        "interpro": "IPR016245",
+        "start": 1,
+        "end": 1210
+      }
+    ]
+  },
+  "MALAT1": {
+    "transcript": {
+      "id": "ENST00000534336",
+      "version": 4,
+      "display_name": "MALAT1-202",
+      "assembly_name": "GRCh38",
+      "seq_region_name": "11",
+      "strand": 1,
+      "start": 65497606,
+      "end": 65508073,
+      "biotype": "lncRNA",
+      "Exon": [
+        {
+          "start": 65497606,
+          "end": 65508073
+        }
+      ]
+    }
+  }
+}

@@ -464,8 +464,8 @@ console.log('Gene-symbol name unit checks passed');
     assert.match(page.variant, /Transcript: NM_007294\.4 \(MANE Select\)c\.: c\.5266dup/);
     assert.deepEqual(recoderQueries(page), []);
     assert.doesNotMatch(page.panel, /Resolve nomenclature/, 'no step for a service that was not asked');
-    // The label comes from the two small lookups, not the 236 KB one.
-    assert.deepEqual(asked(page, /\/lookup\//).map(r => r.match(/lookup\/([^?]+\?[^&]*)/)[1]),
+    // The MANE label uses two small lookups on the current Ensembl host.
+    assert.deepEqual(asked(page, /^rest\.ensembl\.org\/lookup\//).map(r => r.match(/lookup\/([^?]+\?[^&]*)/)[1]),
         ['symbol/homo_sapiens/BRCA1?content-type=application/json', 'id/ENST00000357654?expand=1']);
     console.log('ok gene-symbol name: BRCA1 c.5266dup, as ClinVar names it, without the recoder');
 }
