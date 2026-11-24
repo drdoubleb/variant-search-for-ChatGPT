@@ -1,3 +1,5 @@
+import { GIACOMELLI_SCORES, KOTLER_CONSTRUCTS } from './_tp53-published-scores.js';
+
 const PERCENT_WT = '% of wild type';
 const NCI_DATA = { dataLabel: 'NCI TP53 data dictionary', dataUrl: 'https://tp53.cancer.gov/help' };
 const CLINGEN_DATA = {
@@ -58,6 +60,18 @@ export function assayScoreInterpretation(value, assay) {
     return { label, tone };
 }
 
+function assayMeasurement(label, value, units, assay) {
+    const measurement = { label, value, units };
+    const interpretation = assayScoreInterpretation(value, assay);
+    if (!interpretation) return measurement;
+    measurement.interpretation = interpretation;
+    // Preserve the source precision if three-decimal rounding would display
+    // a value in a different band from the published measurement.
+    const rounded = Number(value.toFixed(3));
+    if (assayScoreInterpretation(rounded, assay).label !== interpretation.label) measurement.displayValue = value;
+    return measurement;
+}
+
 function scoreRangeText(assay) {
     const { label, inclusive, bands } = SCORE_RANGES[assay];
     const format = value => String(value).replace(/^-/, '−');
@@ -97,7 +111,7 @@ const GIACOMELLI = {
     ...NCI_DATA,
     study: 'Giacomelli et al. (2018)',
     article: 'https://pubmed.ncbi.nlm.nih.gov/30224644/',
-    system: 'Isogenic human A549 cells with wild-type or null p53',
+    system: 'Isogenic human A549 cells with wild-type or null p53 · Arg72 construct backbone',
     endpoint: 'Variant enrichment or depletion after treatment relative to the early sample',
     comparator: 'NCI combines the WT nutlin-3 and null etoposide screens. When the WT nutlin-3 score meets the DNE cutoff and etoposide falls in the no-LOF range, the combined class is Unclassified. DNE means dominant-negative effect. LOF means loss of function.'
 };
@@ -108,22 +122,12 @@ const CURATED_DNE = {
     endpoint: 'Dominant-negative effect on wild-type p53 transactivation'
 };
 
-// These supplemental results were checked independently of MutationView. The
-// general panel uses the measurements and classifications in that dataset.
-// Kotler’s values apply to the specified coding construct and backbone only.
-const M237L_SCORES = [
-    { label: 'p53 WT · nutlin-3', value: 0.7432024599950522, assay: 'wtNutlin' },
-    { label: 'p53 null · nutlin-3', value: -0.1555150626148093 },
-    { label: 'p53 null · etoposide', value: 0.2662258591870247, assay: 'nullEtoposide' }
-].map(({ label, value, assay }) => ({
-    label, value, units: 'Z-score',
-    ...(assay ? { interpretation: assayScoreInterpretation(value, assay) } : {})
-}));
+const GIACOMELLI_SCREENS = [
+    { label: 'p53 WT · nutlin-3', assay: 'wtNutlin' },
+    { label: 'p53 null · nutlin-3' },
+    { label: 'p53 null · etoposide', assay: 'nullEtoposide' }
+];
 const GIACOMELLI_TABLE = 'https://media.springernature.com/full/springer-static/esm/art%3A10.1038%2Fs41588-018-0204-y/MediaObjects/41588_2018_204_MOESM6_ESM.xlsx';
-const KOTLER_CONSTRUCTS = new Map([
-    ['C.709A>C', { id: '302463', score: -1.779194794 }],
-    ['C.709A>T', { id: '302465', score: -1.666323792 }]
-]);
 
 function numericValue(text) {
     if (text == null || String(text).trim() === '') return null;
@@ -173,30 +177,28 @@ export function tp53AssayComparison({ protein, proteinKey, matches, exactTranscr
     if (yeast.length === 8 && new Set(yeast.map(m => m.label)).size === 8) {
         const sorted = yeast.map(m => m.value).sort((a, b) => a - b);
         const value = (sorted[3] + sorted[4]) / 2;
-        const median = { label: 'Median across eight promoters', value, units: PERCENT_WT };
-        if (/^[A-Z]\d+[A-Z]$/.test(proteinKey) && proteinKey[0] !== proteinKey.at(-1)) {
-            median.interpretation = assayScoreInterpretation(value, 'katoMedian');
-            kato = { ...KATO, scoreRanges: [scoreRangeText('katoMedian')] };
-        }
-        yeast.unshift(median);
+        const isMissense = /^[A-Z]\d+[A-Z]$/.test(proteinKey) && proteinKey[0] !== proteinKey.at(-1);
+        if (isMissense) kato = { ...KATO, scoreRanges: [scoreRangeText('katoMedian')] };
+        yeast.unshift(assayMeasurement('Median across eight promoters', value, PERCENT_WT, isMissense ? 'katoMedian' : null));
     }
     addProteinStudy(kato, yeast);
     addProteinStudy(KAKUDO, studyResults(matches, match => match.saos2_targets, numericValue, PERCENT_WT));
 
     const growthClass = studyResults(matches, match => ({ 'NCI combined DNE/LOF class': match.lof_class }), classificationValue);
-    const isM237L = proteinKey === 'M237L';
-    const giacomelli = isM237L ? {
+    const scores = GIACOMELLI_SCORES[proteinKey];
+    const giacomelli = scores ? {
         ...GIACOMELLI,
         supplementUrl: GIACOMELLI_TABLE,
         scoreRanges: [scoreRangeText('wtNutlin'), scoreRangeText('nullEtoposide')]
     } : GIACOMELLI;
-    addProteinStudy(giacomelli, isM237L ? M237L_SCORES : [], classifiedResults(growthClass, DNE_LOF_LABELS));
+    const growthScores = scores ? GIACOMELLI_SCREENS.map(({ label, assay }, index) => assayMeasurement(label, scores[index], 'Z-score', assay)) : [];
+    addProteinStudy(giacomelli, growthScores, classifiedResults(growthClass, DNE_LOF_LABELS));
     const dneClass = studyResults(matches, match => ({ 'NCI dominant-negative class': match.dne_class }), classificationValue);
     addProteinStudy(CURATED_DNE, [], classifiedResults(dneClass, DNE_LABELS));
 
-    const cdna = String(exactTranscriptHgvs || '').toUpperCase().match(/^NM_000546\.[56]:(C\.709A>[CT])$/)?.[1];
-    const construct = isM237L && KOTLER_CONSTRUCTS.get(cdna);
-    if (construct) {
+    const cdna = String(exactTranscriptHgvs || '').toUpperCase().match(/^NM_000546\.[56]:(C\.[1-9]\d*[ACGT]>[ACGT])$/)?.[1];
+    const construct = KOTLER_CONSTRUCTS[cdna];
+    if (construct && construct.protein === proteinKey) {
         studies.push({
             study: 'Kotler et al. (2018)',
             article: 'https://pubmed.ncbi.nlm.nih.gov/29979965/',
@@ -210,10 +212,7 @@ export function tp53AssayComparison({ protein, proteinKey, matches, exactTranscr
             system: 'Human p53-null H1299 cells expressing a TP53 construct',
             endpoint: 'Change in relative cell abundance during the proliferation assay',
             comparator: 'Wild-type-like synonymous constructs were used to normalize the sub-libraries. Lower scores indicate greater depletion.',
-            measurements: [{
-                label: 'H1299 relative fitness score', value: construct.score, units: 'log₂ scale',
-                interpretation: assayScoreInterpretation(construct.score, 'h1299Rfs')
-            }]
+            measurements: [assayMeasurement('H1299 relative fitness score', construct.score, 'log₂ scale', 'h1299Rfs')]
         });
     }
     return studies.length ? { protein, includes_mutation_view: true, studies } : null;
