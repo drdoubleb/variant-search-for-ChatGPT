@@ -2770,6 +2770,12 @@ function appendTp53AssayComparison(parent, comparison) {
     }
 }
 
+function tp53FunctionalClass(value) {
+    const text = String(value ?? '').trim();
+    if (/^(?:N\/?A|ND|-+)$/i.test(text)) return '';
+    return /^unclass\.?$/i.test(text) ? 'Unclassified' : text;
+}
+
 function appendTp53Results(parent, data) {
     const { selection, matches = [], functional_sources: sources = {} } = data;
     if (!selection) {
@@ -2784,6 +2790,9 @@ function appendTp53Results(parent, data) {
     if (exact) {
         const compact = [exact.transcript_hgvs || exact.cdna_or_genomic, known(exact.ta_class) && `Yeast transactivation · ${exact.ta_class}`].filter(Boolean);
         if (compact.length) appendEvidenceText(parent, compact.join(' — '));
+        const dominantNegativeClass = tp53FunctionalClass(exact.dne_class);
+        const combinedClass = tp53FunctionalClass(exact.lof_class);
+        appendEvidenceText(parent, `DNE · ${dominantNegativeClass || 'Unavailable'} | DNE/LOF class · ${combinedClass || 'Unavailable'}`);
         const occurrences = [exact.somatic_count && `Somatic · ${exact.somatic_count}`, exact.germline_count && `Germline · ${exact.germline_count}`].filter(Boolean);
         if (occurrences.length) appendEvidenceText(parent, `MutationView occurrences — ${occurrences.join(' | ')}`);
         const variant = appendEvidenceDetails(parent, 'Exact allele details');
@@ -2801,13 +2810,13 @@ function appendTp53Results(parent, data) {
         if (usesLegacyAssayPanels) {
             appendTp53PromoterActivity(parent, exact, sources.transactivation);
             const cellular = [
-                ['Giacomelli growth-suppression and dominant-negative class', exact.lof_class],
-                ['Curated dominant-negative transactivation class', exact.dne_class]
-            ].filter(([, value]) => known(value));
+                ['Giacomelli growth-suppression and dominant-negative class', combinedClass],
+                ['Curated dominant-negative transactivation class', dominantNegativeClass]
+            ].filter(([, value]) => value);
             if (cellular.length) {
                 const details = appendEvidenceDetails(parent, 'Cellular functional classifications');
-                if (known(exact.lof_class)) appendTp53Source(details, sources.cellular_dne_lof);
-                if (known(exact.dne_class)) appendTp53Source(details, sources.dominant_negative);
+                if (combinedClass) appendTp53Source(details, sources.cellular_dne_lof);
+                if (dominantNegativeClass) appendTp53Source(details, sources.dominant_negative);
                 appendTp53Table(details, cellular);
             }
         }
