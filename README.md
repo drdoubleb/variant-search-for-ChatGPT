@@ -1116,6 +1116,8 @@ When MutationView has assay evidence for a matched protein change, the collapsed
 
 The M237L comparison also includes independently checked Giacomelli Z-scores. The two Kotler scores each require an exact match to the corresponding M237L allele.
 
+The panel shows text labels, colors, and reference ranges for the Kato eight-promoter median, the WT nutlin-3 and null etoposide screens used by NCI, and the corrected Kotler H1299 relative fitness score. The labels describe activity in each assay. Individual promoter measurements, Kakudo results, and the p53-null nutlin-3 score appear as raw values. [NCI TP53 data dictionary](https://tp53.cancer.gov/help), [ClinGen TP53 rules v2.4](https://erepo.clinicalgenome.org/cspec/ui/svi/doc/135637581?version=2.4.0)
+
 | Study | Source |
 | --- | --- |
 | Kato 2003 | The NCI TP53 Database r21 yeast dataset is curated into MutationView. For `M237L`, the eight reporter values run from 6.6% to 78.2% of wild type, with a median of 40.6%. [NCI data](https://tp53.cancer.gov/static/data/FunctionIshiokaDownload_r21.csv) |

@@ -546,6 +546,32 @@ footer a:hover {
     flex-wrap: wrap;
     gap: 0.25rem 0.75rem;
 }
+.tp53-assay-label {
+    display: block;
+    width: fit-content;
+    max-width: 100%;
+    margin-top: 0.2rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.25rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+.tp53-assay-label[data-tone="green"] {
+    color: #14532d;
+    background-color: #dcfce7;
+}
+.tp53-assay-label[data-tone="orange"] {
+    color: #7c2d12;
+    background-color: #ffedd5;
+}
+.tp53-assay-label[data-tone="red"] {
+    color: #991b1b;
+    background-color: #fee2e2;
+}
+.tp53-assay-ranges {
+    background-color: #f8f9fb;
+    padding: 0.35rem 0.5rem;
+}
 .pubmed-article {
     padding: 0.45rem 0;
     border-bottom: 1px solid #f0f0f0;

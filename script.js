@@ -2706,13 +2706,14 @@ function appendTp53Table(parent, rows, columns = null) {
         }
         table.appendChild(header);
     }
-    for (const [label, value] of rows) {
+    for (const [label, value, annotation] of rows) {
         const row = document.createElement('tr');
         const th = document.createElement('th');
         th.scope = 'row';
         th.textContent = label;
         const td = document.createElement('td');
         td.textContent = value;
+        if (annotation) td.append(' ', annotation);
         row.append(th, td);
         table.appendChild(row);
     }
@@ -2751,17 +2752,26 @@ function appendTp53AssayComparison(parent, comparison) {
         appendEvidenceText(details, study.endpoint);
         if (study.comparator) appendEvidenceText(details, study.comparator);
         const results = [...study.measurements, ...(study.classifications || [])];
-        appendTp53Table(details, results.map(({ label, value, units, source_records }) => {
+        appendTp53Table(details, results.map(({ label, value, units, source_records, interpretation }) => {
             const formatted = Number.isFinite(value) ? String(Number(value.toFixed(3))) : value;
             const result = [formatted, units].filter(Boolean).join(' ');
             const records = source_records?.join(', ');
-            return [label, records ? `${result} · ${records}` : result];
+            const row = [label, records ? `${result} · ${records}` : result];
+            if (interpretation?.label) {
+                const badge = document.createElement('span');
+                badge.className = 'tp53-assay-label';
+                badge.dataset.tone = interpretation.tone;
+                badge.textContent = interpretation.label;
+                row.push(badge);
+            }
+            return row;
         }));
+        for (const ranges of study.scoreRanges || []) appendEvidenceText(details, ranges, 'evidence-note tp53-assay-ranges');
         const links = document.createElement('div');
         links.className = 'evidence-links';
         for (const [label, value] of [
             ['Article', study.article], [study.dataLabel, study.dataUrl],
-            ['Supplementary Table 3', study.supplementUrl], ['Correction', study.correctionUrl]
+            ['Supplementary Table 3', study.supplementUrl], ['Correction', study.correctionUrl], [study.cutoffLabel, study.cutoffUrl]
         ]) {
             const url = safeUrl(value);
             if (url) appendEvidenceLink(links, `${label} ↗`, url);

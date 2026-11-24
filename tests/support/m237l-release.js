@@ -34,7 +34,11 @@ export async function checkM237lRelease(page, timeout = 45000) {
     const alleleRow = tp53.getByRole('row').filter({ hasText: 'Genomic allele' });
     assert.match(await alleleRow.getByRole('cell').textContent(), /GRCh37 chr17:7577572 T>A/);
     await detail.click();
-    await tp53.getByText('Assay comparison · p.Met237Leu', { exact: true }).waitFor({ timeout });
+    const assays = tp53.getByText('Assay comparison · p.Met237Leu', { exact: true });
+    await assays.click({ timeout });
+    await tp53.getByText('Meets DNE cutoff', { exact: true }).waitFor({ timeout });
+    await tp53.getByText(/^ClinGen H1299 RFS/).waitFor({ timeout });
+    await assays.click();
 
     const clinvar = page.locator('[data-card="clinvar"]');
     const submissions = clinvar.getByText(/^Submission evidence \(\d+\)$/);

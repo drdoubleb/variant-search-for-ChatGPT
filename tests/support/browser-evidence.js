@@ -154,7 +154,8 @@ export async function runEvidenceSmoke(newPage, base, check) {
                     assert.ok(await tp53Card.getByRole('heading', { name: 'Kakudo et al. (2005)' }).isVisible());
                     assert.ok(await tp53Card.getByRole('cell', { name: '-2.2 % of wild type', exact: true }).isVisible());
                     assert.ok(await tp53Card.getByRole('cell', { name: '0 % of wild type', exact: true }).isVisible());
-                    assert.ok(await tp53Card.getByRole('cell', { name: 'DNE_LOF', exact: true }).isVisible());
+                    assert.ok(await tp53Card.getByRole('cell', { name: /DNE_LOF.*DNE and LOF/ }).isVisible());
+                    assert.ok(await tp53Card.locator('.tp53-assay-label[data-tone="red"]').filter({ hasText: 'Non-functional' }).isVisible());
                     assert.equal(await tp53Card.getByRole('heading', { name: /Kotler/ }).count(), 0);
                     check('evidence: a separate TP53 variant displays its own Kato, Kakudo and Giacomelli results', true);
                     continue;
@@ -248,10 +249,27 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 assert.equal(await comparison.evaluate(summary => summary.parentElement.open), false);
                 await comparison.press('Enter');
                 assert.ok(await tp53Card.getByRole('heading', { name: 'Kato et al. (2003)' }).isVisible());
-                assert.ok(await tp53Card.getByRole('cell', { name: '78.2 % of wild type' }).isVisible());
+                assert.ok(await tp53Card.getByRole('cell', { name: '78.2 % of wild type', exact: true }).isVisible());
                 assert.ok(await tp53Card.getByRole('cell', { name: 'Unclassified', exact: true }).isVisible());
                 assert.ok(await tp53Card.getByText(/c\.709A>T.*construct 302465/).isVisible());
-                assert.ok(await tp53Card.getByRole('cell', { name: '-1.666 log₂ scale' }).isVisible());
+                assert.ok(await tp53Card.getByRole('cell', { name: '-0.156 Z-score', exact: true }).isVisible());
+                for (const [measurement, label, tone, background] of [
+                    ['Median across eight promoters', 'Partially functional', 'orange', 'rgb(255, 237, 213)'],
+                    ['p53 WT · nutlin-3', 'Meets DNE cutoff', 'orange', 'rgb(255, 237, 213)'],
+                    ['p53 null · etoposide', 'No LOF in this assay', 'green', 'rgb(220, 252, 231)'],
+                    ['H1299 relative fitness score', 'No LOF in this assay', 'green', 'rgb(220, 252, 231)']
+                ]) {
+                    const row = tp53Card.getByRole('row').filter({ has: page.getByRole('rowheader', { name: measurement, exact: true }) });
+                    const badge = row.getByText(label, { exact: true });
+                    assert.ok(await badge.isVisible());
+                    assert.equal(await badge.getAttribute('data-tone'), tone);
+                    assert.equal(await badge.evaluate(el => getComputedStyle(el).backgroundColor), background);
+                }
+                assert.ok(await tp53Card.getByRole('cell', { name: /-1\.666 log₂ scale.*No LOF in this assay/ }).isVisible());
+                assert.ok(await tp53Card.getByText(/NCI WT nutlin-3 Z-score.*≥ 0\.61/).isVisible());
+                assert.ok(await tp53Card.getByText(/NCI null etoposide Z-score.*≤ −0\.21/).isVisible());
+                assert.ok(await tp53Card.getByText(/ClinGen H1299 RFS.*< −1 .*≥ −1/).isVisible());
+                assert.ok(await tp53Card.getByRole('link', { name: 'ClinGen TP53 rules v2.4 ↗' }).isVisible());
                 const predictions = page.getByText('Computational predictions', { exact: true }).last();
                 await predictions.click();
                 assert.ok(await page.getByText('Structure-based computational prediction', { exact: true }).isVisible());
