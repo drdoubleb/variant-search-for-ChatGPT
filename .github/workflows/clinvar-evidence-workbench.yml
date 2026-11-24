@@ -12,11 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 36ee3a540beb88f4a1d05a04ea0aef461fb74999
           persist-credentials: false
       - name: Package source and retrieve public reference fixtures
         run: |
           mkdir -p /tmp/evidence-workbench/live
-          git archive --format=tar 36ee3a540beb88f4a1d05a04ea0aef461fb74999 > /tmp/evidence-workbench/source.tar
+          git archive --format=tar HEAD > /tmp/evidence-workbench/source.tar
           curl --fail --retry 2 --max-time 60 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=clinvar&rettype=vcv&is_variationid&id=2774649,142714,127821,375941' -o /tmp/evidence-workbench/live/clinvar.xml || echo 'ClinVar fetch unavailable'
           curl --fail --retry 2 --max-time 60 'https://tp53.cancer.gov/static/data/MutationView_r21.csv' -o /tmp/evidence-workbench/live/tp53.csv || echo 'TP53 fetch unavailable'
           curl --fail --retry 2 --max-time 60 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&retmode=xml&id=12826609,30224644,29979965' -o /tmp/evidence-workbench/live/pubmed.xml || echo 'PubMed fetch unavailable'
