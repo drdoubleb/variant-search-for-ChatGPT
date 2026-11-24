@@ -109,6 +109,7 @@ function evidenceDescriptions(node) {
 function parseSubmission(assertion, mappings) {
     const accessionNode = child(assertion, 'ClinVarAccession');
     const classification = child(assertion, 'Classification');
+    const contributes = attribute(assertion, 'ContributesToAggregateClassification');
     const citationMap = new Map();
     const addCitations = (node, location, scope) => {
         for (const citation of children(node, 'Citation')) {
@@ -183,6 +184,8 @@ function parseSubmission(assertion, mappings) {
         version: attribute(accessionNode, 'Version'),
         submitter: attribute(accessionNode, 'SubmitterName'),
         recordStatus: childText(assertion, 'RecordStatus'),
+        contributesToAggregate: contributes === 'true' || contributes === '1' ? true
+            : contributes === 'false' || contributes === '0' ? false : null,
         assertion: childText(assertion, 'Assertion'),
         reviewStatus: childText(classification, 'ReviewStatus'),
         lastEvaluated: date(attribute(classification, 'DateLastEvaluated')),

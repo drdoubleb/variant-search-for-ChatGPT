@@ -2736,6 +2736,32 @@ function appendTp53PromoterActivity(parent, match, source) {
         ['Promoter', 'Activity (% of wild type)']);
 }
 
+function appendTp53AssayComparison(parent, comparison) {
+    if (!comparison?.studies?.length) return;
+    const details = appendEvidenceDetails(parent, `Assay comparison · ${comparison.protein}`);
+    appendEvidenceText(details, 'The studies report different endpoints and scales. Submitter interpretations appear in the ClinVar card.');
+    for (const study of comparison.studies) {
+        const heading = document.createElement('h4');
+        heading.className = 'evidence-heading';
+        heading.textContent = study.study;
+        details.appendChild(heading);
+        const scope = study.scope === 'coding_construct' ? 'Coding construct' : 'Protein-level result';
+        appendEvidenceText(details, `${scope} · ${study.variant}`);
+        appendEvidenceText(details, study.system);
+        appendEvidenceText(details, study.endpoint);
+        appendEvidenceText(details, study.comparator);
+        appendTp53Table(details, study.measurements.map(({ label, value, units }) =>
+            [label, `${Number(value.toFixed(3))} ${units}`]));
+        const links = document.createElement('div');
+        links.className = 'evidence-links';
+        for (const [label, value] of [['Article', study.article], [study.dataLabel, study.dataUrl], ['Correction', study.correctionUrl]]) {
+            const url = safeUrl(value);
+            if (url) appendEvidenceLink(links, `${label} ↗`, url);
+        }
+        details.appendChild(links);
+    }
+}
+
 function appendTp53Results(parent, data) {
     const { selection, matches = [], functional_sources: sources = {} } = data;
     if (!selection) {
@@ -2786,6 +2812,7 @@ function appendTp53Results(parent, data) {
         const splice = Object.entries(exact.splice_ai || {}).filter(([, value]) => value !== '' && value != null);
         if (splice.length) appendTp53Table(appendEvidenceDetails(parent, 'SpliceAI delta scores'), splice);
     }
+    appendTp53AssayComparison(parent, data.assay_comparison);
     const related = exact ? matches.slice(1) : matches;
     const omitted = data.omitted_match_count || 0;
     if (related.length) {
@@ -4339,6 +4366,91 @@ function scvAccession(submission) {
     return /^\d+$/.test(version) ? `${accession}.${version}` : accession;
 }
 
+function clinvarConditionLabel(condition) {
+    return condition.name || condition.identifiers.map(ref => `${ref.db} ${ref.id}`).join(', ');
+}
+
+function groupClinvarSubmissions(submissions) {
+    const groups = new Map();
+    const reviewedByPanel = submission => /expert panel|practice guideline/i.test(submission.reviewStatus);
+    const ordered = [...submissions].sort((a, b) => Number(reviewedByPanel(b)) - Number(reviewedByPanel(a)));
+    for (const submission of ordered) {
+        // Keep the whole submitted condition set together. If the XML provides
+        // a mapped MedGen identifier, names that refer to it share a group.
+        const keys = submission.conditions.map(condition => {
+            const medgen = condition.identifiers.find(ref => ref.db === 'MedGen');
+            if (medgen) return `MedGen:${medgen.id}`;
+            const identifiers = condition.identifiers.map(ref => `${ref.db}:${ref.id}`).sort();
+            return identifiers[0] || `${condition.type}:${condition.name.toLowerCase()}`;
+        });
+        const labels = [...new Set(submission.conditions.map(clinvarConditionLabel).filter(Boolean))];
+        const conditionSet = [...new Set(keys)].sort();
+        const classifications = submission.classifications.length ? submission.classifications : [null];
+        for (const classification of classifications) {
+            const type = classification?.type || 'unclassified';
+            const key = JSON.stringify([type, conditionSet]);
+            if (!groups.has(key)) groups.set(key, { type, labels, entries: [] });
+            groups.get(key).entries.push({ submission, classification });
+        }
+    }
+    return groups.values();
+}
+
+function appendClinvarSubmission(parent, submission, classification) {
+    const participation = submission.contributesToAggregate === true ? 'Counts toward ClinVar aggregate'
+        : submission.contributesToAggregate === false ? 'Outside ClinVar aggregate' : '';
+    const label = [
+        submission.submitter || scvAccession(submission) || 'ClinVar submission',
+        classification?.description, classification?.lastEvaluated, participation
+    ].filter(Boolean).join(' · ');
+    const entry = appendEvidenceDetails(parent, label);
+    const accession = scvAccession(submission);
+    if (accession) {
+        const term = encodeURIComponent(`${submission.accession}[clv_acc]`);
+        appendEvidenceLink(entry, `ClinVar submission ${accession} ↗`, `https://www.ncbi.nlm.nih.gov/clinvar/?term=${term}`);
+    }
+    if (submission.reviewStatus) appendEvidenceText(entry, `Review status · ${submission.reviewStatus}`);
+    if (submission.assertionCriteria.length) appendEvidenceText(entry, `Assertion criteria · ${submission.assertionCriteria.join(' · ')}`);
+    if (submission.studyName) appendEvidenceText(entry, submission.studyName, 'evidence-heading');
+    if (submission.studyDescription) appendEvidenceText(entry, submission.studyDescription, 'evidence-comment');
+    const impact = [classification?.assertionType, classification?.clinSig, classification?.drugs].filter(Boolean);
+    if (impact.length) appendEvidenceText(entry, `Clinical impact · ${impact.join(' · ')}`);
+    for (const [heading, lines] of [
+        ['Classification rationale', submission.classificationComments],
+        ['Other submission comments', submission.submitterComments]
+    ]) {
+        if (!lines.length) continue;
+        appendEvidenceText(entry, heading, 'evidence-heading');
+        for (const line of lines) appendEvidenceText(entry, line, 'evidence-comment');
+    }
+    if (submission.observations.length) {
+        const observations = appendEvidenceDetails(entry, `Observations (${submission.observations.length})`);
+        for (const observation of submission.observations) {
+            const label = [observation.origin, ...observation.methodTypes].filter(Boolean).join(' · ');
+            if (label) appendEvidenceText(observations, label, 'evidence-heading');
+            const observedConditions = (observation.conditions ?? []).map(clinvarConditionLabel).filter(Boolean);
+            if (observedConditions.length) appendEvidenceText(observations, `Observed conditions · ${observedConditions.join(' · ')}`);
+            for (const item of observation.descriptions) {
+                appendEvidenceText(observations, [item.type, item.text, item.source].filter(Boolean).join(' · '), 'evidence-comment');
+            }
+            for (const comment of observation.comments) appendEvidenceText(observations, comment, 'evidence-comment');
+        }
+    }
+    for (const [scope, heading] of [
+        ['variant_evidence', 'Variant-evidence citations'],
+        ['assertion_method', 'Assertion-method citations'],
+        ['general', 'Other submission citations']
+    ]) {
+        const citations = submission.citations.filter(c => c.scope === scope && /^[1-9]\d{0,8}$/.test(c.pmid));
+        if (!citations.length) continue;
+        appendEvidenceText(entry, heading, 'evidence-heading');
+        const links = document.createElement('div');
+        links.className = 'evidence-links';
+        for (const { pmid } of citations) appendEvidenceLink(links, `PMID ${pmid} ↗`, `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`);
+        entry.appendChild(links);
+    }
+}
+
 function appendClinvarSubmissions(parent, record) {
     if (!Array.isArray(record.submissions)) {
         appendEvidenceText(parent, 'Submission evidence unavailable from the ClinVar proxy.');
@@ -4352,70 +4464,19 @@ function appendClinvarSubmissions(parent, record) {
         appendEvidenceText(details, 'ClinVar returned no individual submission records.');
         return;
     }
-    appendEvidenceText(details, 'Comments are the submitters’ interpretations. Each submission keeps its own classification and evidence.');
+    appendEvidenceText(details, 'Comments are the submitters’ interpretations. Aggregate participation comes from ClinVar.');
     const typeLabels = {
         germline: 'Germline pathogenicity', somatic: 'Somatic clinical impact', oncogenicity: 'Somatic oncogenicity',
         unclassified: 'Unclassified'
     };
-    const expert = s => /expert panel|practice guideline/i.test(s.reviewStatus);
-    const submissions = [...record.submissions].sort((a, b) => Number(expert(b)) - Number(expert(a)));
-    for (const submission of submissions) {
-        const classifications = submission.classifications.map(c =>
-            [typeLabels[c.type], c.description, c.lastEvaluated].filter(Boolean).join(' · '));
-        const label = [submission.submitter || scvAccession(submission) || 'ClinVar submission',
-            ...classifications].join(' — ');
-        const entry = appendEvidenceDetails(details, label);
-        const accession = scvAccession(submission);
-        if (accession) {
-            const term = encodeURIComponent(`${submission.accession}[clv_acc]`);
-            appendEvidenceLink(entry, `ClinVar submission ${accession} ↗`, `https://www.ncbi.nlm.nih.gov/clinvar/?term=${term}`);
-        }
-        if (submission.reviewStatus) appendEvidenceText(entry, `Review status · ${submission.reviewStatus}`);
-        if (submission.conditions.length) {
-            const conditions = submission.conditions.map(c => c.name || c.identifiers.map(ref => `${ref.db} ${ref.id}`).join(', '));
-            appendEvidenceText(entry, `Conditions · ${conditions.join('; ')}`);
-        }
-        if (submission.assertionCriteria.length) appendEvidenceText(entry, `Assertion criteria · ${submission.assertionCriteria.join('; ')}`);
-        if (submission.studyName) appendEvidenceText(entry, submission.studyName, 'evidence-heading');
-        if (submission.studyDescription) appendEvidenceText(entry, submission.studyDescription, 'evidence-comment');
-        for (const c of submission.classifications) {
-            const impact = [c.assertionType, c.clinSig, c.drugs].filter(Boolean);
-            if (impact.length) appendEvidenceText(entry, `Clinical impact · ${impact.join(' · ')}`);
-        }
-        for (const [heading, lines] of [
-            ['Classification rationale', submission.classificationComments],
-            ['Other submission comments', submission.submitterComments]
-        ]) {
-            if (!lines.length) continue;
-            appendEvidenceText(entry, heading, 'evidence-heading');
-            for (const line of lines) appendEvidenceText(entry, line, 'evidence-comment');
-        }
-        if (submission.observations.length) {
-            const observations = appendEvidenceDetails(entry, `Observations (${submission.observations.length})`);
-            for (const observation of submission.observations) {
-                const label = [observation.origin, ...observation.methodTypes].filter(Boolean).join(' · ');
-                if (label) appendEvidenceText(observations, label, 'evidence-heading');
-                const observedConditions = (observation.conditions ?? []).map(c => c.name || c.identifiers.map(ref => `${ref.db} ${ref.id}`).join(', '));
-                if (observedConditions.length) appendEvidenceText(observations, `Observed conditions · ${observedConditions.join('; ')}`);
-                for (const item of observation.descriptions) {
-                    appendEvidenceText(observations, [item.type, item.text, item.source].filter(Boolean).join(' · '), 'evidence-comment');
-                }
-                for (const comment of observation.comments) appendEvidenceText(observations, comment, 'evidence-comment');
-            }
-        }
-        for (const [scope, heading] of [
-            ['variant_evidence', 'Variant-evidence citations'],
-            ['assertion_method', 'Assertion-method citations'],
-            ['general', 'Other submission citations']
-        ]) {
-            const citations = submission.citations.filter(c => c.scope === scope && /^[1-9]\d{0,8}$/.test(c.pmid));
-            if (!citations.length) continue;
-            appendEvidenceText(entry, heading, 'evidence-heading');
-            const links = document.createElement('div');
-            links.className = 'evidence-links';
-            for (const { pmid } of citations) appendEvidenceLink(links, `PMID ${pmid} ↗`, `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`);
-            entry.appendChild(links);
-        }
+    for (const { type, labels, entries } of groupClinvarSubmissions(record.submissions)) {
+        const group = document.createElement('section');
+        group.className = 'clinvar-submission-group';
+        const heading = document.createElement('h4');
+        heading.textContent = `${typeLabels[type] || typeLabels.unclassified} — ${labels.join(' + ') || 'Condition unavailable'}`;
+        group.appendChild(heading);
+        for (const { submission, classification } of entries) appendClinvarSubmission(group, submission, classification);
+        details.appendChild(group);
     }
 }
 
@@ -7822,9 +7883,10 @@ function appendListOrEmpty(parent, values, emptyText) {
     values.forEach((value) => {
         const li = document.createElement('li');
         if (value && typeof value === 'object') {
-            const title = value.drug || value.nct_id || value.nctId || value.title || value.intervention || 'Item';
+            const title = value.drug || value.therapy || value.nct_id || value.nctId || value.title || value.intervention || 'Item';
             const bits = [
                 value.indication,
+                value.tumor_type,
                 value.biomarker_context,
                 value.phase,
                 value.intervention,
@@ -7853,6 +7915,38 @@ function appendListOrEmpty(parent, values, emptyText) {
     parent.appendChild(ul);
 }
 
+function appendAiReviewAssessments(parent, review) {
+    const germline = review?.germline_pathogenicity;
+    const somatic = review?.somatic_oncogenicity;
+    const clinical = review?.clinical_significance;
+    const clinicalLabel = clinical?.tier
+        ? [clinical.tier, clinical.evidence_level && `Level ${clinical.evidence_level}`].filter(Boolean).join(' · ')
+        : clinical?.status === 'insufficient_disease_context' ? 'Insufficient disease context' : 'Insufficient evidence';
+    const assessments = germline || somatic || clinical ? [
+        ['Germline pathogenicity', germline?.classification, germline?.condition, germline?.rationale],
+        ['Somatic oncogenicity', somatic?.classification, '', somatic?.rationale],
+        ['Tumor-specific clinical significance', clinicalLabel, clinical?.tumor_type, clinical?.rationale]
+    ] : [
+        ['Pathogenicity (legacy review)', review?.pathogenicity],
+        ['Clinical significance (legacy review)', review?.amp_tier, '', review?.amp_tier_rationale]
+    ];
+    const sections = document.createElement('dl');
+    sections.className = 'ai-review-assessments';
+    for (const [label, result, condition, rationale] of assessments) {
+        const section = document.createElement('div');
+        const title = document.createElement('dt');
+        title.textContent = label;
+        const details = document.createElement('dd');
+        const value = document.createElement('strong');
+        value.textContent = [result || 'Insufficient evidence', condition].filter(Boolean).join(' · ');
+        details.appendChild(value);
+        if (rationale) appendEvidenceText(details, rationale);
+        section.append(title, details);
+        sections.appendChild(section);
+    }
+    parent.appendChild(sections);
+}
+
 function renderAiReview(review, targetEl) {
     targetEl.innerHTML = '';
     const disclaimer = document.createElement('div');
@@ -7860,32 +7954,22 @@ function renderAiReview(review, targetEl) {
     disclaimer.textContent = 'AI-generated research summary only. Verify with current FDA labeling, guidelines, curated databases, and trial eligibility criteria before any clinical use.';
     targetEl.appendChild(disclaimer);
 
-    const badges = document.createElement('div');
-    badges.className = 'ai-review-badges';
-    [['Pathogenicity', review?.pathogenicity], ['AMP Tier', review?.amp_tier]].forEach(([label, value]) => {
-        const badge = document.createElement('span');
-        badge.className = 'ai-review-badge';
-        badge.textContent = `${label}: ${value || 'Not provided'}`;
-        badges.appendChild(badge);
-    });
-    targetEl.appendChild(badges);
+    appendAiReviewAssessments(targetEl, review);
 
     const summary = document.createElement('p');
     summary.className = 'ai-review-summary';
     summary.textContent = review?.summary || 'No AI summary returned.';
     targetEl.appendChild(summary);
 
-    if (review?.amp_tier_rationale) {
-        const rationale = document.createElement('p');
-        rationale.className = 'ai-review-rationale';
-        rationale.textContent = `AMP tier rationale: ${review.amp_tier_rationale}`;
-        targetEl.appendChild(rationale);
-    }
-
     const therapiesTitle = document.createElement('h4');
     therapiesTitle.textContent = 'FDA-approved therapies';
     targetEl.appendChild(therapiesTitle);
     appendListOrEmpty(targetEl, review?.fda_approved_therapies, 'No FDA-approved therapies were returned by the AI review for this context.');
+
+    const resistanceTitle = document.createElement('h4');
+    resistanceTitle.textContent = 'Resistance or lack of benefit';
+    targetEl.appendChild(resistanceTitle);
+    appendListOrEmpty(targetEl, review?.resistance_or_lack_of_benefit, 'No supported resistance findings in this review.');
 
     const trialsTitle = document.createElement('h4');
     trialsTitle.textContent = 'Clinical trials';
@@ -14641,7 +14725,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         formatProteinDisplayWithSingleLetter, parseProteinResidueRange,
         // ClinVar matching + display
         complementBase, normalizeCdnaForMatch, findExactClinvarRegionMatch,
-        parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars,
+        parseProteinChange, sameProteinChange, proteinSearchTerm, normalizeProteinSubstitution, clinvarReviewStars, groupClinvarSubmissions,
         isSingleBaseChange, typedResidueX, proteinNameReading, distinctAlleleSpellings, maneSelectForLabel, rankAllelesOnRecord,
         settledNameAlternatives, recoderRespelling, codingIndelSize, namesakesGivenRows,
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,

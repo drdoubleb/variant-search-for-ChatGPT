@@ -19,14 +19,13 @@ import { CORE_GUIDANCE, SELF_CHECK, CONTEXT_BLOCK } from './_ai-review-prompt-co
 
 const OUTPUT_FORMAT = `Output format:
 
-Return ONLY valid JSON matching this schema; do not wrap it in markdown:
+Return ONLY valid JSON matching this schema.
 
 {{SCHEMA_JSON}}
 
-- Use one of the exact pathogenicity strings listed above as the value of "pathogenicity", and one of the exact AMP tier strings as the value of "amp_tier".
-- "amp_tier_rationale" is a brief rationale covering the tumor-type considerations and the evidence level supporting the selected tier.
-- "fda_approved_therapies", "resistance_or_lack_of_benefit", and "clinical_trials" are arrays. Where the interpretation rules above say to state plainly that nothing was identified, return an empty array for that field instead and explain in "summary" or "limitations".
-- "summary" is a brief string; "limitations" is an array of brief strings.`;
+- Give a classification and rationale for each germline and somatic assessment. Use the listed classification or status strings exactly.
+- For clinical significance, repeat the submitted tumor type. Use null for an absent tumor type, an unassigned tier, or an unassigned evidence level. For an assessed Tier I or II, give the matching evidence level and rationale.
+- Use an empty array when the evidence supports no approved therapies, resistance findings, or relevant trials. Explain missing evidence in the summary or limitations where applicable.`;
 
 // Repeated AFTER the context payload, because that payload can run to hundreds of
 // thousands of tokens — without this, the output-format instruction is buried far
@@ -36,7 +35,7 @@ Return ONLY valid JSON matching this schema; do not wrap it in markdown:
 // thing the model read. Making the self-check format-neutral removed that, so the
 // JSON reminder is restated here explicitly.
 const FINAL_REMINDER = `Reminder — output format for this response:
-Return the entire response as a single valid JSON object matching the schema given above, with the keys pathogenicity, amp_tier, amp_tier_rationale, fda_approved_therapies, resistance_or_lack_of_benefit, clinical_trials, summary, and limitations.
+Return the entire response as a single valid JSON object matching the schema given above, with the keys germline_pathogenicity, somatic_oncogenicity, clinical_significance, fda_approved_therapies, resistance_or_lack_of_benefit, clinical_trials, summary, and limitations.
 Output nothing before or after the JSON object: no preamble, no explanation, no markdown code fences.
 Close every array and object. Keep the content concise so the response completes within the token limit rather than being cut off mid-array.`;
 

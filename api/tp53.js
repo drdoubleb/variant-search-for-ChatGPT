@@ -1,3 +1,5 @@
+import { tp53AssayComparison } from './_tp53-assays.js';
+
 // Last-resort fallback URLs (release r21, Jan 2025). Discovery (below) normally
 // supplies the current release; these are used only if the download page can't be
 // reached or parsed. The view_data?bq_view_name=* URLs render HTML, not CSV — the
@@ -646,6 +648,7 @@ export default async function handler(req, res) {
       omitted_match_count: matches.length - top.length,
       selection: { status, match_type: candidates[0]?.match_type ?? null, candidate_count: candidates.length },
       functional_sources: FUNCTIONAL_SOURCES,
+      assay_comparison: tp53AssayComparison(toProteinCompact(best ? best.protein : body.protein), best?.transcript_hgvs),
       dataset_stale: Boolean(staleSince),
       pathogenicity: pathogenicitySummary,
       classification: best?.exon_intron || '',

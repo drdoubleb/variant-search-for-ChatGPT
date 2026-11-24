@@ -34,6 +34,13 @@ try {
     assert.equal(exact.pathogenicity.splice_ai.DS_AL, '0');
     assert.equal(exact.pathogenicity.ta_targets.NOXA, '78.2');
     assert.match(exact.functional_sources.structure_prediction.method, /Delaunay.*trained on the Kato/);
+    const [kato, giacomelli, kotler] = exact.assay_comparison.studies;
+    assert.equal(kato.measurements[0].value, 40.6);
+    assert.equal(giacomelli.scope, 'protein');
+    assert.equal(giacomelli.measurements[0].value, 0.7432024599950522);
+    assert.equal(kotler.scope, 'coding_construct');
+    assert.match(kotler.variant, /c\.709A>T.*302465/);
+    assert.equal(kotler.measurements[0].value, -1.666323792);
     const otherLeu = exact.matches.find(m => m.mut_id === '3080');
     assert.equal(otherLeu.match_type, 'same_protein');
     assert.equal(otherLeu.somatic_count, '2');
@@ -47,6 +54,10 @@ try {
     const exactC = await query({ protein, genomic_allele: { ...g37, alt: 'G' } });
     assert.equal(exactC.pathogenicity.somatic_count, '2');
     assert.equal(exactC.matches[0].mut_id, '3080');
+    assert.match(exactC.assay_comparison.studies.at(-1).variant, /c\.709A>C.*302463/);
+    assert.equal(exactC.assay_comparison.studies.at(-1).measurements[0].value, -1.779194794);
+    assert.ok((await query({ protein })).assay_comparison.studies.every(study => study.scope === 'protein'));
+    assert.equal((await query({ protein, genomic_allele: { ...g37, alt: 'C' } })).assay_comparison, null);
     const conflicting = await query({ protein, cdna, genomic_allele: { ...g37, ref: 'C' } });
     assert.equal(conflicting.selection.status, 'related_only');
     assert.equal(conflicting.pathogenicity, null);
@@ -77,6 +88,7 @@ try {
     assert.equal(ambiguous.match_count, 2);
     assert.equal(ambiguous.pathogenicity, null);
     assert.equal(ambiguous.prevalence, '');
+    assert.ok(ambiguous.assay_comparison.studies.every(study => study.scope === 'protein'));
     assert.equal(ambiguous.matches.filter(m => m.match_type === 'exact_genomic').length, 2);
 } finally {
     globalThis.fetch = originalFetch;

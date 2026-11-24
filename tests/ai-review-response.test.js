@@ -39,12 +39,14 @@ const mkReq = () => ({
     }
 });
 
-async function callWith(payload) {
+async function callWith(payload, tumorType) {
     const realFetch = global.fetch;
     global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(payload) });
     try {
         const res = mkRes();
-        await handler(mkReq(), res);
+        const req = mkReq();
+        if (tumorType) req.body.context.tumor_type = tumorType;
+        await handler(req, res);
         return res;
     } finally {
         global.fetch = realFetch;
@@ -83,12 +85,37 @@ check('malformed response is readable', /incomplete or malformed/.test(malformed
 check('malformed response does not leak a parser message', !/position \d+/.test(malformed.body.error));
 
 // The happy path still works, including JSON wrapped in stray prose.
-const ok = await callWith({ choices: [{ finish_reason: 'stop', message: { content: '{"pathogenicity":"Pathogenic","amp_tier":"Tier IA"}' } }] });
+const mockGermline = { germline_pathogenicity: { classification: 'Pathogenic', condition: 'Example syndrome', rationale: 'Germline fixture' } };
+const mockReview = {
+    ...mockGermline,
+    somatic_oncogenicity: { classification: 'Likely oncogenic', rationale: 'Somatic fixture' },
+    clinical_significance: { status: 'assessed', tumor_type: 'Example tumor', tier: 'Tier III', evidence_level: null, rationale: 'Clinical evidence fixture' }
+};
+const wrapped = review => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(review) } }] });
+const ok = await callWith(wrapped(mockReview), 'Example tumor');
 check('valid JSON returns 200', ok.code === 200);
-check('valid JSON is parsed', ok.body.review.pathogenicity === 'Pathogenic');
+check('the germline and somatic assessments stay independent', ok.body.review.pathogenicity === 'Pathogenic'
+    && ok.body.review.germline_pathogenicity.condition === 'Example syndrome'
+    && ok.body.review.somatic_oncogenicity.classification === 'Likely oncogenic');
+check('an oncogenic finding can have Tier III clinical significance', ok.body.review.clinical_significance.tier === 'Tier III'
+    && ok.body.review.amp_tier === 'Tier III');
 
-const fenced = await callWith({ choices: [{ finish_reason: 'stop', message: { content: 'Here you go:\n```json\n{"pathogenicity":"Benign"}\n```' } }] });
+const fenced = await callWith({ choices: [{ finish_reason: 'stop', message: { content: 'Here you go:\n```json\n{"germline_pathogenicity":{"classification":"Benign"}}\n```' } }] });
 check('JSON wrapped in prose/fences is recovered', fenced.code === 200 && fenced.body.review.pathogenicity === 'Benign');
+
+const noTumor = await callWith(wrapped({ ...mockReview, amp_tier: 'Tier IA' }));
+check('a missing tumor type suppresses even a supplied model tier', noTumor.body.review.clinical_significance.status === 'insufficient_disease_context'
+    && noTumor.body.review.clinical_significance.tier === null && noTumor.body.review.amp_tier === 'Insufficient disease context');
+const otherTumor = await callWith(wrapped(mockReview), 'Different tumor');
+check('a model assessment for a different tumor stays unassigned', otherTumor.body.review.clinical_significance.tier === null);
+const one = { ...mockReview, clinical_significance: { ...mockReview.clinical_significance, tier: 'Tier I', evidence_level: 'A' } };
+const supported = await callWith(wrapped(one), 'Example tumor');
+check('a supported tier keeps its evidence level and compatibility field', supported.body.review.clinical_significance.tier === 'Tier I'
+    && supported.body.review.amp_tier === 'Tier IA');
+one.clinical_significance.evidence_level = 'D';
+const incompatible = await callWith(wrapped(one), 'Example tumor');
+check('incompatible tier and evidence level stay unassigned', incompatible.body.review.clinical_significance.status === 'insufficient_evidence'
+    && incompatible.body.review.clinical_significance.tier === null);
 
 console.log(`\nAI-review response tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
