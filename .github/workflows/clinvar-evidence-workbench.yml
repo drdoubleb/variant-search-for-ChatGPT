@@ -14,15 +14,18 @@ jobs:
         with:
           ref: 36ee3a540beb88f4a1d05a04ea0aef461fb74999
           persist-credentials: false
-      - name: Package source and retrieve public reference fixtures
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned parser and test dependencies
         run: |
-          mkdir -p /tmp/evidence-workbench/live
-          git archive --format=tar HEAD > /tmp/evidence-workbench/source.tar
-          curl --fail --retry 2 --max-time 60 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=clinvar&rettype=vcv&is_variationid&id=2774649,142714,127821,375941' -o /tmp/evidence-workbench/live/clinvar.xml || echo 'ClinVar fetch unavailable'
-          curl --fail --retry 2 --max-time 60 'https://tp53.cancer.gov/static/data/MutationView_r21.csv' -o /tmp/evidence-workbench/live/tp53.csv || echo 'TP53 fetch unavailable'
-          curl --fail --retry 2 --max-time 60 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&retmode=xml&id=12826609,30224644,29979965' -o /tmp/evidence-workbench/live/pubmed.xml || echo 'PubMed fetch unavailable'
+          npm ci --ignore-scripts
+          npm install --save-exact --ignore-scripts fast-xml-parser@5.12.1
+          mkdir -p /tmp/evidence-dependencies
+          tar -czf /tmp/evidence-dependencies/dependencies.tar.gz node_modules package.json package-lock.json
+          npm audit --omit=dev --audit-level=high
       - uses: actions/upload-artifact@v4
         with:
-          name: clinvar-evidence-source-fixtures
-          path: /tmp/evidence-workbench
+          name: clinvar-evidence-dependencies
+          path: /tmp/evidence-dependencies
           retention-days: 1
