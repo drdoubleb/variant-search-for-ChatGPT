@@ -2,47 +2,72 @@
 // The browser cannot call eutils.ncbi.nlm.nih.gov directly due to CORS;
 // this function runs server-side and forwards the response.
 //
-// GET /api/pubmed?term=BRAF+V600E&limit=5
+// GET /api/pubmed?term=BRAF+V600E&limit=5 or /api/pubmed?pmids=12826609,30224644
 //
 // Optional env var: NCBI_API_KEY — increases rate limit from 3 to 10 req/s.
 
 import { ncbiFetchJson, ncbiFetchResponse } from './_ncbi.js';
 import { boundedQueryText, positiveQueryInteger } from './_input.js';
+import { attribute, child, children, childText, parseXml, text } from './_eutils-xml.js';
+import { rejectDisallowedOrigin } from './_origin.js';
+import { setEdgeCache, setNoStore } from './_cache.js';
 
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
+const MAX_EXPLICIT_PMIDS = 20;
+const PMID_PATTERN = /^[1-9]\d{0,8}$/;
 
 async function ncbiFetch(url) {
     return ncbiFetchJson(url);
 }
 
-async function ncbiFetchText(url) {
-    const res = await ncbiFetchResponse(url, { accept: 'text/xml,application/xml' });
-    return res.text();
+function parseExplicitPmids(input) {
+    const query = boundedQueryText(input, MAX_EXPLICIT_PMIDS * 10 - 1);
+    if (!query) return null;
+    const ids = query.split(',').map(id => id.trim());
+    if (ids.length > MAX_EXPLICIT_PMIDS || ids.some(id => !PMID_PATTERN.test(id))) return null;
+    return [...new Set(ids)];
 }
 
-function parseAbstractsFromXml(xmlText) {
-    const abstracts = {};
-    const articles = xmlText.split(/<PubmedArticle[\s>]/);
-    for (const art of articles) {
-        const pmidMatch = art.match(/<PMID[^>]*>(\d+)<\/PMID>/);
-        if (!pmidMatch) continue;
-        const pmid = pmidMatch[1];
-        const textParts = [];
-        const regex = /<AbstractText[^>]*>([\s\S]*?)<\/AbstractText>/g;
-        let m;
-        while ((m = regex.exec(art)) !== null) {
-            const text = m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-            if (text) textParts.push(text);
-        }
-        if (textParts.length > 0) {
-            abstracts[pmid] = textParts.join(' ');
-        }
+export function parsePubmedRecords(xml) {
+    const root = parseXml(xml, { allowPubMedDoctype: true });
+    if (root.name !== 'PubmedArticleSet' || child(root, 'ERROR') || child(root, 'Error')) {
+        throw new Error('PubMed did not return an article set');
     }
-    return abstracts;
+    const records = new Map();
+    for (const node of root.children) {
+        const citation = child(node, 'MedlineCitation') || child(node, 'BookDocument');
+        const pmid = childText(citation, 'PMID');
+        if (!PMID_PATTERN.test(pmid)) continue;
+        const article = child(citation, 'Article') || citation;
+        const journal = child(article, 'Journal');
+        const book = child(article, 'Book');
+        const pubDate = child(child(journal, 'JournalIssue'), 'PubDate') || child(book, 'PubDate');
+        const year = childText(pubDate, 'Year') || childText(pubDate, 'MedlineDate').match(/^\d{4}/)?.[0] || '';
+        const authorList = child(article, 'AuthorList');
+        const authors = children(authorList, 'Author').map(author =>
+            childText(author, 'CollectiveName') || [childText(author, 'LastName'), childText(author, 'Initials')].filter(Boolean).join(' '));
+        const paragraphs = children(child(article, 'Abstract'), 'AbstractText').flatMap(paragraph => {
+            const content = text(paragraph).replace(/\s+/g, ' ');
+            const label = attribute(paragraph, 'Label');
+            return content ? [label ? `${label}: ${content}` : content] : [];
+        });
+        records.set(pmid, {
+            pmid,
+            title: childText(article, 'ArticleTitle') || childText(book, 'BookTitle'),
+            authors: formatAuthors(authors),
+            journal: childText(journal, 'ISOAbbreviation') || childText(journal, 'Title') || childText(book, 'BookTitle'),
+            year,
+            abstract: paragraphs.join('\n')
+        });
+    }
+    return records;
 }
 
-import { rejectDisallowedOrigin } from './_origin.js';
-import { setEdgeCache, setNoStore } from './_cache.js';
+async function fetchPubmedRecords(ids, apiKey) {
+    const url = `${EUTILS_BASE}/efetch.fcgi?db=pubmed&retmode=xml&id=${ids.join(',')}${apiKey}`;
+    const res = await ncbiFetchResponse(url, { accept: 'text/xml,application/xml' });
+    return parsePubmedRecords(await res.text());
+}
 
 // ── LitVar2 / PubTator3 variant-normalized literature ──────────────────────
 //
@@ -100,12 +125,13 @@ async function pubtatorVariantSearch({ gene, variant, extra, maxResults, apiKey 
     };
 
     const ids = results.map((r) => String(r.pmid)).filter((id) => /^\d+$/.test(id));
-    let abstracts = {};
+    let records = new Map();
+    let abstractsUnavailable = false;
     if (ids.length > 0) {
         try {
-            const fetchUrl = `${EUTILS_BASE}/efetch.fcgi?db=pubmed&rettype=xml&retmode=xml&id=${ids.join(',')}${apiKey}`;
-            abstracts = parseAbstractsFromXml(await ncbiFetchText(fetchUrl));
+            records = await fetchPubmedRecords(ids, apiKey);
         } catch (e) {
+            abstractsUnavailable = true;
             console.warn('PubMed abstract fetch failed (litvar path):', e.message);
         }
     }
@@ -116,9 +142,9 @@ async function pubtatorVariantSearch({ gene, variant, extra, maxResults, apiKey 
         authors: formatAuthors(r.authors),
         journal: r.journal || '',
         year: r.date ? String(r.date).slice(0, 4) : '',
-        abstract: abstracts[String(r.pmid)] || ''
+        abstract: records.get(String(r.pmid))?.abstract || ''
     }));
-    return { total: Number(searchData?.count) || articles.length, articles, litvar };
+    return { total: Number(searchData?.count) || articles.length, articles, litvar, abstractsUnavailable };
 }
 
 // PubMed does not fail on a phrase it has never indexed: it drops the phrase and
@@ -164,6 +190,25 @@ export default async function handler(req, res) {
     const variant = query.variant === undefined ? '' : boundedQueryText(query.variant, 128);
     const extra = query.extra === undefined ? '' : boundedQueryText(query.extra, 256);
     const limit = positiveQueryInteger(query.limit === undefined ? '5' : query.limit, 100000);
+    if (query.pmids !== undefined) {
+        const ids = parseExplicitPmids(query.pmids);
+        if (!ids || ['term', 'gene', 'variant', 'extra'].some(key => query[key] !== undefined)) {
+            return res.status(400).json({ error: `Supply 1 to ${MAX_EXPLICIT_PMIDS} comma-separated numeric PMIDs without search parameters` });
+        }
+        try {
+            const apiKey = process.env.NCBI_API_KEY ? `&api_key=${encodeURIComponent(process.env.NCBI_API_KEY)}` : '';
+            const records = await fetchPubmedRecords(ids, apiKey);
+            const articles = ids.filter(id => records.has(id)).map(id => records.get(id));
+            const missingPmids = ids.filter(id => !records.has(id));
+            if (missingPmids.length) setNoStore(res);
+            else setEdgeCache(res, 21600);
+            return res.status(200).json({ backend: 'pmid', total: articles.length, articles, missingPmids });
+        } catch (err) {
+            setNoStore(res);
+            console.warn('PubMed PMID lookup failed:', err.message);
+            return res.status(502).json({ error: 'PubMed PMID lookup failed' });
+        }
+    }
     if (term === null || gene === null || variant === null || extra === null || limit === null) {
         return res.status(400).json({ error: 'Invalid or oversized PubMed query parameter' });
     }
@@ -184,7 +229,10 @@ export default async function handler(req, res) {
     if (String(variant).trim()) {
         try {
             const lv = await pubtatorVariantSearch({ gene, variant, extra, maxResults, apiKey });
-            if (lv) return res.status(200).json({ ...lv, backend: 'litvar' });
+            if (lv) {
+                if (lv.abstractsUnavailable) setNoStore(res);
+                return res.status(200).json({ ...lv, backend: 'litvar' });
+            }
         } catch (e) {
             console.warn('PubTator3 variant search failed; falling back to term search:', e.message);
         }
@@ -212,12 +260,13 @@ export default async function handler(req, res) {
         const sumData = await ncbiFetch(sumUrl);
 
         // Step 3: efetch — get article abstracts (XML)
-        let abstracts = {};
+        let records = new Map();
+        let abstractsUnavailable = false;
         try {
-            const fetchUrl = `${EUTILS_BASE}/efetch.fcgi?db=pubmed&rettype=xml&retmode=xml&id=${ids.join(',')}${apiKey}`;
-            const fetchXml = await ncbiFetchText(fetchUrl);
-            abstracts = parseAbstractsFromXml(fetchXml);
+            records = await fetchPubmedRecords(ids, apiKey);
         } catch (e) {
+            abstractsUnavailable = true;
+            setNoStore(res);
             console.warn('PubMed abstract fetch failed:', e.message);
         }
 
@@ -235,11 +284,11 @@ export default async function handler(req, res) {
                 authors,
                 journal: rec.source || '',
                 year,
-                abstract: abstracts[id] || ''
+                abstract: records.get(String(id))?.abstract || ''
             };
         });
 
-        return res.status(200).json({ total, articles, backend: 'term' });
+        return res.status(200).json({ total, articles, backend: 'term', abstractsUnavailable });
     } catch (err) {
         setNoStore(res); // transient failure — never pin it in the CDN
         console.error('PubMed proxy error:', err);

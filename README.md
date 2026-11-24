@@ -1085,41 +1085,30 @@ reads "…did not respond. This is an upstream outage, not necessarily a problem
 with your variant — please retry in a moment" rather than blaming the
 coordinate.
 
+## ClinVar submissions and cited literature
+
+`GET /api/clinvar-variant?id=2774649` returns the existing germline, somatic clinical-impact, oncogenicity, and per-condition somatic fields. It also returns the VCV accession and retrieval metadata under `record` and individual SCVs under `submissions`. Each SCV retains its submitter, classification type, condition, criteria, evaluation date, and comments. PubMed IDs retain the SCV and XML location that supplied them. Citations from the classification or observation can contribute to the variant literature lookup. The assertion-method and general citations remain available with the submission. [ClinVar VCV schema](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/xsd_public/ClinVar_VCV_2.6.xsd)
+
+The ClinVar card displays the SCVs under **Submission evidence**. The PubMed card adds cited papers in its variant panel. `GET /api/pubmed?pmids=12826609,30224644` accepts up to 20 comma-separated PMIDs in a separate lookup mode. The card reuses variant-search records and requests missing metadata for up to 40 distinct cited PMIDs per lookup. It reports unavailable or omitted metadata and retains the original citation links. Both AI actions reuse the same data regardless of which sections are open.
+
+The regression case is TP53 `NM_000546.6:c.709A>T` (p.Met237Leu), VCV002774649. The Color Health submission describes different results from yeast transactivation, human-cell growth suppression, and proliferation assays. Its wording and citations are preserved as a submitter interpretation. [ClinVar record](https://www.ncbi.nlm.nih.gov/clinvar/variation/2774649/)
+
 ## TP53 backend (Vercel)
 
-This repo now includes a serverless endpoint at `api/tp53.js` for TP53 mutation database lookups.
-
-### Endpoint
-
-- `POST /api/tp53`
-- JSON payload:
+`POST /api/tp53` accepts a versioned transcript change and a genomic allele with an assembly. This example queries M237L in GRCh37.
 
 ```json
 {
   "gene": "TP53",
-  "protein": "p.R175H",
-  "cdna": "c.524G>A",
-  "genomic": "chr17:g.7673803C>T"
+  "protein": "p.Met237Leu",
+  "cdna": "NM_000546.6:c.709A>T",
+  "genomic_allele": { "assembly": "GRCh37", "chrom": "17", "pos": 7577572, "ref": "T", "alt": "A" }
 }
 ```
 
-### Response (example)
+A versioned genomic HGVS such as `NC_000017.10:g.7577572T>A` also carries the assembly. A chromosome-based HGVS requires the separate `assembly` field. MutationView often omits reference bases for indels. Those rows can match through an exact versioned cDNA change. The coding sequences of NM_000546.5 and NM_000546.6 are identical across 1,182 bases, so those versions are compatible for coding SNVs. Other transcript versions require exact agreement. [NM_000546.5](https://www.ncbi.nlm.nih.gov/nuccore/NM_000546.5), [NM_000546.6](https://www.ncbi.nlm.nih.gov/nuccore/NM_000546.6)
 
-The API returns:
-- `match_count`
-- `classification`
-- `prevalence`
-- `matches` (top matched rows)
-- `dataset_url` used by the proxy
-- optional `debug` object (when `debug: true` is passed in the request payload)
-
-Protein matching normalizes HGVS three-letter amino-acid notation to single-letter
-notation (for example `p.Arg273His` → `R273H`) before scoring. A row scores on an
-**exact** protein token match, an exact cDNA substring, or an exact genomic position;
-same-codon variants (e.g. `R175C` when you queried `R175H`) are surfaced in `matches`
-for context (flagged `same_codon_match: true`) but do not count toward `match_count`
-(they are reported separately as `related_codon_count`) and never drive the
-pathogenicity summary.
+The response reports `selection`, `matches` with match types, and `omitted_match_count`. A unique exact record supplies the allele-specific summary, including occurrence counts and splice predictions. Same-protein, same-codon and coordinate matches provide context. Multiple exact candidates produce an ambiguous selection. The TP53 card shows Kato's yeast reporter activity as percent of wild type and labels the separate Mathe structure-based computational prediction. The latter was trained on Kato's data. [NCI TP53 data dictionary](https://tp53.cancer.gov/help), [structure-based method](https://tp53.cancer.gov/dt_method)
 
 ### Dataset source links
 
@@ -1176,7 +1165,7 @@ The endpoint prompts OpenRouter for strict JSON containing pathogenicity, specif
 The proxy protects the owner's `OPENROUTER_API_KEY` from being drained by anonymous callers. Every layer is **graceful** — it stays off until its environment variables are set, so the site keeps working before you provision anything:
 
 - **Function duration:** `vercel.json` sets `maxDuration` 300s for `api/ai-review.js` (the Hobby-plan ceiling with Fluid Compute enabled) and the handler aborts the OpenRouter call at 290s, so slow models on large contexts return this handler's own error rather than a platform timeout.
-- **Per-request caps (always on):** the completion is capped at `max_tokens` 8000, the context is clamped to 1,500,000 chars, user notes to 4,000 chars, and request bodies over ~4 MB (just under Vercel's serverless request-body ceiling) are rejected with `413`. These bound the cost of any single call. The context clamp is generous because rich genes assemble very large payloads (e.g. HER2/ERBB2 amplification ≈ 957 KB, almost all openFDA label text). To keep such payloads under the ceiling, the frontend caps the openFDA **record count** (first 40) for the AI query while keeping each record's **full** `indications_and_usage` text; when records are dropped, an `openfda_records_truncated` note is added to the context so the model knows the list was capped. Large contexts may still exceed some models' windows — prefer a large-window model.
+- **Per-request caps (always on):** the completion is capped at `max_tokens` 8000, the serialized context is capped at 1,500,000 characters, user notes to 4,000 chars, and request bodies over ~4 MB (just under Vercel's serverless request-body ceiling) are rejected with `413`. These bound the cost of any single call. The context clamp is generous because rich genes assemble very large payloads (e.g. HER2/ERBB2 amplification ≈ 957 KB, almost all openFDA label text). To keep such payloads under the ceiling, the frontend caps the openFDA **record count** (first 40) for the AI query while keeping each record's **full** `indications_and_usage` text; when records are dropped, an `openfda_records_truncated` note is added to the context so the model knows the list was capped. If the serialized context still exceeds the cap, the proxy first removes whole openFDA label records and reports the number omitted. It returns a size error if the remaining context is too large to include intact. Large contexts may still exceed some models' windows.
 - **Origin allowlist:** browser requests are restricted to the live site plus test hosts. Defaults: `https://drdoubleb.com`, `https://www.drdoubleb.com`, `https://variant-search-for-chat-gpt.vercel.app`, and this project's own previews (`variant-search-for-chat-gpt-*.vercel.app`) — a bare `*.vercel.app` was previously allowed, which admitted *anyone's* Vercel deployment. Override with `AI_ALLOWED_ORIGINS` (comma-separated; entries may embed `*` wildcards that match within one DNS label; a bare `*` disables the check). Requests with no `Origin` header (curl, server-to-server) are allowed through to the other layers.
 - **Cloudflare Turnstile:** set `TURNSTILE_SECRET_KEY` to require a bot-challenge token (`turnstile_token` in the body) on owner-key requests. Unset → skipped.
 - **Rate limiting (Upstash Redis):** set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` to enable per-IP and a global daily circuit breaker. Defaults: `AI_RL_IP_PER_MIN` 12, `AI_RL_IP_PER_DAY` 120, `AI_RL_GLOBAL_PER_DAY` 1500. On limit, returns `429` (per-IP) or `503` (global daily) with a `Retry-After` header. Unset → skipped.
@@ -1224,7 +1213,7 @@ Earlier versions used one JSON template plus a trailing "disregard the JSON inst
 
 Rate limiting uses [`@upstash/ratelimit`](https://github.com/upstash/ratelimit-js) and `@upstash/redis` (declared in `package.json`). They are imported lazily and only when the `UPSTASH_*` env vars are present, so deployments that don't enable rate limiting don't need them at runtime.
 
-The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV/nearby-variant results, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
+The AI review payload also includes a `supplemental_card_data` object populated from live card lookups when available, including direct ClinVar VCV and SCV evidence, nearby-variant results, ClinVar-cited PubMed publications, CIViC API assertions, gnomAD v4, SpliceAI Lookup scores, PubMed article previews, COSMIC extended data, and the TP53 mutation database for TP53 variants.
 
 
 ## What a protein change is searched as

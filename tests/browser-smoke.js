@@ -17,6 +17,7 @@
 // Where Playwright is installed outside the repo (that sandbox keeps it in
 // /opt/node-tools), say where: NODE_PATH=/opt/node-tools/node_modules node …
 import { createRequire } from 'node:module';
+import { runEvidenceSmoke } from './support/browser-evidence.js';
 
 // package.json declares "type": "module", so this file is an ES module and a
 // bare `require` is a ReferenceError — the script could not start at all.
@@ -252,6 +253,7 @@ async function installRoutes(page) {
         await page.close();
     }
 
+    await runEvidenceSmoke(newPage, BASE, check);
     await browser.close();
     check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | ').slice(0, 400));
     console.log(results.join('\n'));

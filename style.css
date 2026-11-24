@@ -505,6 +505,49 @@ footer a:hover {
     color: #555;
 }
 
+.evidence-details,
+.evidence-note,
+.evidence-heading,
+.evidence-comment,
+.pubmed-article {
+    font-size: 0.84rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+.evidence-details {
+    margin-inline-start: 0;
+    padding: 0.35rem 0.5rem;
+    border-inline-start: 2px solid #e2e8f0;
+}
+.card-content .evidence-details > summary {
+    padding-block: 0.2rem;
+}
+.evidence-note,
+.evidence-heading,
+.evidence-comment {
+    margin: 0.3rem 0;
+}
+.evidence-note {
+    color: #4b5563;
+}
+.evidence-heading {
+    font-weight: 600;
+}
+.evidence-comment {
+    white-space: pre-wrap;
+}
+.evidence-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.75rem;
+}
+.pubmed-article {
+    padding: 0.45rem 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+.pubmed-article > a {
+    font-weight: 600;
+}
 
 
 .card[data-card="variant"] {

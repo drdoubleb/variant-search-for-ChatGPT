@@ -52,6 +52,34 @@ async function discoverDatasetUrls() {
 
 const CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
 const MAX_RESPONSE_MATCHES = 5;
+const GENOMIC_COLUMNS = {
+  GRCh37: { accession: 'NC_000017.10', hgvs: 'hgvshg19', description: 'gdescription', coordinate: 'hg19chr17coordinates' },
+  GRCh38: { accession: 'NC_000017.11', hgvs: 'hgvshg38', description: 'gdescriptiongrch38', coordinate: 'hg38chr17coordinates' }
+};
+const MATCH_RANK = { exact_genomic: 5, exact_cdna: 4, same_protein: 3, same_codon: 2, coordinate_only: 1 };
+const FUNCTIONAL_SOURCES = {
+  transactivation: {
+    name: 'Kato et al. (2003)',
+    method: 'Yeast reporter assays on eight p53-responsive promoters',
+    units: '% of wild-type activity',
+    url: 'https://pubmed.ncbi.nlm.nih.gov/12826609/'
+  },
+  cellular_dne_lof: {
+    name: 'Giacomelli et al. (2018)',
+    method: 'NCI TP53 Database classification of cellular growth-suppression and dominant-negative activity',
+    url: 'https://pubmed.ncbi.nlm.nih.gov/30224644/'
+  },
+  dominant_negative: {
+    name: 'NCI TP53 Database user manual',
+    method: 'Dominant-negative transactivation classification curated across studies',
+    url: 'https://tp53.cancer.gov/help'
+  },
+  structure_prediction: {
+    name: 'Mathe et al. (2006)',
+    method: 'Delaunay tessellation model of 3D structure, trained on the Kato transactivation data',
+    url: 'https://tp53.cancer.gov/dt_method'
+  }
+};
 
 let cache = {
   loadedAt: 0,
@@ -204,11 +232,74 @@ function toProteinCompact(p) {
   return single || raw;
 }
 
-function parseGenomicPosition(g) {
-  const m = String(g || '').match(/:g\.(\d+)/i);
-  if (!m) return null;
-  const n = Number(m[1]);
-  return Number.isFinite(n) ? n : null;
+function normalizeAssembly(value) {
+  const name = normalizeText(value);
+  if (name === 'grch37' || name === 'hg19') return 'GRCh37';
+  if (name === 'grch38' || name === 'hg38') return 'GRCh38';
+  return '';
+}
+
+function genomicAllele(assembly, pos, ref, alt) {
+  if (!assembly || !Number.isSafeInteger(pos) || pos < 1 || ref === alt
+    || !/^[ACGT]+$/.test(ref) || !/^[ACGT]+$/.test(alt)) return null;
+  // Remove VCF padding from substitutions. MutationView frequently omits the
+  // reference bases of indels, so those require cDNA or stay contextual.
+  while (ref.length > 1 && alt.length > 1 && ref[0] === alt[0]) {
+    ref = ref.slice(1);
+    alt = alt.slice(1);
+    pos++;
+  }
+  while (ref.length > 1 && alt.length > 1 && ref.at(-1) === alt.at(-1)) {
+    ref = ref.slice(0, -1);
+    alt = alt.slice(0, -1);
+  }
+  return { assembly, chrom: '17', pos, ref, alt };
+}
+
+function genomicHgvsSite(value, assemblyHint, chromHint = '') {
+  const match = String(value || '').trim().match(/^(?:(NC_000017\.(?:10|11)|(?:chr)?17):)?g\.(\d+)(?:_(\d+))?(.*)$/i);
+  if (!match || (!match[1] && !chromHint)) return null;
+  const [, prefix, position, end, change] = match;
+  const accessionAssembly = Object.keys(GENOMIC_COLUMNS).find(build => GENOMIC_COLUMNS[build].accession === prefix?.toUpperCase());
+  if (accessionAssembly && assemblyHint && assemblyHint !== accessionAssembly) return null;
+  const assembly = accessionAssembly || assemblyHint;
+  if (!assembly) return null;
+  const pos = Number(position);
+  const substitution = !end && change.match(/^([ACGT])>([ACGT])$/i);
+  const allele = substitution ? genomicAllele(assembly, pos, substitution[1].toUpperCase(), substitution[2].toUpperCase()) : null;
+  return { assembly, pos, allele };
+}
+
+function queryGenomicSite(query) {
+  const { genomic_allele: tuple, genomic } = query;
+  const assembly = normalizeAssembly(tuple?.assembly);
+  if (assembly && /^(?:chr)?17$/i.test(String(tuple.chrom))) {
+    const pos = Number(tuple.pos);
+    if (Number.isSafeInteger(pos) && pos > 0) {
+      return { assembly, pos, allele: genomicAllele(assembly, pos, String(tuple.ref || '').toUpperCase(), String(tuple.alt || '').toUpperCase()) };
+    }
+  }
+  return genomicHgvsSite(genomic, normalizeAssembly(query.assembly));
+}
+
+function sameGenomicAllele(a, b) {
+  return a && b && a.assembly === b.assembly && a.pos === b.pos && a.ref === b.ref && a.alt === b.alt;
+}
+
+function parseCdna(value) {
+  const match = String(value || '').trim().match(/^((?:NM_\d+|ENST\d+)\.\d+):(c\.[*-]?\d+(?:[+-]\d+)?(?:_[*-]?\d+(?:[+-]\d+)?)?(?:[ACGT]+>[ACGT]+|delins[ACGT]+|del[ACGT]*|dup[ACGT]*|ins[ACGT]+|inv))$/i);
+  return match ? { transcript: match[1].toUpperCase(), change: match[2].toUpperCase() } : null;
+}
+
+function cdnaMatchBasis(a, b) {
+  if (!a || !b || a.change !== b.change) return '';
+  if (a.transcript === b.transcript) return 'same_versioned_transcript';
+  // These two RefSeq records have identical 1182-base CDS sequences. This
+  // equivalence is limited to coding SNVs because UTRs and introns can differ.
+  const pair = [a.transcript, b.transcript].sort().join(',');
+  const codingSnv = a.change.match(/^C\.(\d+)[ACGT]>[ACGT]$/);
+  return pair === 'NM_000546.5,NM_000546.6' && codingSnv && Number(codingSnv[1]) >= 1 && Number(codingSnv[1]) <= 1182
+    ? 'identical_refseq_cds_for_coding_snv' : '';
 }
 
 // The ref amino acid + codon number of a compact protein change (e.g. "R175H" -> "R175").
@@ -337,45 +428,36 @@ async function ensureDatasetLoaded() {
   return cache;
 }
 
-function buildMatches(rows, { protein, cdna, genomic }) {
+function buildMatches(rows, query) {
   const pickValue = buildColumnResolver(rows);
-  const proteinNeedle = toProteinCompact(protein);
-  const cdnaNeedle = normalizeText(cdna);
-  const genomicPos = parseGenomicPosition(genomic);
+  const proteinNeedle = toProteinCompact(query.protein);
+  const cdnaNeedle = parseCdna(query.cdna);
+  const site = queryGenomicSite(query);
+  const columns = GENOMIC_COLUMNS[site?.assembly];
 
   const matches = [];
   for (const row of rows) {
     // Core identification fields
-    const prot = pickValue(row, ['protdescription', 'aachangeinhuman']);
+    const prot = pickValue(row, ['protdescription', 'aachangeinhuman', 'aachange']);
     const cd = pickValue(row, ['cdescription', 'gdescription']);
+    const cdnaHgvs = pickValue(row, ['hgvsnm000546']);
     const hg19 = pickValue(row, ['hg19chr17coordinates']);
     const hg38 = pickValue(row, ['hg38chr17coordinates']);
 
     const protCompact = toProteinCompact(prot);
-    const cdNorm = normalizeText(cd);
-
-    let score = 0;
-    // Protein: an exact token match scores highest. A same-codon match (same ref+
-    // position, different alt — e.g. R175C when querying R175H) is surfaced at a lower
-    // score so related variants appear without ever outranking the exact hit. The old
-    // substring test let a short needle (e.g. "R175") match R175H/C/L indiscriminately.
-    let sameCodon = false;
-    if (proteinNeedle && protCompact) {
-      if (protCompact === proteinNeedle) {
-        score += 4;
-      } else if (sameProteinCodon(protCompact, proteinNeedle)) {
-        score += 1;
-        sameCodon = true;
-      }
-    }
-    // cDNA: substring is retained — cDNA strings are specific and formatting varies.
-    if (cdnaNeedle && cdNorm && cdNorm.includes(cdnaNeedle)) score += 5;
-    // Genomic: exact integer-token compare, not substring (7578406 must not match 17578406).
-    if (genomicPos !== null) {
-      if (coordinateHasPosition(hg19, genomicPos)) score += 2;
-      if (coordinateHasPosition(hg38, genomicPos)) score += 2;
-    }
-    if (score === 0) continue;
+    const rowSite = columns ? genomicHgvsSite(pickValue(row, [columns.hgvs, columns.description]), site.assembly, '17') : null;
+    const exactGenomic = sameGenomicAllele(site?.allele, rowSite?.allele);
+    const genomicConflict = site?.allele && rowSite?.allele && !exactGenomic;
+    const cdnaBasis = genomicConflict ? '' : cdnaMatchBasis(cdnaNeedle, parseCdna(cdnaHgvs || cd));
+    const sameProtein = proteinNeedle && proteinNeedle !== '?' && proteinNeedle === protCompact;
+    const coordinateMatch = columns && (rowSite?.pos === site.pos || coordinateHasPosition(pickValue(row, [columns.coordinate]), site.pos));
+    const matchType = exactGenomic ? 'exact_genomic'
+      : cdnaBasis ? 'exact_cdna'
+      : sameProtein ? 'same_protein'
+      : sameProteinCodon(protCompact, proteinNeedle) ? 'same_codon'
+      : coordinateMatch ? 'coordinate_only'
+      : '';
+    if (!matchType) continue;
 
     const somaticCount = pickValue(row, ['somaticcount']);
     const germlineCount = pickValue(row, ['germlinecount']);
@@ -409,17 +491,20 @@ function buildMatches(rows, { protein, cdna, genomic }) {
     const taGadd45 = pickValue(row, ['gadd45nwt']);
     const taNoxa = pickValue(row, ['noxanwt']);
     const taP53r2 = pickValue(row, ['p53r2nwt']);
-    const spliceAiDsAl = pickValue(row, ['spliceaidssal']);
+    const spliceAiDsAl = pickValue(row, ['spliceaidsal']);
     const spliceAiDsAg = pickValue(row, ['spliceaidsag']);
     const spliceAiDsDg = pickValue(row, ['spliceaidsdg']);
     const spliceAiDsDl = pickValue(row, ['spliceaidsdl']);
 
     matches.push({
-      score,
-      same_codon_match: sameCodon,
+      match_type: matchType,
+      match_basis: cdnaBasis || null,
+      matched_genomic_allele: exactGenomic ? rowSite.allele : null,
+      same_codon_match: matchType === 'same_codon',
       mut_id: mutId || '',
       protein: prot || '',
       cdna_or_genomic: cd || '',
+      transcript_hgvs: cdnaHgvs || '',
       hg19_coordinate: hg19 || '',
       hg38_coordinate: hg38 || '',
       somatic_count: somaticCount || '',
@@ -463,7 +548,7 @@ function buildMatches(rows, { protein, cdna, genomic }) {
       },
     });
   }
-  matches.sort((a, b) => b.score - a.score);
+  matches.sort((a, b) => MATCH_RANK[b.match_type] - MATCH_RANK[a.match_type]);
   return matches;
 }
 
@@ -482,7 +567,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: 'tp53-proxy',
-      usage: 'POST JSON: { gene, protein, cdna, genomic }'
+      usage: 'POST JSON: { gene, protein, cdna (versioned HGVS), genomic (HGVS), assembly, genomic_allele: { assembly, chrom, pos, ref, alt } }'
     });
   }
 
@@ -506,17 +591,24 @@ export default async function handler(req, res) {
     }
 
     const debugEnabled = String(body.debug || '').toLowerCase() === 'true' || body.debug === true;
-    const { rows, datasetUrl, debug } = await ensureDatasetLoaded();
+    const { rows, datasetUrl, debug, staleSince } = await ensureDatasetLoaded();
     const matches = buildMatches(rows, body);
     const top = matches.slice(0, MAX_RESPONSE_MATCHES);
-    // match_count reflects strong matches (exact protein / cDNA / genomic, score >= 2).
-    // Same-codon relatives (score 1) are surfaced in `matches` for context but counted
-    // separately and never drive the pathogenicity summary.
-    const strongMatches = matches.filter(m => m.score >= 2);
-    const relatedCodonCount = matches.length - strongMatches.length;
-    const best = strongMatches[0] || null;
+    const genomicMatches = matches.filter(m => m.match_type === 'exact_genomic');
+    const cdnaMatches = matches.filter(m => m.match_type === 'exact_cdna');
+    const candidates = genomicMatches.length ? genomicMatches : cdnaMatches;
+    const best = candidates.length === 1 ? candidates[0] : null;
+    const status = best ? 'exact' : candidates.length > 1 ? 'ambiguous' : top.length ? 'related_only' : 'no_match';
+    const notes = {
+      exact: best?.match_type === 'exact_genomic'
+        ? 'Exact genomic allele matched by assembly, chromosome, position, REF and ALT.'
+        : 'Exact cDNA change on a compatible versioned transcript.',
+      ambiguous: 'Multiple TP53 dataset rows match the allele. An allele-specific summary could not be selected.',
+      related_only: 'TP53 dataset rows provide related protein, codon or coordinate evidence. Exact allele identity could not be established.',
+      no_match: 'No TP53 dataset row matched the supplied variant.'
+    };
 
-    // Build a concise pathogenicity summary from the best match for top-level consumption
+    // Only a uniquely selected exact record supplies the allele-specific summary.
     const pathogenicitySummary = best ? {
       mutation_type: best.mutation_type || '',
       location: best.exon_intron || '',
@@ -549,16 +641,16 @@ export default async function handler(req, res) {
       source: 'tp53-database',
       dataset_url: datasetUrl,
       total_records: rows.length,
-      match_count: strongMatches.length,
-      related_codon_count: relatedCodonCount,
+      match_count: candidates.length,
+      related_codon_count: matches.filter(m => m.same_codon_match).length,
+      omitted_match_count: matches.length - top.length,
+      selection: { status, match_type: candidates[0]?.match_type ?? null, candidate_count: candidates.length },
+      functional_sources: FUNCTIONAL_SOURCES,
+      dataset_stale: Boolean(staleSince),
       pathogenicity: pathogenicitySummary,
       classification: best?.exon_intron || '',
       prevalence: best?.somatic_count ? `somatic count: ${best.somatic_count}` : '',
-      note: strongMatches.length
-        ? 'Matched against TP53 MutationView dataset by exact protein/cDNA/genomic position.'
-        : (relatedCodonCount
-          ? 'No exact TP53 record; showing same-codon variant(s) at this position for context.'
-          : 'No TP53 dataset row matched the supplied variant.'),
+      note: notes[status],
       matches: top
     };
     if (debugEnabled) {
@@ -568,7 +660,8 @@ export default async function handler(req, res) {
           protein_input: body.protein || '',
           protein_normalized: toProteinCompact(body.protein || ''),
           cdna_input: body.cdna || '',
-          genomic_input: body.genomic || ''
+          genomic_input: body.genomic || '',
+          genomic_allele: body.genomic_allele || null
         },
         dataset_attempts: debug || [],
         sample_protein_values: rows.slice(0, 25).map(r => debugPickValue(r, ['protdescription', 'aachangeinhuman'])).filter(Boolean).slice(0, 10),

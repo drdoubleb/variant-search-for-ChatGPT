@@ -2683,7 +2683,131 @@ async function fetchTp53MutationDatabase(payload) {
         const text = await response.text();
         throw new Error(`TP53 endpoint failed (${response.status}): ${text}`);
     }
-    return response.json();
+    const data = await response.json();
+    if (!data?.selection) throw new Error('TP53 proxy did not report allele identity');
+    return data;
+}
+
+const TP53_MATCH_LABELS = {
+    exact_genomic: 'Exact genomic allele', exact_cdna: 'Exact cDNA allele', same_protein: 'Same protein change',
+    same_codon: 'Same codon', coordinate_only: 'Coordinate only'
+};
+
+function appendTp53Table(parent, rows, columns = null) {
+    if (!rows.length) return;
+    const table = document.createElement('table');
+    if (columns) {
+        const header = document.createElement('tr');
+        for (const label of columns) {
+            const th = document.createElement('th');
+            th.scope = 'col';
+            th.textContent = label;
+            header.appendChild(th);
+        }
+        table.appendChild(header);
+    }
+    for (const [label, value] of rows) {
+        const row = document.createElement('tr');
+        const th = document.createElement('th');
+        th.scope = 'row';
+        th.textContent = label;
+        const td = document.createElement('td');
+        td.textContent = value;
+        row.append(th, td);
+        table.appendChild(row);
+    }
+    parent.appendChild(table);
+}
+
+function appendTp53Source(parent, source) {
+    if (!source) return;
+    const note = appendEvidenceText(parent, `${source.method}. `);
+    const url = safeUrl(source.url);
+    if (url) appendEvidenceLink(note, `${source.name} ↗`, url);
+}
+
+function appendTp53PromoterActivity(parent, match, source) {
+    const targets = Object.entries(match.ta_targets || {});
+    const measured = value => value !== null && value !== undefined && String(value).trim() !== '' && Number.isFinite(Number(value));
+    if (!targets.some(([, value]) => measured(value))) return;
+    const details = appendEvidenceDetails(parent, 'Kato promoter activity');
+    appendTp53Source(details, source);
+    appendTp53Table(details, targets.map(([promoter, value]) => [promoter, measured(value) ? String(value) : 'Unavailable']),
+        ['Promoter', 'Activity (% of wild type)']);
+}
+
+function appendTp53Results(parent, data) {
+    const { selection, matches = [], functional_sources: sources = {} } = data;
+    if (!selection) {
+        appendEvidenceText(parent, 'Allele identity is unavailable from the TP53 proxy.');
+        return;
+    }
+    const exact = selection.status === 'exact' ? matches[0] : null;
+    appendEvidenceText(parent, data.note, 'evidence-heading');
+    if (data.dataset_stale) appendEvidenceText(parent, 'Showing the last available TP53 dataset.');
+    if (exact) {
+        const compact = [exact.transcript_hgvs || exact.cdna_or_genomic, exact.ta_class && `Yeast transactivation · ${exact.ta_class}`].filter(Boolean);
+        if (compact.length) appendEvidenceText(parent, compact.join(' — '));
+        const occurrences = [exact.somatic_count && `Somatic · ${exact.somatic_count}`, exact.germline_count && `Germline · ${exact.germline_count}`].filter(Boolean);
+        if (occurrences.length) appendEvidenceText(parent, `MutationView occurrences — ${occurrences.join(' | ')}`);
+        const variant = appendEvidenceDetails(parent, 'Exact allele details');
+        const allele = exact.matched_genomic_allele;
+        appendTp53Table(variant, [
+            ['MutationView ID', exact.mut_id], ['cDNA (dataset)', exact.transcript_hgvs || exact.cdna_or_genomic],
+            ['Genomic allele', allele && `${allele.assembly} chr${allele.chrom}:${allele.pos} ${allele.ref}>${allele.alt}`],
+            ['Protein', exact.protein], ['Location', exact.exon_intron], ['Effect', exact.effect],
+            ['Type', exact.mutation_type], ['Effect group', exact.effect_group], ['Hotspot', exact.hotspot],
+            ['CpG site', exact.cpg_site], ['Splice site', exact.splice_site], ['Residue function', exact.residue_function],
+            ['Domain function', exact.domain_function], ['Structural motif', exact.structural_motif],
+            ['Somatic occurrences', exact.somatic_count], ['Germline occurrences', exact.germline_count],
+            ['TCGA/ICGC/GENIE count', exact.tcga_icgc_genie_count]
+        ].filter(([, value]) => value || value === 0));
+        appendTp53PromoterActivity(parent, exact, sources.transactivation);
+        const known = value => value && !/^N\/?A$/i.test(value);
+        const cellular = [
+            ['Giacomelli growth-suppression and dominant-negative class', exact.lof_class],
+            ['Curated dominant-negative transactivation class', exact.dne_class]
+        ].filter(([, value]) => known(value));
+        if (cellular.length) {
+            const details = appendEvidenceDetails(parent, 'Cellular functional classifications');
+            if (known(exact.lof_class)) appendTp53Source(details, sources.cellular_dne_lof);
+            if (known(exact.dne_class)) appendTp53Source(details, sources.dominant_negative);
+            appendTp53Table(details, cellular);
+        }
+        const predictions = [
+            ['Structure-based computational prediction', exact.structural_class], ['Align-GVGD', exact.agvgd_class],
+            ['SIFT', exact.sift_class], ['PolyPhen-2', exact.polyphen2], ['BayesDel', exact.bayes_del], ['REVEL', exact.revel]
+        ].filter(([, value]) => known(value));
+        if (predictions.length) {
+            const details = appendEvidenceDetails(parent, 'Computational predictions');
+            if (known(exact.structural_class)) appendTp53Source(details, sources.structure_prediction);
+            appendTp53Table(details, predictions);
+        }
+        const splice = Object.entries(exact.splice_ai || {}).filter(([, value]) => value !== '' && value != null);
+        if (splice.length) appendTp53Table(appendEvidenceDetails(parent, 'SpliceAI delta scores'), splice);
+    }
+    const related = exact ? matches.slice(1) : matches;
+    const omitted = data.omitted_match_count || 0;
+    if (related.length) {
+        const details = appendEvidenceDetails(parent, `Other MutationView records (${related.length}${omitted ? ` of ${related.length + omitted}` : ''})`);
+        for (const match of related) {
+            const label = [TP53_MATCH_LABELS[match.match_type], match.transcript_hgvs || match.cdna_or_genomic, match.protein].filter(Boolean).join(' · ');
+            if (!exact && match.match_type === 'same_protein') {
+                const entry = appendEvidenceDetails(details, label);
+                if (match.ta_class) appendEvidenceText(entry, `Yeast transactivation · ${match.ta_class}`);
+                appendTp53PromoterActivity(entry, match, sources.transactivation);
+            } else {
+                appendEvidenceText(details, label);
+            }
+        }
+    }
+    if (data.debug) {
+        const details = appendEvidenceDetails(parent, 'Debug info');
+        const pre = document.createElement('pre');
+        pre.className = 'evidence-comment';
+        pre.textContent = JSON.stringify(data.debug, null, 2);
+        details.appendChild(pre);
+    }
 }
 
 // Extract the numeric coordinate from a cDNA string (e.g. "c.1799T>A" -> 1799). If no
@@ -4178,8 +4302,123 @@ async function fetchClinvarVariant(variationId) {
     if (!res.ok) throw new Error(`ClinVar variant proxy error: ${res.status}`);
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
+    if (data?.record && String(data.record.variationId) !== String(variationId)) throw new Error('ClinVar returned a different variation ID');
     return data;
 }
+function appendEvidenceDetails(parent, title) {
+    const details = document.createElement('details');
+    details.className = 'evidence-details';
+    const summary = document.createElement('summary');
+    summary.textContent = title;
+    details.appendChild(summary);
+    parent.appendChild(details);
+    return details;
+}
+
+function appendEvidenceText(parent, value, className = 'evidence-note') {
+    const paragraph = document.createElement('p');
+    paragraph.className = className;
+    paragraph.textContent = value;
+    parent.appendChild(paragraph);
+    return paragraph;
+}
+
+function appendEvidenceLink(parent, label, url) {
+    const link = document.createElement('a');
+    link.href = url;
+    link.textContent = label;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    parent.appendChild(link);
+    return link;
+}
+
+function scvAccession(submission) {
+    const { accession, version } = submission;
+    if (!/^SCV\d+$/.test(accession)) return '';
+    return /^\d+$/.test(version) ? `${accession}.${version}` : accession;
+}
+
+function appendClinvarSubmissions(parent, record) {
+    if (!Array.isArray(record.submissions)) {
+        appendEvidenceText(parent, 'Submission evidence unavailable from the ClinVar proxy.');
+        return;
+    }
+    const details = appendEvidenceDetails(parent, `Submission evidence (${record.submissions.length})`);
+    if (record.record?.reportedSubmissionCount > record.submissions.length) {
+        appendEvidenceText(details, `The VCV reports ${record.record.reportedSubmissionCount} submissions. Its XML included ${record.submissions.length}.`);
+    }
+    if (!record.submissions.length) {
+        appendEvidenceText(details, 'ClinVar returned no individual submission records.');
+        return;
+    }
+    appendEvidenceText(details, 'Comments are the submitters’ interpretations. Each submission keeps its own classification and evidence.');
+    const typeLabels = {
+        germline: 'Germline pathogenicity', somatic: 'Somatic clinical impact', oncogenicity: 'Somatic oncogenicity',
+        unclassified: 'Unclassified'
+    };
+    const expert = s => /expert panel|practice guideline/i.test(s.reviewStatus);
+    const submissions = [...record.submissions].sort((a, b) => Number(expert(b)) - Number(expert(a)));
+    for (const submission of submissions) {
+        const classifications = submission.classifications.map(c =>
+            [typeLabels[c.type], c.description, c.lastEvaluated].filter(Boolean).join(' · '));
+        const label = [submission.submitter || scvAccession(submission) || 'ClinVar submission',
+            ...classifications].join(' — ');
+        const entry = appendEvidenceDetails(details, label);
+        const accession = scvAccession(submission);
+        if (accession) {
+            const term = encodeURIComponent(`${submission.accession}[clv_acc]`);
+            appendEvidenceLink(entry, `ClinVar submission ${accession} ↗`, `https://www.ncbi.nlm.nih.gov/clinvar/?term=${term}`);
+        }
+        if (submission.reviewStatus) appendEvidenceText(entry, `Review status · ${submission.reviewStatus}`);
+        if (submission.conditions.length) {
+            const conditions = submission.conditions.map(c => c.name || c.identifiers.map(ref => `${ref.db} ${ref.id}`).join(', '));
+            appendEvidenceText(entry, `Conditions · ${conditions.join('; ')}`);
+        }
+        if (submission.assertionCriteria.length) appendEvidenceText(entry, `Assertion criteria · ${submission.assertionCriteria.join('; ')}`);
+        if (submission.studyName) appendEvidenceText(entry, submission.studyName, 'evidence-heading');
+        if (submission.studyDescription) appendEvidenceText(entry, submission.studyDescription, 'evidence-comment');
+        for (const c of submission.classifications) {
+            const impact = [c.assertionType, c.clinSig, c.drugs].filter(Boolean);
+            if (impact.length) appendEvidenceText(entry, `Clinical impact · ${impact.join(' · ')}`);
+        }
+        for (const [heading, lines] of [
+            ['Classification rationale', submission.classificationComments],
+            ['Other submission comments', submission.submitterComments]
+        ]) {
+            if (!lines.length) continue;
+            appendEvidenceText(entry, heading, 'evidence-heading');
+            for (const line of lines) appendEvidenceText(entry, line, 'evidence-comment');
+        }
+        if (submission.observations.length) {
+            const observations = appendEvidenceDetails(entry, `Observations (${submission.observations.length})`);
+            for (const observation of submission.observations) {
+                const label = [observation.origin, ...observation.methodTypes].filter(Boolean).join(' · ');
+                if (label) appendEvidenceText(observations, label, 'evidence-heading');
+                const observedConditions = (observation.conditions ?? []).map(c => c.name || c.identifiers.map(ref => `${ref.db} ${ref.id}`).join(', '));
+                if (observedConditions.length) appendEvidenceText(observations, `Observed conditions · ${observedConditions.join('; ')}`);
+                for (const item of observation.descriptions) {
+                    appendEvidenceText(observations, [item.type, item.text, item.source].filter(Boolean).join(' · '), 'evidence-comment');
+                }
+                for (const comment of observation.comments) appendEvidenceText(observations, comment, 'evidence-comment');
+            }
+        }
+        for (const [scope, heading] of [
+            ['variant_evidence', 'Variant-evidence citations'],
+            ['assertion_method', 'Assertion-method citations'],
+            ['general', 'Other submission citations']
+        ]) {
+            const citations = submission.citations.filter(c => c.scope === scope && /^[1-9]\d{0,8}$/.test(c.pmid));
+            if (!citations.length) continue;
+            appendEvidenceText(entry, heading, 'evidence-heading');
+            const links = document.createElement('div');
+            links.className = 'evidence-links';
+            for (const { pmid } of citations) appendEvidenceLink(links, `PMID ${pmid} ↗`, `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`);
+            entry.appendChild(links);
+        }
+    }
+}
+
 function getClinvarVariantText(variant) {
     return [
         variant?.title,
@@ -5556,6 +5795,121 @@ function condenseOpenFdaForAi(data, { maxRecords = 40 } = {}) {
     };
 }
 
+// A search and both AI actions can overlap. Keep a single request, including an
+// empty successful result, and allow a failed request to be retried.
+function reuseLookupRequest(requests, key, load) {
+    if (!requests.has(key)) {
+        requests.set(key, Promise.resolve().then(load).catch(error => {
+            requests.delete(key);
+            throw error;
+        }));
+    }
+    return requests.get(key);
+}
+
+function clinvarCitationIndex(record) {
+    const citations = new Map();
+    for (const submission of record?.submissions ?? []) {
+        const methodPmids = new Set(submission.citations.filter(c => c.scope === 'assertion_method').map(c => c.pmid));
+        for (const citation of submission.citations) {
+            const { pmid, scope, locations } = citation;
+            if (scope !== 'variant_evidence' || methodPmids.has(pmid) || !/^[1-9]\d{0,8}$/.test(pmid)) continue;
+            if (!citations.has(pmid)) citations.set(pmid, []);
+            citations.get(pmid).push({ accession: scvAccession(submission), submitter: submission.submitter, locations });
+        }
+    }
+    return citations;
+}
+
+async function combineClinvarPublications(record, search, loadPmids, isCurrentSearch) {
+    const batchSize = 20; // /api/pubmed explicit PMID limit
+    const maxLookups = batchSize * 2;
+    const citations = clinvarCitationIndex(record);
+    const searchArticles = new Map((search?.articles ?? []).map(article => [String(article.pmid), article]));
+    const toLookUp = [...citations.keys()].filter(pmid => {
+        const article = searchArticles.get(pmid);
+        return !article?.title || !article.abstract || !article.journal || !article.year;
+    });
+    const pmids = toLookUp.slice(0, maxLookups);
+    const requested = new Set(pmids);
+    const omitted = new Set(toLookUp.slice(maxLookups));
+    const fetched = new Map();
+    // At most two bounded EFetch calls. Serialize batches to ease NCBI's rate limit.
+    for (let offset = 0; offset < pmids.length && isCurrentSearch(); offset += batchSize) {
+        const ids = pmids.slice(offset, offset + batchSize).sort();
+        try {
+            const data = await loadPmids(ids);
+            for (const article of data.articles ?? []) {
+                if (ids.includes(String(article.pmid))) fetched.set(String(article.pmid), article);
+            }
+        } catch (err) {
+            console.warn('ClinVar-cited PubMed records unavailable', err);
+        }
+    }
+    const additional = [];
+    let missing = 0;
+    for (const [pmid, provenance] of citations) {
+        const existing = searchArticles.get(pmid);
+        const found = fetched.get(pmid);
+        const abstract = found?.abstract || existing?.abstract || '';
+        const article = {
+            pmid,
+            title: found?.title || existing?.title || '',
+            authors: found?.authors || existing?.authors || '',
+            journal: found?.journal || existing?.journal || '',
+            year: found?.year || existing?.year || '',
+            abstract,
+            clinvar_citations: provenance,
+            abstract_status: abstract ? 'available' : found ? 'not_listed' : omitted.has(pmid) ? 'omitted' : 'unavailable'
+        };
+        if (requested.has(pmid) && !found) missing++;
+        if (existing) searchArticles.set(pmid, article);
+        else additional.push(article);
+    }
+    return {
+        search: search && !search.error ? { ...search, articles: [...searchArticles.values()] } : search,
+        cited: {
+            citedPmidCount: citations.size,
+            overlapWithSearchCount: citations.size - additional.length,
+            pubmedLookupOmittedCount: omitted.size,
+            pubmedLookupUnavailableCount: missing,
+            articles: additional
+        }
+    };
+}
+
+function renderPubmedArticle(article, abstractOpen = false) {
+    const entry = document.createElement('div');
+    entry.className = 'pubmed-article';
+    const label = article.title || `PMID ${article.pmid}`;
+    if (/^[1-9]\d{0,8}$/.test(article.pmid)) appendEvidenceLink(entry, label, `https://pubmed.ncbi.nlm.nih.gov/${article.pmid}/`);
+    else appendEvidenceText(entry, label);
+    const meta = [article.authors, article.journal, article.year, article.title && article.pmid ? `PMID ${article.pmid}` : ''].filter(Boolean);
+    if (meta.length) appendEvidenceText(entry, meta.join(' · '));
+    if (article.clinvar_citations?.length) {
+        const sources = article.clinvar_citations.map(c => c.accession || c.submitter || 'ClinVar submission');
+        appendEvidenceText(entry, `Cited by ${[...new Set(sources)].join(', ')} in ClinVar`);
+    }
+    if (article.abstract) {
+        const abstract = appendEvidenceDetails(entry, 'Abstract');
+        abstract.open = abstractOpen;
+        appendEvidenceText(abstract, article.abstract, 'evidence-comment');
+    } else if (article.abstract_status === 'not_listed') {
+        appendEvidenceText(entry, 'PubMed lists no abstract.');
+    }
+    return entry;
+}
+
+function appendClinvarPublications(parent, cited) {
+    if (!cited?.citedPmidCount) return;
+    const details = appendEvidenceDetails(parent, `ClinVar-cited publications (${cited.citedPmidCount})`);
+    appendEvidenceText(details, 'The citations come from ClinVar submissions. Consult the papers for variant-specific results.');
+    if (cited.overlapWithSearchCount) appendEvidenceText(details, `${cited.overlapWithSearchCount} also appear in the search results above.`);
+    if (cited.pubmedLookupOmittedCount) appendEvidenceText(details, `PubMed metadata lookup limit reached for ${cited.pubmedLookupOmittedCount} cited PMIDs. Their citation links are available.`);
+    if (cited.pubmedLookupUnavailableCount) appendEvidenceText(details, `PubMed records could not be retrieved for ${cited.pubmedLookupUnavailableCount} cited PMIDs. Their citation links are available.`);
+    for (const article of cited.articles) details.appendChild(renderPubmedArticle(article));
+}
+
 // `variantQuery` ({ gene, variant, extra? }) switches the proxy to its
 // LitVar2/PubTator3 path: variant-normalized literature (papers writing the
 // same change as p.Val600Glu, c.1799T>A or an rsID all match), relevance-ranked.
@@ -5571,16 +5925,21 @@ async function fetchPubmedArticles(searchTerm, limit = 5, variantQuery = null) {
         params.set('variant', variantQuery.variant);
         if (variantQuery.extra) params.set('extra', variantQuery.extra);
     }
+    const data = await requestPubmed(params);
+    return {
+        total: data.total || 0, articles: data.articles || [], litvar: data.litvar || null, backend: data.backend || 'term',
+        abstractsUnavailable: Boolean(data.abstractsUnavailable),
+        notFound: Array.isArray(data.notFound) ? data.notFound.map(String) : []
+    };
+}
+
+async function requestPubmed(params) {
     const endpoint = getConfiguredApiEndpoint('PUBMED_API_ENDPOINT', '/api/pubmed');
     const res = await fetchWithTimeout(appendQueryParams(endpoint, params), {}, API_TIMEOUT_MS.pubmed);
     if (!res.ok) throw new Error(`PubMed proxy error: ${res.status}`);
     const data = await res.json();
     if (data?.error) throw new Error(data.error);
-    return {
-        total: data.total || 0, articles: data.articles || [], litvar: data.litvar || null, backend: data.backend || 'term',
-        // Phrases PubMed has never indexed, when that is why there is nothing to show.
-        notFound: Array.isArray(data.notFound) ? data.notFound.map(String) : []
-    };
+    return data;
 }
 
 async function fetchClinicalTrials(gene, tumorType) {
@@ -5615,7 +5974,8 @@ async function fetchClinicalTrials(gene, tumorType) {
 // extra? }) routes that tab through the LitVar2 variant-normalized search, with
 // the term search as fallback. Results are stashed under extras[extraKey] for
 // the AI-review payload.
-function createPubmedCard({ container, tabs, extras }) {
+function createPubmedCard({ container, tabs, extras, loadSearch = fetchPubmedArticles, loadClinvarPublications = null,
+    isCurrentSearch = () => true }) {
     const PUBMED_LIMIT = 5;
     const pmCard = document.createElement('div');
     pmCard.className = 'card';
@@ -5643,6 +6003,7 @@ function createPubmedCard({ container, tabs, extras }) {
             panel.appendChild(queryLabel);
         }
         const resultsDiv = document.createElement('div');
+        const articleNodes = new Map();
         if (searchTerm || variantQuery) {
             const spinner = document.createElement('div');
             spinner.style.cssText = 'font-size:0.82rem;color:#6b7280;font-style:italic;';
@@ -5651,8 +6012,10 @@ function createPubmedCard({ container, tabs, extras }) {
         }
         panel.appendChild(resultsDiv);
         if (searchTerm || variantQuery) {
-            fetchPubmedArticles(searchTerm, PUBMED_LIMIT, variantQuery).then(({ total, articles, litvar, backend, notFound = [] }) => {
-                extras[extraKey] = { query: searchTerm, total, articles, backend, litvar };
+            loadSearch(searchTerm, PUBMED_LIMIT, variantQuery).then(data => {
+                if (!isCurrentSearch()) return;
+                const { total, articles, litvar, backend, notFound = [] } = data;
+                extras[extraKey] = { query: searchTerm, ...data };
                 resultsDiv.innerHTML = '';
                 // Provenance line: which spelling-normalized entity matched. A
                 // LitVar2 hit means every nomenclature form of the variant was
@@ -5680,36 +6043,13 @@ function createPubmedCard({ container, tabs, extras }) {
                     ? `Showing ${articles.length} of ${total.toLocaleString()} results (most relevant)`
                     : `${articles.length} result${articles.length !== 1 ? 's' : ''}`;
                 resultsDiv.appendChild(countEl);
-                articles.forEach((art) => {
-                    const artEl = document.createElement('div');
-                    artEl.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;font-size:0.82rem;';
-                    const titleLink = document.createElement('a');
-                    titleLink.href = `https://pubmed.ncbi.nlm.nih.gov/${art.pmid}/`;
-                    titleLink.target = '_blank';
-                    titleLink.rel = 'noopener noreferrer';
-                    titleLink.style.fontWeight = '600';
-                    titleLink.textContent = art.title;
-                    artEl.appendChild(titleLink);
-                    const meta = document.createElement('div');
-                    meta.style.cssText = 'color:#6b7280;margin-top:2px;';
-                    const parts = [art.authors, art.journal, art.year].filter(Boolean);
-                    meta.textContent = parts.join(' · ') + (art.pmid ? ` · PMID ${art.pmid}` : '');
-                    artEl.appendChild(meta);
-                    if (art.abstract) {
-                        const abstractDetails = document.createElement('details');
-                        abstractDetails.style.cssText = 'margin-top:4px;';
-                        const abstractSummaryEl = document.createElement('summary');
-                        abstractSummaryEl.style.cssText = 'font-size:0.80rem;color:#4b5563;cursor:pointer;padding:2px 0;list-style:revert;';
-                        abstractSummaryEl.textContent = 'Abstract';
-                        abstractDetails.appendChild(abstractSummaryEl);
-                        const abstractText = document.createElement('div');
-                        abstractText.style.cssText = 'font-size:0.80rem;color:#374151;margin-top:4px;line-height:1.5;padding:6px;background:#f9fafb;border-radius:4px;';
-                        abstractText.textContent = art.abstract;
-                        abstractDetails.appendChild(abstractText);
-                        artEl.appendChild(abstractDetails);
-                    }
-                    resultsDiv.appendChild(artEl);
-                });
+                for (const art of articles) {
+                    if (articleNodes.has(String(art.pmid))) continue;
+                    const entry = renderPubmedArticle(art);
+                    articleNodes.set(String(art.pmid), entry);
+                    resultsDiv.appendChild(entry);
+                }
+                if (data.abstractsUnavailable) appendEvidenceText(resultsDiv, 'PubMed abstracts could not be retrieved.');
                 if (total > PUBMED_LIMIT) {
                     const seeAll = document.createElement('a');
                     seeAll.href = (litvar && litvar.url) ? litvar.url : queryUrl;
@@ -5722,8 +6062,20 @@ function createPubmedCard({ container, tabs, extras }) {
                     resultsDiv.appendChild(seeAll);
                 }
             }).catch(() => {
-                resultsDiv.innerHTML = '<div style="font-size:0.82rem;color:#9ca3af;">PubMed unavailable.</div>';
+                if (isCurrentSearch()) resultsDiv.textContent = 'PubMed unavailable.';
             });
+        }
+        if (loadClinvarPublications && extraKey === 'pubmed') {
+            loadClinvarPublications().then(({ search, cited }) => {
+                if (!isCurrentSearch()) return;
+                for (const article of search?.articles ?? []) {
+                    const current = articleNodes.get(article.pmid);
+                    if (current && article.clinvar_citations?.length) {
+                        current.replaceWith(renderPubmedArticle(article, current.querySelector('details')?.open));
+                    }
+                }
+                appendClinvarPublications(panel, cited);
+            }).catch(err => console.warn('ClinVar citation details unavailable', err));
         }
     };
 
@@ -7217,7 +7569,7 @@ function loadTurnstileScript() {
 // flows use this so the model picker, notes, BYO-key field, copy-prompt button,
 // Turnstile widget, context inspector, and run handler are defined once.
 // `buildContext` is an async callback returning the context object to send.
-function createAiReviewCard({ container, idSuffix, introText, loadingText, buildContext }) {
+function createAiReviewCard({ container, idSuffix, introText, loadingText, buildContext, isCurrentSearch = () => true }) {
     const aiCard = document.createElement('div');
     aiCard.className = 'card ai-review-card';
     aiCard.setAttribute('data-card', 'optional-ai-review'); // mirrors applyCardTheme()
@@ -7371,14 +7723,17 @@ function createAiReviewCard({ container, idSuffix, introText, loadingText, build
     };
 
     copyPromptButton.addEventListener('click', async () => {
+        if (!isCurrentSearch()) return;
         copyPromptButton.disabled = true;
         const prev = copyPromptButton.textContent;
         copyPromptButton.textContent = 'Building…';
         try {
             const aiContext = await buildContext((notesInput.value || '').trim());
+            if (!isCurrentSearch()) return;
             aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
             aiContextInspectorSummary.textContent = 'Context sent to AI';
             const prompt = await fetchAiReviewPrompt(aiContext, modelSelect.value);
+            if (!isCurrentSearch()) return;
             promptTextarea.value = prompt;
             let copied = false;
             try {
@@ -7394,6 +7749,7 @@ function createAiReviewCard({ container, idSuffix, introText, loadingText, build
                 copyPromptButton.textContent = 'Copy from box below';
             }
         } catch (err) {
+            if (!isCurrentSearch()) return;
             copyPromptButton.textContent = 'Prompt failed';
             promptDetails.open = true;
             promptTextarea.value = `Unable to build prompt: ${err.message}`;
@@ -7404,6 +7760,7 @@ function createAiReviewCard({ container, idSuffix, introText, loadingText, build
     });
 
     runButton.addEventListener('click', async () => {
+        if (!isCurrentSearch()) return;
         runButton.disabled = true;
         const previousText = runButton.textContent;
         runButton.textContent = 'Running…';
@@ -7419,19 +7776,25 @@ function createAiReviewCard({ container, idSuffix, introText, loadingText, build
                 if (!turnstileToken) throw new Error('Please complete the verification challenge above, then run again.');
             }
             const aiContext = await buildContext((notesInput.value || '').trim());
+            if (!isCurrentSearch()) return;
             aiContextPre.textContent = JSON.stringify(aiContext, null, 2);
             aiContextInspectorSummary.textContent = 'Context sent to AI';
             const data = await fetchAiReview(aiContext, modelSelect.value, {
                 apiKey: userKey || undefined,
                 turnstileToken: turnstileToken || undefined
             });
+            if (!isCurrentSearch()) return;
             renderAiReview(data.review, aiOutput);
+            for (const omission of data.context_omissions || []) {
+                appendEvidenceText(aiOutput, `Prompt size limit reached. The review omitted ${omission.records_omitted} openFDA label records.`);
+            }
             // Turnstile tokens are single-use; reset so a follow-up run gets a fresh one.
             if (window.turnstile && turnstileWidgetId != null) {
                 try { window.turnstile.reset(turnstileWidgetId); } catch { /* ignore */ }
                 currentTurnstileToken = '';
             }
         } catch (err) {
+            if (!isCurrentSearch()) return;
             aiOutput.innerHTML = '';
             const errorEl = document.createElement('div');
             errorEl.className = 'ai-review-error';
@@ -9714,7 +10077,7 @@ const initVariantSearchUi = () => {
                         pmTabs.push({ label: 'Gene + Alteration + Tumor Type', term: pmVariantTumorSearchTerm, extraKey: 'pubmed_variant_tumor_type' });
                     }
                 }
-                createPubmedCard({ container: cardsContainer, tabs: pmTabs, extras: geneOnlyAiExtras });
+                createPubmedCard({ container: cardsContainer, tabs: pmTabs, extras: geneOnlyAiExtras, isCurrentSearch });
             }
 
             // ── Card: FDA-Approved Drugs (by gene) ─────────────────────────
@@ -9735,6 +10098,7 @@ const initVariantSearchUi = () => {
                 idSuffix: 'Gene',
                 introText: 'Send the retrieved gene-level data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
                 loadingText: 'Gathering gene-level context for AI review…',
+                isCurrentSearch,
                 buildContext: async (userNotes) => {
                     // Supplemental context for gene-only mode: skip coordinate-dependent
                     // calls, and reuse what the cards already fetched — a fresh fetch is
@@ -11661,6 +12025,15 @@ const initVariantSearchUi = () => {
             let detailsData = buildDetailsData(annotation, rawInput, gVariant);
             const detailsContainer = document.getElementById('detailsContainer');
             const aiReviewExtras = {};
+            const evidenceRequests = new Map();
+            let clinvarVariantId = '';
+            const getClinvarRecord = () => clinvarVariantId
+                ? reuseLookupRequest(evidenceRequests, `clinvar:${clinvarVariantId}`, () => fetchClinvarVariant(clinvarVariantId))
+                : Promise.resolve(null);
+            const loadPubmedSearch = (term, limit, variantQuery) => {
+                const key = JSON.stringify([term, limit, variantQuery?.gene, variantQuery?.variant, variantQuery?.extra]);
+                return reuseLookupRequest(evidenceRequests, key, () => fetchPubmedArticles(term, limit, variantQuery));
+            };
             // Card results reused by the AI-review buildContext but NOT spread into
             // supplemental_card_data (they already appear top-level in the payload,
             // so keeping them out of aiReviewExtras avoids sending two copies).
@@ -12219,12 +12592,13 @@ const initVariantSearchUi = () => {
                         typeof targetCdnaGlobal !== 'undefined' ? targetCdnaGlobal : '',
                         ...(Array.isArray(transcriptsList) ? transcriptsList.map((t) => t && t.cDNA) : [])
                     ].filter(Boolean);
-                    if (!haveNumericVariantId && sigSummary.length === 0
+                    if (!haveNumericVariantId && !codonOnlyResolutionGlobal && !nameShared
                         && recoveryTuple && recoveryTuple.chrom && recoveryTuple.pos) {
                         try {
                             const chrR = recoveryTuple.chrom.replace(/^chr/i, '');
                             const posR = Number(recoveryTuple.pos);
                             prefetchedNearby = await fetchClinvarRegionVariants(chrR, posR, 30);
+                            if (!isCurrentSearch()) return;
                             const match = findExactClinvarRegionMatch(prefetchedNearby.variants, recoveryTuple, recoveryCdnaForms);
                             if (match && match.id && /^\d+$/.test(String(match.id))) {
                                 variantId = String(match.id);
@@ -12282,7 +12656,7 @@ const initVariantSearchUi = () => {
                     const clingenDiv = document.createElement('div');
                     content.appendChild(clingenDiv);
                     fetchClingenErepo(gVariant).then((cg) => {
-                        if (!cg) return;
+                        if (!cg || !isCurrentSearch()) return;
                         aiReviewExtras.clingen_erepo = cg;
                         const first = cg.entries[0];
                         const extraCount = cg.total - 1;
@@ -12301,55 +12675,44 @@ const initVariantSearchUi = () => {
                     spanCond.innerHTML = `<strong>Conditions:</strong> ${displayConds}${conditionsList.length > 3 ? '…' : ''}`;
                     content.appendChild(spanCond);
                 }
-                // Somatic / oncogenicity data fetched directly from ClinVar VCV record.
-                if (variantId && /^\d+$/.test(variantId)) {
-                    try {
-                        const cvData = await fetchClinvarVariant(variantId);
-                        if (!isCurrentSearch()) return; // a newer search superseded this one
+                // Start the exact record lookup as the card renders. The AI
+                // actions await the same request, including a recovered VCV ID.
+                if (/^\d+$/.test(variantId) && !codonOnlyResolutionGlobal && !nameShared) {
+                    clinvarVariantId = variantId;
+                    const liveEvidence = document.createElement('div');
+                    content.appendChild(liveEvidence);
+                    appendEvidenceText(liveEvidence, 'Loading ClinVar submission evidence…');
+                    getClinvarRecord().then(cvData => {
+                        if (!isCurrentSearch()) return;
                         aiReviewExtras.clinvar_variant_record = cvData;
-                        if (cvData) {
-                            // If significance is still unresolved (no MyVariant rcv and the
-                            // region pull carried no germline classification), fall back to
-                            // the germline classification from the full VCV record.
-                            if (!haveSignificance && cvData.germline && cvData.germline.description) {
-                                spanSig.innerHTML = `<strong>Clinical significance:</strong> ${escapeHtml(cvData.germline.description)}`;
-                                haveSignificance = true;
-                            }
-                            if (cvData.somatic && cvData.somatic.description) {
-                                const somaticDiv = document.createElement('div');
-                                somaticDiv.style.marginTop = '0.25rem';
-                                somaticDiv.innerHTML = `<strong>Somatic clinical impact:</strong> ${escapeHtml(cvData.somatic.description)}`;
-                                content.appendChild(somaticDiv);
-                            }
-                            if (cvData.oncogenicity && cvData.oncogenicity.description) {
-                                const oncDiv = document.createElement('div');
-                                oncDiv.innerHTML = `<strong>Oncogenicity:</strong> ${escapeHtml(cvData.oncogenicity.description)}`;
-                                content.appendChild(oncDiv);
-                            }
-                            if (cvData.somaticConditions && cvData.somaticConditions.length > 0) {
-                                const scDet = document.createElement('details');
-                                const scSum = document.createElement('summary');
-                                scSum.textContent = `Somatic conditions (${cvData.somaticConditions.length})`;
-                                scDet.appendChild(scSum);
-                                const scUl = document.createElement('ul');
-                                scUl.style.cssText = 'margin-top:0.4rem;font-size:0.82rem;padding-left:1.2rem;line-height:1.6;';
-                                cvData.somaticConditions.forEach((sc) => {
-                                    const li = document.createElement('li');
-                                    const parts = [];
-                                    if (sc.condition) parts.push(`<strong>${escapeHtml(sc.condition)}</strong>`);
-                                    // Combine tier + assertion type + clinical significance into one readable string.
-                                    const impactParts = [sc.tier, sc.assertionType, sc.clinSig].filter(Boolean);
-                                    if (impactParts.length) parts.push(escapeHtml(impactParts.join(' — ')));
-                                    li.innerHTML = parts.join(': ');
-                                    scUl.appendChild(li);
-                                });
-                                scDet.appendChild(scUl);
-                                content.appendChild(scDet);
-                            }
+                        liveEvidence.replaceChildren();
+                        if (!haveSignificance && cvData.germline?.description) {
+                            spanSig.innerHTML = `<strong>Clinical significance:</strong> ${escapeHtml(cvData.germline.description)}`;
                         }
-                    } catch (e) {
-                        console.warn('ClinVar variant fetch failed', e);
-                    }
+                        for (const [label, classification] of [
+                            ['Somatic clinical impact', cvData.somatic], ['Oncogenicity', cvData.oncogenicity]
+                        ]) {
+                            if (!classification?.description) continue;
+                            const line = document.createElement('div');
+                            line.innerHTML = `<strong>${label}:</strong> ${escapeHtml(classification.description)}`;
+                            liveEvidence.appendChild(line);
+                        }
+                        if (cvData.somaticConditions?.length) {
+                            const details = appendEvidenceDetails(liveEvidence, `Somatic conditions (${cvData.somaticConditions.length})`);
+                            const list = document.createElement('ul');
+                            for (const condition of cvData.somaticConditions) {
+                                const entry = document.createElement('li');
+                                const impact = [condition.tier, condition.assertionType, condition.clinSig].filter(Boolean).join(' — ');
+                                entry.textContent = [condition.condition, impact].filter(Boolean).join(' · ');
+                                list.appendChild(entry);
+                            }
+                            details.appendChild(list);
+                        }
+                        appendClinvarSubmissions(liveEvidence, cvData);
+                    }).catch(error => {
+                        if (isCurrentSearch()) liveEvidence.textContent = 'ClinVar submission evidence unavailable.';
+                        console.warn('ClinVar variant fetch failed', error);
+                    });
                 }
                 // Same protein change in ClinVar (any underlying nucleotide change).
                 //
@@ -12634,6 +12997,7 @@ const initVariantSearchUi = () => {
                     detailsEl.appendChild(ul);
                     content.appendChild(detailsEl);
                 }
+                if (!isCurrentSearch()) return;
                 card.appendChild(content);
                 cardsContainer.appendChild(card);
             }
@@ -13591,326 +13955,54 @@ const initVariantSearchUi = () => {
                     extras: aiReviewExtras
                 });
             }
-            // Card: TP53 Mutation Database (shown only for TP53 variants)
-            if (isTp53Gene(geneNames)) {
-                const tp53Card = document.createElement('div');
-                tp53Card.className = 'card';
-                const tp53Title = document.createElement('h3');
-                tp53Title.textContent = 'TP53 Database';
-                applyCardTheme(tp53Card, 'TP53 Database');
-                tp53Card.appendChild(tp53Title);
-                const tp53Content = document.createElement('div');
-                tp53Content.className = 'card-content';
-
-                const normalizePlainVariant = (value) => {
-                    if (!value) return '';
-                    const raw = String(value).trim();
-                    const noHtml = raw.replace(/<[^>]+>/g, '');
-                    const first = noHtml.split(',')[0].trim();
-                    return first.includes(':') ? first.split(':').slice(1).join(':').trim() : first;
-                };
-
-                const tp53Cdna = normalizePlainVariant(cDNAHTML);
-                const tp53Protein = normalizePlainVariant(protein);
-                const tp53Genomic = String(gVariant || '').trim();
-                const summary = document.createElement('span');
-                summary.innerHTML = `<strong>Detected gene:</strong> TP53`;
-                tp53Content.appendChild(summary);
-
-                const variantSummary = document.createElement('span');
-                variantSummary.innerHTML = `<strong>Variant:</strong> ${escapeHtml(tp53Protein || tp53Cdna || tp53Genomic || 'N/A')}`;
-                tp53Content.appendChild(variantSummary);
-
-                const dbHomeUrl = 'https://tp53.cancer.gov/';
-                const searchByVariantUrl = 'https://tp53.cancer.gov/search_gene_by_mut';
-                const googleTp53Query = encodeURIComponent(`site:tp53.cancer.gov TP53 ${tp53Protein || tp53Cdna || tp53Genomic}`.trim());
-                const googleTp53Url = `https://www.google.com/search?q=${googleTp53Query}`;
-                const linksLine = document.createElement('span');
-                linksLine.innerHTML = `<a href="${dbHomeUrl}" target="_blank" rel="noopener noreferrer">TP53 DB Home</a> | <a href="${searchByVariantUrl}" target="_blank" rel="noopener noreferrer">Search by Gene Variants</a> | <a href="${googleTp53Url}" target="_blank" rel="noopener noreferrer">Variant lookup 🔍</a>`;
-                tp53Content.appendChild(linksLine);
-
-                try {
-                    const tp53Data = await fetchTp53MutationDatabase({
-                        gene: 'TP53',
-                        protein: tp53Protein || '',
-                        cdna: tp53Cdna || '',
-                        genomic: tp53Genomic || '',
-                        debug: true
-                    });
-                    if (!isCurrentSearch()) return; // a newer search superseded this one
-                    // Strip the `debug` field (dataset fetch attempts, column
-                    // listings, etc.) from the AI payload — it's only useful for the
-                    // local "Debug info" pane below.
-                    if (tp53Data && typeof tp53Data === 'object') {
-                        const { debug: _tp53Debug, ...tp53DataForAi } = tp53Data;
-                        aiReviewExtras.tp53_mutation_database = tp53DataForAi;
-                    } else {
-                        aiReviewExtras.tp53_mutation_database = tp53Data;
-                    }
-                    if (tp53Data && typeof tp53Data === 'object') {
-                        const best = tp53Data.matches && tp53Data.matches[0];
-                        const path = tp53Data.pathogenicity || (best ? best : null);
-
-                        // Match status banner
-                        const statusDiv = document.createElement('div');
-                        statusDiv.style.cssText = 'margin:6px 0 10px; padding:6px 10px; border-radius:4px; font-size:0.88rem;';
-                        if (tp53Data.match_count > 0 && best) {
-                            statusDiv.style.background = '#e8f5e9';
-                            statusDiv.style.borderLeft = '3px solid #4caf50';
-                            const countLabel = tp53Data.match_count === 1 ? '1 record' : `${tp53Data.match_count} records`;
-                            const s = document.createElement('strong');
-                            s.textContent = 'Database match: ';
-                            statusDiv.appendChild(s);
-                            statusDiv.appendChild(document.createTextNode(`found ${countLabel} in TP53 database`));
-                        } else {
-                            statusDiv.style.background = '#fff8e1';
-                            statusDiv.style.borderLeft = '3px solid #ffa726';
-                            const s = document.createElement('strong');
-                            s.textContent = 'No match: ';
-                            statusDiv.appendChild(s);
-                            statusDiv.appendChild(document.createTextNode('this exact variant was not found in the TP53 MutationView dataset'));
-                        }
-                        tp53Content.appendChild(statusDiv);
-
-                        if (best && path) {
-                            // Shared helpers
-                            const makeSectionHead = (table, label) => {
-                                const tr = document.createElement('tr');
-                                const td = document.createElement('td');
-                                td.colSpan = 2;
-                                td.style.cssText = 'padding:6px 0 2px; font-weight:700; font-size:0.82rem; color:#444; border-top:1px solid #e5e5e5;';
-                                td.textContent = label;
-                                tr.appendChild(td);
-                                table.appendChild(tr);
-                            };
-                            const addRow = (table, label, value) => {
-                                if (!value && value !== 0) return;
-                                const tr = document.createElement('tr');
-                                const td1 = document.createElement('td');
-                                td1.style.cssText = 'padding:3px 12px 3px 0; font-weight:600; white-space:nowrap; vertical-align:top; color:#555; font-size:0.82rem;';
-                                td1.textContent = label;
-                                const td2 = document.createElement('td');
-                                td2.style.cssText = 'padding:3px 0; color:#222; font-size:0.84rem;';
-                                td2.textContent = String(value);
-                                tr.appendChild(td1);
-                                tr.appendChild(td2);
-                                table.appendChild(tr);
-                            };
-
-                            const pathHeading = document.createElement('div');
-                            pathHeading.style.cssText = 'font-weight:700; font-size:0.85rem; color:#333; margin-bottom:4px; border-bottom:1px solid #ddd; padding-bottom:2px;';
-                            pathHeading.textContent = 'Pathogenicity evidence (best match)';
-                            tp53Content.appendChild(pathHeading);
-
-                            const table = document.createElement('table');
-                            table.style.cssText = 'width:100%; border-collapse:collapse; margin-bottom:8px;';
-
-                            // — Functional classification —
-                            const effect = path.effect || best.effect;
-                            const effectGroup = path.effect_group || best.effect_group;
-                            const taClass = path.ta_class || best.ta_class;
-                            const lofClass = path.lof_class || best.lof_class;
-                            const dneClass = path.dne_class || best.dne_class;
-                            const structClass = path.structural_class || best.structural_class;
-                            const residueFunc = path.residue_function || best.residue_function;
-                            const domainFunc = path.domain_function || best.domain_function;
-                            const structMotif = path.structural_motif || best.structural_motif;
-                            const hasFunctional = effect || effectGroup || taClass || lofClass || dneClass || structClass || residueFunc || domainFunc;
-                            if (hasFunctional) {
-                                makeSectionHead(table, 'Functional classification');
-                                addRow(table, 'Effect', effect);
-                                addRow(table, 'Effect group', effectGroup);
-                                addRow(table, 'Transactivation class', taClass);
-                                addRow(table, 'DN + LOF class', lofClass);
-                                addRow(table, 'Dominant-negative class', dneClass);
-                                addRow(table, 'Structure/function class', structClass);
-                                addRow(table, 'Residue function', residueFunc);
-                                addRow(table, 'Domain function', domainFunc);
-                                addRow(table, 'Structural motif', structMotif);
-                                addRow(table, 'Hot spot', path.hotspot || best.hotspot);
-                            }
-
-                            // — Computational predictors —
-                            const agvgd = path.agvgd_class || best.agvgd_class;
-                            const sift = path.sift_class || best.sift_class;
-                            const polyphen2 = path.polyphen2 || best.polyphen2;
-                            const bayesDel = path.bayes_del || best.bayes_del;
-                            const revel = path.revel || best.revel;
-                            let compDetails = null;
-                            if (agvgd || sift || polyphen2 || bayesDel || revel) {
-                                compDetails = document.createElement('details');
-                                const compSummary = document.createElement('summary');
-                                compSummary.style.cssText = 'cursor:pointer; font-size:0.82rem; color:#4a5f73; font-weight:600; margin:4px 0;';
-                                compSummary.textContent = 'Computational predictions';
-                                compDetails.appendChild(compSummary);
-                                const compTable = document.createElement('table');
-                                compTable.style.cssText = 'border-collapse:collapse; font-size:0.82rem;';
-                                addRow(compTable, 'AGVGD class', agvgd);
-                                addRow(compTable, 'SIFT class', sift);
-                                addRow(compTable, 'PolyPhen-2', polyphen2);
-                                addRow(compTable, 'BayesDel', bayesDel);
-                                addRow(compTable, 'REVEL', revel);
-                                compDetails.appendChild(compTable);
-                            }
-
-                            // — Variant characterisation —
-                            const variantDetails = document.createElement('details');
-                            const variantSummary = document.createElement('summary');
-                            variantSummary.style.cssText = 'cursor:pointer; font-size:0.82rem; color:#4a5f73; font-weight:600; margin:4px 0;';
-                            variantSummary.textContent = 'Variant';
-                            variantDetails.appendChild(variantSummary);
-                            const variantTable = document.createElement('table');
-                            variantTable.style.cssText = 'border-collapse:collapse; font-size:0.82rem;';
-                            addRow(variantTable, 'Mutation type', best.mutation_type);
-                            addRow(variantTable, 'Codon / location', [best.codon_number, best.exon_intron].filter(Boolean).join(' — '));
-                            addRow(variantTable, 'CpG site', path.cpg_site || best.cpg_site);
-                            addRow(variantTable, 'Splice site', path.splice_site || best.splice_site);
-                            addRow(variantTable, 'Protein (DB)', best.protein);
-                            addRow(variantTable, 'cDNA/Genomic (DB)', best.cdna_or_genomic);
-                            variantDetails.appendChild(variantTable);
-
-                            // — Epidemiological evidence —
-                            const somatic = best.somatic_count;
-                            const germline = best.germline_count;
-                            const tcga = best.tcga_icgc_genie_count;
-                            if (somatic || germline || tcga) {
-                                makeSectionHead(table, 'Epidemiological evidence');
-                                addRow(table, 'Somatic occurrences', somatic);
-                                addRow(table, 'Germline occurrences', germline);
-                                addRow(table, 'TCGA/ICGC/GENIE count', tcga);
-                            }
-
-                            tp53Content.appendChild(table);
-                            if (compDetails) tp53Content.appendChild(compDetails);
-                            tp53Content.appendChild(variantDetails);
-
-                            // — Collapsible: p53 transactivation target activity —
-                            const taTargets = path.ta_targets || best.ta_targets || {};
-                            const taEntries = Object.entries(taTargets).filter(([, v]) => v !== '' && v !== null && v !== undefined);
-                            if (taEntries.length > 0) {
-                                const taDetails = document.createElement('details');
-                                taDetails.style.marginTop = '4px';
-                                const taSummaryEl = document.createElement('summary');
-                                taSummaryEl.style.cssText = 'cursor:pointer; font-size:0.82rem; color:#4a5f73; font-weight:600;';
-                                taSummaryEl.textContent = 'p53 transactivation target activity (% of wild-type)';
-                                taDetails.appendChild(taSummaryEl);
-                                const taNote = document.createElement('div');
-                                taNote.style.cssText = 'font-size:0.78rem; color:#666; margin:3px 0 5px;';
-                                taNote.textContent = 'Values show mutant p53 activity relative to wild-type (100% = fully active). Lower values indicate loss of transcriptional function.';
-                                taDetails.appendChild(taNote);
-                                const taTable = document.createElement('table');
-                                taTable.style.cssText = 'border-collapse:collapse; font-size:0.82rem;';
-                                for (const [gene, val] of taEntries) {
-                                    const tr = document.createElement('tr');
-                                    const td1 = document.createElement('td');
-                                    td1.style.cssText = 'padding:2px 14px 2px 0; font-weight:600; color:#555;';
-                                    td1.textContent = gene;
-                                    const td2 = document.createElement('td');
-                                    const numVal = parseFloat(val);
-                                    const pct = Number.isFinite(numVal) ? `${numVal}%` : String(val);
-                                    td2.style.cssText = 'padding:2px 0; color:#222;';
-                                    if (Number.isFinite(numVal)) {
-                                        td2.style.color = numVal >= 50 ? '#2e7d32' : numVal >= 20 ? '#e65100' : '#b71c1c';
-                                    }
-                                    td2.textContent = pct;
-                                    tr.appendChild(td1);
-                                    tr.appendChild(td2);
-                                    taTable.appendChild(tr);
-                                }
-                                taDetails.appendChild(taTable);
-                                tp53Content.appendChild(taDetails);
-                            }
-
-                            // — Collapsible: SpliceAI scores —
-                            const spliceAi = path.splice_ai || best.splice_ai || {};
-                            const spliceEntries = Object.entries(spliceAi).filter(([, v]) => v !== '' && v !== null && v !== undefined && parseFloat(v) > 0);
-                            if (spliceEntries.length > 0) {
-                                const saDetails = document.createElement('details');
-                                saDetails.style.marginTop = '4px';
-                                const saSummaryEl = document.createElement('summary');
-                                saSummaryEl.style.cssText = 'cursor:pointer; font-size:0.82rem; color:#4a5f73; font-weight:600;';
-                                saSummaryEl.textContent = 'SpliceAI delta scores';
-                                saDetails.appendChild(saSummaryEl);
-                                const saNote = document.createElement('div');
-                                saNote.style.cssText = 'font-size:0.78rem; color:#666; margin:3px 0 5px;';
-                                saNote.textContent = 'DS_AL/AG = acceptor loss/gain; DS_DL/DG = donor loss/gain. Scores ≥0.2 suggest splicing impact; ≥0.5 is high confidence.';
-                                saDetails.appendChild(saNote);
-                                const saTable = document.createElement('table');
-                                saTable.style.cssText = 'border-collapse:collapse; font-size:0.82rem;';
-                                for (const [key, val] of spliceEntries) {
-                                    const tr = document.createElement('tr');
-                                    const td1 = document.createElement('td');
-                                    td1.style.cssText = 'padding:2px 14px 2px 0; font-weight:600; color:#555;';
-                                    td1.textContent = key;
-                                    const td2 = document.createElement('td');
-                                    td2.style.cssText = 'padding:2px 0; color:#222;';
-                                    td2.textContent = String(val);
-                                    tr.appendChild(td1);
-                                    tr.appendChild(td2);
-                                    saTable.appendChild(tr);
-                                }
-                                saDetails.appendChild(saTable);
-                                tp53Content.appendChild(saDetails);
-                            }
-
-                            // — Collapsible: all matches —
-                            if (tp53Data.matches.length > 1) {
-                                const matchDetails = document.createElement('details');
-                                matchDetails.style.marginTop = '4px';
-                                const matchSummaryEl = document.createElement('summary');
-                                matchSummaryEl.style.cssText = 'cursor:pointer; font-size:0.8rem; color:#4a5f73;';
-                                matchSummaryEl.textContent = `All matches (${tp53Data.matches.length})`;
-                                matchDetails.appendChild(matchSummaryEl);
-                                for (const m of tp53Data.matches) {
-                                    const mDiv = document.createElement('div');
-                                    mDiv.style.cssText = 'padding:4px 0 4px 8px; border-left:2px solid #ddd; margin:4px 0; font-size:0.79rem; color:#333;';
-                                    const parts = [
-                                        m.protein && `Protein: ${m.protein}`,
-                                        m.mutation_type && `Type: ${m.mutation_type}`,
-                                        m.exon_intron && `Location: ${m.exon_intron}`,
-                                        m.effect && `Effect: ${m.effect}`,
-                                        m.effect_group && `Group: ${m.effect_group}`,
-                                        m.ta_class && `TA class: ${m.ta_class}`,
-                                        m.lof_class && `LOF class: ${m.lof_class}`,
-                                        m.hotspot && `Hotspot: ${m.hotspot}`,
-                                        m.somatic_count && `Somatic: ${m.somatic_count}`,
-                                        m.germline_count && `Germline: ${m.germline_count}`,
-                                        m.tcga_icgc_genie_count && `TCGA/ICGC/GENIE: ${m.tcga_icgc_genie_count}`,
-                                        m.mut_id && `ID: ${m.mut_id}`,
-                                    ].filter(Boolean);
-                                    mDiv.textContent = parts.join(' | ') || '(no detail fields)';
-                                    matchDetails.appendChild(mDiv);
-                                }
-                                tp53Content.appendChild(matchDetails);
-                            }
-                        }
-
-                        // Debug (collapsed, small)
-                        if (tp53Data.debug) {
-                            const dbgDetails = document.createElement('details');
-                            dbgDetails.style.marginTop = '6px';
-                            const dbgSummary = document.createElement('summary');
-                            dbgSummary.style.cssText = 'cursor:pointer; font-size:0.76rem; color:#aaa;';
-                            dbgSummary.textContent = 'Debug info';
-                            dbgDetails.appendChild(dbgSummary);
-                            const pre = document.createElement('pre');
-                            pre.style.cssText = 'white-space:pre-wrap; font-size:0.72rem; color:#666; margin-top:4px;';
-                            pre.textContent = JSON.stringify(tp53Data.debug, null, 2);
-                            dbgDetails.appendChild(pre);
-                            tp53Content.appendChild(dbgDetails);
-                        }
-                    }
-                } catch (tp53Err) {
-                    const hint = document.createElement('span');
-                    hint.style.fontSize = '0.85rem';
-                    hint.style.color = '#4a5f73';
-                    hint.textContent = 'Live TP53 API query unavailable (ensure /api/tp53 is deployed and TP53_MUTATION_DATASET_URL is configured if needed).';
-                    tp53Content.appendChild(hint);
-                    console.warn('TP53 API error', tp53Err);
-                }
-
-                tp53Card.appendChild(tp53Content);
-                cardsContainer.appendChild(tp53Card);
+            const isTp53 = isTp53Gene(geneNames);
+            const tp53Protein = protein || proteinSearchTerm(targetProtGlobal) || '';
+            const tp53AlleleResolved = !codonOnlyResolutionGlobal && !nameShared;
+            const typedCdna = splitTranscriptHgvs(query);
+            const tp53Cdna = tp53AlleleResolved && selectedTranscript?.transcript && selectedTranscript?.cDNA
+                ? `${selectedTranscript.transcript}:${selectedTranscript.cDNA}`
+                : tp53AlleleResolved && /^NM_\d+\.\d+$/i.test(typedCdna.transcript) && /^c\./i.test(typedCdna.change)
+                    ? `${typedCdna.transcript}:${typedCdna.change}` : '';
+            const getTp53Record = () => isTp53 ? reuseLookupRequest(evidenceRequests, 'tp53', async () => {
+                // The site's resolver supplies GRCh37 coordinates, including for an
+                // input lifted from GRCh38. It leaves an unresolved protein name
+                // without allele fields, even if the codon location is known.
+                const alleles = tp53AlleleResolved ? await getResolvedVcfAlleles() : null;
+                return fetchTp53MutationDatabase({
+                    gene: 'TP53', protein: tp53Protein, cdna: tp53Cdna,
+                    genomic: tp53AlleleResolved ? gVariant : '', assembly: 'GRCh37',
+                    genomic_allele: alleles ? { assembly: 'GRCh37', chrom: alleles.chrom, pos: alleles.pos, ref: alleles.ref, alt: alleles.alt } : null,
+                    debug: true
+                });
+            }) : Promise.resolve(null);
+            if (isTp53) {
+                const card = document.createElement('div');
+                card.className = 'card';
+                const title = document.createElement('h3');
+                title.textContent = 'TP53 Database';
+                applyCardTheme(card, 'TP53 Database');
+                const content = document.createElement('div');
+                content.className = 'card-content';
+                const label = tp53Protein || tp53Cdna || gVariant;
+                if (label) appendEvidenceText(content, label, 'evidence-heading');
+                const links = document.createElement('div');
+                links.className = 'evidence-links';
+                appendEvidenceLink(links, 'TP53 Database ↗', 'https://tp53.cancer.gov/');
+                appendEvidenceLink(links, 'Search by gene variant ↗', 'https://tp53.cancer.gov/search_gene_by_mut');
+                content.appendChild(links);
+                const evidence = document.createElement('div');
+                appendEvidenceText(evidence, 'Loading TP53 MutationView…');
+                content.appendChild(evidence);
+                card.append(title, content);
+                cardsContainer.appendChild(card);
+                getTp53Record().then(data => {
+                    if (!isCurrentSearch()) return;
+                    evidence.replaceChildren();
+                    if (data) appendTp53Results(evidence, data);
+                }).catch(error => {
+                    if (isCurrentSearch()) evidence.textContent = 'TP53 MutationView unavailable.';
+                    console.warn('TP53 API error', error);
+                });
             }
             let aiReviewGene = '';
             let aiReviewSearchVariantTerm = '';
@@ -13945,18 +14037,23 @@ const initVariantSearchUi = () => {
                 return { chrom: null, pos37: null, ref, alt };
             };
 
-            const normaliseAiReviewVariantText = (value) => {
-                if (!value) return '';
-                const raw = String(value).trim().replace(/<[^>]+>/g, '');
-                const first = raw.split(',')[0].trim();
-                return first.includes(':') ? first.split(':').slice(1).join(':').trim() : first;
-            };
+            const loadClinvarPublications = () => reuseLookupRequest(evidenceRequests, 'clinvar-publications', async () => {
+                const term = [aiReviewGene, aiReviewSearchVariantTerm].filter(Boolean).join(' ');
+                const variantQuery = aiReviewSearchVariantTerm ? { gene: aiReviewGene, variant: aiReviewSearchVariantTerm } : null;
+                const [search, clinvar] = await Promise.allSettled([loadPubmedSearch(term, 5, variantQuery), getClinvarRecord()]);
+                if (!isCurrentSearch()) return { search: null, cited: null };
+                const ranked = search.status === 'fulfilled' ? { query: term, ...search.value } : { error: search.reason?.message || String(search.reason) };
+                if (search.status === 'rejected' || clinvar.status === 'rejected') evidenceRequests.delete('clinvar-publications');
+                if (clinvar.status === 'rejected' || !Array.isArray(clinvar.value?.submissions)) {
+                    return { search: ranked, cited: null };
+                }
+                const loadPmids = ids => reuseLookupRequest(evidenceRequests, `pmids:${ids.join(',')}`,
+                    () => requestPubmed(new URLSearchParams({ pmids: ids.join(',') })));
+                return combineClinvarPublications(clinvar.value, ranked, loadPmids, isCurrentSearch);
+            });
 
             const fetchAiReviewSupplementalContext = async () => {
                 const coords = await getAiReviewVariantCoordinates();
-                const clinvarVariantId = annotation?.clinvar?.variant_id && /^\d+$/.test(String(annotation.clinvar.variant_id))
-                    ? String(annotation.clinvar.variant_id)
-                    : '';
                 const pubmedTerm = [aiReviewGene, aiReviewSearchVariantTerm].filter(Boolean).join(' ');
                 const pubmedTumorTerm = tumorType ? [aiReviewGene, tumorType].filter(Boolean).join(' ') : '';
                 const pubmedVariantTumorTerm = (tumorType && aiReviewSearchVariantTerm)
@@ -13974,24 +14071,16 @@ const initVariantSearchUi = () => {
                     if (cached != null && isValid(cached)) return Promise.resolve(cached);
                     return fetcher();
                 };
-                const pubmedFromCacheOrFetch = (key, term, variantQuery = null) => cachedOr(
-                    key,
-                    (c) => Array.isArray(c.articles) && c.articles.length > 0,
-                    () => (term || variantQuery ? fetchPubmedArticles(term, 5, variantQuery) : Promise.resolve({ total: 0, articles: [] }))
-                );
+                const supplementalPubmedSearch = (term, variantQuery = null) => loadPubmedSearch(term, 5, variantQuery)
+                    .then(data => ({ query: term, ...data }));
                 const aiPubmedVariantQuery = aiReviewSearchVariantTerm
                     ? { gene: aiReviewGene, variant: aiReviewSearchVariantTerm }
                     : null;
                 const spliceApiVariant = buildSpliceAiApiVariant(rawInput, gVariant, annotation, await getResolvedVcfAlleles());
                 const supplemental = { ...aiReviewExtras };
                 const tasks = [
-                    // The ClinVar card may have recovered a variation ID from the region
-                    // pull that the MyVariant annotation lacks — reusing its record (not
-                    // just saving a fetch) also stops that recovery from being clobbered
-                    // with null here.
-                    ['clinvar_variant_record', cachedOr('clinvar_variant_record',
-                        (c) => typeof c === 'object' && !c.error,
-                        () => (clinvarVariantId ? fetchClinvarVariant(clinvarVariantId) : Promise.resolve(null)))],
+                    ['clinvar_variant_record', getClinvarRecord()],
+                    ['literature', loadClinvarPublications()],
                     ['nearby_clinvar_variants', coords.chrom && coords.pos37 ? fetchClinvarRegionVariants(coords.chrom, coords.pos37, 5).then(r => ({
                         note: 'ClinVar variants within ±5bp of the queried position. The queried variant itself may appear here if it has its own ClinVar entry. Do not use these neighboring variants\' classifications as the classification for the queried variant.',
                         window_bp: 5,
@@ -14006,12 +14095,11 @@ const initVariantSearchUi = () => {
                     ['spliceai_lookup', cachedOr('spliceai_lookup',
                         (c) => typeof c === 'object' && !c.error && Boolean(c.data),
                         () => (spliceApiVariant ? fetchSpliceAiPrediction(spliceApiVariant, { hg: '37', distance: 500, mask: 0, bc: 'basic' }) : Promise.resolve(null)))],
-                    ['pubmed', pubmedTerm ? pubmedFromCacheOrFetch('pubmed', pubmedTerm, aiPubmedVariantQuery) : Promise.resolve({ total: 0, articles: [] })],
-                    ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? pubmedFromCacheOrFetch('pubmed_tumor_type', pubmedTumorTerm) : Promise.resolve(null)],
+                    ['pubmed_tumor_type', pubmedTumorTerm && pubmedTumorTerm !== pubmedTerm ? supplementalPubmedSearch(pubmedTumorTerm) : Promise.resolve(null)],
                     ['pubmed_variant_tumor_type', pubmedVariantTumorTerm
                         && pubmedVariantTumorTerm !== pubmedTerm
                         && pubmedVariantTumorTerm !== pubmedTumorTerm
-                        ? pubmedFromCacheOrFetch('pubmed_variant_tumor_type', pubmedVariantTumorTerm,
+                        ? supplementalPubmedSearch(pubmedVariantTumorTerm,
                             aiPubmedVariantQuery ? { ...aiPubmedVariantQuery, extra: tumorType } : null)
                         : Promise.resolve(null)],
                     // The openFDA card stores the same payload shape under `openfda`;
@@ -14022,15 +14110,7 @@ const initVariantSearchUi = () => {
                     ['bbkb_biomarker_therapies', cachedOr('bbkb_biomarker_therapies',
                         (c) => Array.isArray(c.results),
                         () => (aiReviewGene ? fetchBbkbBiomarkerTherapies(aiReviewGene).catch(() => ({ total_matched: 0, returned: 0, results: [] })) : Promise.resolve(null)))],
-                    ['tp53_mutation_database', cachedOr('tp53_mutation_database',
-                        (c) => typeof c === 'object' && !c.error,
-                        () => (isTp53Gene(geneNames) ? fetchTp53MutationDatabase({
-                            gene: 'TP53',
-                            protein: normaliseAiReviewVariantText(aiReviewProtein),
-                            cdna: normaliseAiReviewVariantText(aiReviewCdna),
-                            genomic: String(gVariant || '').trim(),
-                            debug: true
-                        }) : Promise.resolve(null)))]
+                    ['tp53_mutation_database', getTp53Record()]
                 ];
                 const settled = await Promise.allSettled(tasks.map(([, promise]) => promise));
                 settled.forEach((result, idx) => {
@@ -14039,6 +14119,10 @@ const initVariantSearchUi = () => {
                         ? result.value
                         : { error: result.reason?.message || String(result.reason || 'Unavailable') };
                 });
+                const { literature } = supplemental;
+                delete supplemental.literature;
+                supplemental.pubmed = literature.search || (literature.error ? { error: literature.error } : null);
+                supplemental.clinvar_cited_publications = literature.cited || null;
                 // The openFDA card's copy (spread in as `openfda`) would duplicate
                 // `openfda_drug_labels` byte-for-byte — for drug-rich genes that is the
                 // dominant part of the payload, doubled. Keep the one canonical key.
@@ -14341,7 +14425,8 @@ const initVariantSearchUi = () => {
                             });
                         }
                     }
-                    createPubmedCard({ container: cardsContainer, tabs: pmTabs, extras: aiReviewExtras });
+                    createPubmedCard({ container: cardsContainer, tabs: pmTabs, extras: aiReviewExtras,
+                        loadSearch: loadPubmedSearch, loadClinvarPublications, isCurrentSearch });
                 }
 
                 // Card: FDA-Approved Drugs (by gene)
@@ -14364,6 +14449,7 @@ const initVariantSearchUi = () => {
                 idSuffix: '',
                 introText: 'Send the retrieved variant data to OpenRouter for a structured draft interpretation. No request is sent until you click Run AI review.',
                 loadingText: 'Gathering FDA, trial, and annotation context for AI review…',
+                isCurrentSearch,
                 buildContext: async (userNotes) => {
                     // Reuse what the cards already fetched; fall back to a fresh fetch
                     // only when a card's data never arrived (or errored).
