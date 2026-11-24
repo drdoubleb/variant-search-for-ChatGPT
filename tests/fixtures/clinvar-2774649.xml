@@ -1,0 +1,149 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<ClinVarResult-Set>
+  <VariationArchive VariationID="2774649" VariationName="NM_000546.6(TP53):c.709A&gt;T (p.Met237Leu)" VariationType="single nucleotide variant" Accession="VCV002774649" Version="2" RecordType="classified" NumberOfSubmissions="1" NumberOfSubmitters="1" DateLastUpdated="2026-04-13" DateCreated="2024-02-14" MostRecentSubmission="2025-05-03">
+    <RecordStatus>current</RecordStatus>
+    <Species>Homo sapiens</Species>
+    <ClassifiedRecord>
+      <RCVList>
+        <RCVAccession Title="NM_000546.6(TP53):c.709A&gt;T (p.Met237Leu) AND Hereditary cancer-predisposing syndrome" Accession="RCV003585851" Version="2">
+          <ClassifiedConditionList TraitSetID="13598">
+            <ClassifiedCondition DB="MedGen" ID="C0027672">Hereditary cancer-predisposing syndrome</ClassifiedCondition>
+          </ClassifiedConditionList>
+          <RCVClassifications>
+            <GermlineClassification>
+              <ReviewStatus>criteria provided, single submitter</ReviewStatus>
+              <Description DateLastEvaluated="2023-06-20" SubmissionCount="1">Uncertain significance</Description>
+            </GermlineClassification>
+          </RCVClassifications>
+        </RCVAccession>
+      </RCVList>
+      <Classifications>
+        <GermlineClassification DateLastEvaluated="2023-06-20" NumberOfSubmissions="1" NumberOfSubmitters="1" DateCreated="2024-02-14" MostRecentSubmission="2025-05-03">
+          <ReviewStatus>criteria provided, single submitter</ReviewStatus>
+          <Description>Uncertain significance</Description>
+          <Explanation DataSource="ClinVar" Type="public">Uncertain significance (1)</Explanation>
+          <Citation Type="general">
+            <ID Source="PubMed">12826609</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">29979965</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">30224644</ID>
+          </Citation>
+          <ConditionList>
+            <TraitSet ID="13598" Type="Disease" ContributesToAggregateClassification="true">
+              <Trait ID="18746" Type="Disease">
+                <Name>
+                  <ElementValue Type="Preferred">Hereditary cancer-predisposing syndrome</ElementValue>
+                  <XRef ID="699346009" DB="SNOMED CT" />
+                </Name>
+                <Name>
+                  <ElementValue Type="Alternate">Neoplastic Syndromes, Hereditary</ElementValue>
+                  <XRef ID="D009386" DB="MeSH" />
+                </Name>
+                <Name>
+                  <ElementValue Type="Alternate">Tumor predisposition</ElementValue>
+                </Name>
+                <Name>
+                  <ElementValue Type="Alternate">Hereditary Cancer Syndrome</ElementValue>
+                </Name>
+                <Name>
+                  <ElementValue Type="Alternate">Hereditary neoplastic syndrome</ElementValue>
+                  <XRef ID="MONDO:0015356" DB="MONDO" />
+                </Name>
+                <AttributeSet>
+                  <Attribute Type="keyword">Neoplasm</Attribute>
+                </AttributeSet>
+                <AttributeSet>
+                  <Attribute Type="GARD id" integerValue="19921" />
+                  <XRef ID="19921" DB="Office of Rare Diseases" />
+                </AttributeSet>
+                <AttributeSet>
+                  <Attribute Type="keyword">Hereditary cancer syndrome</Attribute>
+                </AttributeSet>
+                <Citation Type="general" Abbrev="IARC, 2008">
+                  <ID Source="pmc">3075918</ID>
+                </Citation>
+                <Citation Type="general" Abbrev="ACMG/NSGC, 2015">
+                  <ID Source="PubMed">25394175</ID>
+                </Citation>
+                <XRef ID="140162" DB="Orphanet" />
+                <XRef ID="C0027672" DB="MedGen" />
+                <XRef ID="D009386" DB="MeSH" />
+                <XRef ID="MONDO:0015356" DB="MONDO" />
+              </Trait>
+            </TraitSet>
+          </ConditionList>
+        </GermlineClassification>
+      </Classifications>
+      <ClinicalAssertionList>
+        <ClinicalAssertion ID="8046229" SubmissionDate="2025-04-29" ContributesToAggregateClassification="true" DateLastUpdated="2025-05-03" DateCreated="2024-02-14">
+          <ClinVarSubmissionID localKey="Db4KrQBSZeoE7-orUyypkXYXSYQvWhiA_MzhV21NGCI|MedGen:C0027672" submittedAssembly="GRCh37" />
+          <ClinVarAccession Accession="SCV004359989" DateUpdated="2025-05-03" DateCreated="2024-02-14" Type="SCV" Version="2" SubmitterName="Color Diagnostics, LLC DBA Color Health" OrgID="505849" OrganizationCategory="laboratory" OrgAbbreviation="Color" />
+          <RecordStatus>current</RecordStatus>
+          <Classification DateLastEvaluated="2023-06-20">
+            <ReviewStatus>criteria provided, single submitter</ReviewStatus>
+            <GermlineClassification>Uncertain significance</GermlineClassification>
+            <Citation>
+              <ID Source="PubMed">12826609</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">29979965</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">30224644</ID>
+            </Citation>
+            <Comment>This missense variant replaces methionine with leucine at codon 237 of the TP53 protein. Computational prediction suggests that this variant may have deleterious impact on protein structure and function (internally defined REVEL score threshold &gt;= 0.7, PMID: 27666373). Functional studies have shown that this variant has partially reduced transactivation activity (PMID: 12826609), displayed inconsistent results in human cell growth suppression assays (PMID: 30224644), and was functional in human cell proliferation assays (PMID: 29979965). This variant has not been reported in individuals affected with Li-Fraumeni in the literature. A different missense variant occurring at the same codon, p.Met237Ile, is known to be disease-causing (ClinVar variation ID: 142714). This variant has not been identified in the general population by the Genome Aggregation Database (gnomAD). The available evidence is insufficient to determine the role of this variant in disease conclusively. Therefore, this variant is classified as a Variant of Uncertain Significance.</Comment>
+          </Classification>
+          <Assertion>variation to disease</Assertion>
+          <AttributeSet>
+            <Attribute Type="AssertionMethod">ACMG Guidelines, 2015</Attribute>
+            <Citation>
+              <ID Source="PubMed">25741868</ID>
+            </Citation>
+          </AttributeSet>
+          <ObservedInList>
+            <ObservedIn>
+              <Sample>
+                <Origin>germline</Origin>
+                <Species TaxonomyId="9606">human</Species>
+                <AffectedStatus>unknown</AffectedStatus>
+              </Sample>
+              <Method>
+                <TypePlatform>NGS</TypePlatform>
+                <MethodType>clinical testing</MethodType>
+              </Method>
+              <ObservedData>
+                <Attribute Type="Description">not provided</Attribute>
+              </ObservedData>
+            </ObservedIn>
+          </ObservedInList>
+          <SimpleAllele>
+            <GeneList>
+              <Gene Symbol="TP53" />
+            </GeneList>
+            <VariantType>Variation</VariantType>
+            <AttributeSet>
+              <Attribute Type="HGVS">NM_000546.6:c.709A&gt;T</Attribute>
+            </AttributeSet>
+          </SimpleAllele>
+          <TraitSet Type="Disease">
+            <Trait Type="Disease">
+              <XRef DB="MedGen" ID="C0027672" Type="CUI" />
+            </Trait>
+          </TraitSet>
+          <SubmissionNameList>
+            <SubmissionName>SUB14171678</SubmissionName>
+            <SubmissionName>SUB15288549</SubmissionName>
+          </SubmissionNameList>
+        </ClinicalAssertion>
+      </ClinicalAssertionList>
+      <TraitMappingList>
+        <TraitMapping ClinicalAssertionID="8046229" TraitType="Disease" MappingType="XRef" MappingValue="C0027672" MappingRef="MedGen">
+          <MedGen CUI="C0027672" Name="Hereditary cancer-predisposing syndrome" />
+        </TraitMapping>
+      </TraitMappingList>
+    </ClassifiedRecord>
+  </VariationArchive>
+</ClinVarResult-Set>

@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation Status="MEDLINE" Owner="NLM" IndexingMethod="Manual">
+      <PMID Version="1">12826609</PMID>
+      <Article PubModel="Print-Electronic">
+        <Journal>
+          <ISSN IssnType="Print">0027-8424</ISSN>
+          <JournalIssue CitedMedium="Print">
+            <Volume>100</Volume>
+            <Issue>14</Issue>
+            <PubDate>
+              <Year>2003</Year>
+              <Month>Jul</Month>
+              <Day>08</Day>
+            </PubDate>
+          </JournalIssue>
+          <Title>Proceedings of the National Academy of Sciences of the United States of America</Title>
+          <ISOAbbreviation>Proc Natl Acad Sci U S A</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Understanding the function-structure and function-mutation relationships of p53 tumor suppressor protein by high-resolution missense mutation analysis.</ArticleTitle>
+        <Abstract>
+          <AbstractText>Inactivation of the tumor suppressor p53 by missense mutations is the most frequent genetic alteration in human cancers.</AbstractText>
+        </Abstract>
+        <AuthorList CompleteYN="Y">
+          <Author ValidYN="Y">
+            <LastName>Kato</LastName>
+            <Initials>S</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Han</LastName>
+            <Initials>SY</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Liu</LastName>
+            <Initials>W</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Otsuka</LastName>
+            <Initials>K</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Shibata</LastName>
+            <Initials>H</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Kanamaru</LastName>
+            <Initials>R</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Ishioka</LastName>
+            <Initials>C</Initials>
+          </Author>
+        </AuthorList>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation Status="MEDLINE" Owner="NLM" IndexingMethod="Manual">
+      <PMID Version="1">30224644</PMID>
+      <Article PubModel="Print-Electronic">
+        <Journal>
+          <ISSN IssnType="Electronic">1546-1718</ISSN>
+          <JournalIssue CitedMedium="Internet">
+            <Volume>50</Volume>
+            <Issue>10</Issue>
+            <PubDate>
+              <Year>2018</Year>
+              <Month>Oct</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Nature genetics</Title>
+          <ISOAbbreviation>Nat Genet</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Mutational processes shape the landscape of TP53 mutations in human cancer.</ArticleTitle>
+        <Abstract>
+          <AbstractText>Unlike most tumor suppressor genes, the most common genetic alterations in tumor protein p53 (TP53) are missense mutations1,2.</AbstractText>
+        </Abstract>
+        <AuthorList CompleteYN="Y">
+          <Author ValidYN="Y">
+            <LastName>Giacomelli</LastName>
+            <Initials>AO</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Yang</LastName>
+            <Initials>X</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Lintner</LastName>
+            <Initials>RE</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>McFarland</LastName>
+            <Initials>JM</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Duby</LastName>
+            <Initials>M</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Kim</LastName>
+            <Initials>J</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Howard</LastName>
+            <Initials>TP</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Takeda</LastName>
+            <Initials>DY</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Ly</LastName>
+            <Initials>SH</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Kim</LastName>
+            <Initials>E</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Gannon</LastName>
+            <Initials>HS</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Hurhula</LastName>
+            <Initials>B</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Sharpe</LastName>
+            <Initials>T</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Goodale</LastName>
+            <Initials>A</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Fritchman</LastName>
+            <Initials>B</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Steelman</LastName>
+            <Initials>S</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Vazquez</LastName>
+            <Initials>F</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Tsherniak</LastName>
+            <Initials>A</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Aguirre</LastName>
+            <Initials>AJ</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Doench</LastName>
+            <Initials>JG</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Piccioni</LastName>
+            <Initials>F</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Roberts</LastName>
+            <Initials>CWM</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Meyerson</LastName>
+            <Initials>M</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Getz</LastName>
+            <Initials>G</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Johannessen</LastName>
+            <Initials>CM</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Root</LastName>
+            <Initials>DE</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Hahn</LastName>
+            <Initials>WC</Initials>
+          </Author>
+        </AuthorList>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation Status="MEDLINE" Owner="NLM" IndexingMethod="Manual">
+      <PMID Version="1">29979965</PMID>
+      <Article PubModel="Print">
+        <Journal>
+          <ISSN IssnType="Electronic">1097-4164</ISSN>
+          <JournalIssue CitedMedium="Internet">
+            <Volume>71</Volume>
+            <Issue>1</Issue>
+            <PubDate>
+              <Year>2018</Year>
+              <Month>Jul</Month>
+              <Day>05</Day>
+            </PubDate>
+          </JournalIssue>
+          <Title>Molecular cell</Title>
+          <ISOAbbreviation>Mol Cell</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>A Systematic p53 Mutation Library Links Differential Functional Impact to Cancer Mutation Pattern and Evolutionary Conservation.</ArticleTitle>
+        <Abstract>
+          <AbstractText>The TP53 gene is frequently mutated in human cancer. Research has focused predominantly on six major "hotspot" codons,</AbstractText>
+          <CopyrightInformation>Copyright © 2018 Elsevier Inc. All rights reserved.</CopyrightInformation>
+        </Abstract>
+        <AuthorList CompleteYN="Y">
+          <Author ValidYN="Y">
+            <LastName>Kotler</LastName>
+            <Initials>E</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Shani</LastName>
+            <Initials>O</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Goldfeld</LastName>
+            <Initials>G</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Lotan-Pompan</LastName>
+            <Initials>M</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Tarcic</LastName>
+            <Initials>O</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Gershoni</LastName>
+            <Initials>A</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Hopf</LastName>
+            <Initials>TA</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Marks</LastName>
+            <Initials>DS</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Oren</LastName>
+            <Initials>M</Initials>
+          </Author>
+          <Author ValidYN="Y">
+            <LastName>Segal</LastName>
+            <Initials>E</Initials>
+          </Author>
+        </AuthorList>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>

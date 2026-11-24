@@ -1,0 +1,396 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<ClinVarResult-Set>
+  <VariationArchive VariationID="375941" VariationName="NM_004333.6(BRAF):c.1798_1799delinsAA (p.Val600Lys)" VariationType="Indel" Accession="VCV000375941" Version="8" RecordType="classified" NumberOfSubmissions="3" NumberOfSubmitters="3" DateLastUpdated="2026-04-26" DateCreated="2017-03-08" MostRecentSubmission="2026-04-25">
+    <RecordStatus>current</RecordStatus>
+    <Species>Homo sapiens</Species>
+    <ClassifiedRecord>
+      <RCVList>
+        <RCVAccession Title="NM_004333.6(BRAF):c.1798_1799delinsAA (p.Val600Lys) AND not provided" Accession="RCV001355295" Version="1">
+          <ClassifiedConditionList TraitSetID="9460">
+            <ClassifiedCondition DB="MedGen" ID="C3661900">not provided</ClassifiedCondition>
+          </ClassifiedConditionList>
+          <RCVClassifications>
+            <GermlineClassification>
+              <ReviewStatus>no assertion criteria provided</ReviewStatus>
+              <Description SubmissionCount="1">Uncertain significance</Description>
+            </GermlineClassification>
+          </RCVClassifications>
+        </RCVAccession>
+        <RCVAccession Title="NM_004333.6(BRAF):c.1798_1799delinsAA (p.Val600Lys) AND Melanoma" Accession="RCV006650105" Version="1">
+          <ClassifiedConditionList TraitSetID="43169">
+            <ClassifiedCondition DB="MedGen" ID="C0025202">Melanoma</ClassifiedCondition>
+          </ClassifiedConditionList>
+          <RCVClassifications>
+            <SomaticClinicalImpact>
+              <ReviewStatus>criteria provided, single submitter</ReviewStatus>
+              <Description ClinicalImpactAssertionType="therapeutic" ClinicalImpactClinicalSignificance="sensitivity/response" DateLastEvaluated="2026-04-22" SubmissionCount="1">Tier I - Strong</Description>
+            </SomaticClinicalImpact>
+          </RCVClassifications>
+        </RCVAccession>
+        <RCVAccession Title="NM_004333.6(BRAF):c.1798_1799delinsAA (p.Val600Lys) AND Spitz Melanocytoma" Accession="RCV006253960" Version="1">
+          <ClassifiedConditionList TraitSetID="107577">
+            <ClassifiedCondition DB="MedGen" ID="C4522245">Spitz Melanocytoma</ClassifiedCondition>
+          </ClassifiedConditionList>
+          <RCVClassifications>
+            <SomaticClinicalImpact>
+              <ReviewStatus>criteria provided, single submitter</ReviewStatus>
+              <Description ClinicalImpactAssertionType="diagnostic" ClinicalImpactClinicalSignificance="supports diagnosis" DateLastEvaluated="2025-05-14" SubmissionCount="1">Tier I - Strong</Description>
+            </SomaticClinicalImpact>
+          </RCVClassifications>
+        </RCVAccession>
+      </RCVList>
+      <Classifications>
+        <GermlineClassification NumberOfSubmissions="1" NumberOfSubmitters="1" DateCreated="2017-03-08" MostRecentSubmission="2021-04-13">
+          <ReviewStatus>no assertion criteria provided</ReviewStatus>
+          <Description>Uncertain significance</Description>
+          <Explanation DataSource="ClinVar" Type="public">Uncertain significance (1)</Explanation>
+          <DescriptionHistory Dated="2024-12-21">
+            <Description>Conflicting classifications of pathogenicity</Description>
+          </DescriptionHistory>
+          <DescriptionHistory Dated="2024-02-17">
+            <Description>drug response</Description>
+          </DescriptionHistory>
+          <DescriptionHistory Dated="2020-03-29">
+            <Description>Pathogenic</Description>
+          </DescriptionHistory>
+          <ConditionList>
+            <TraitSet ID="9460" Type="Disease" ContributesToAggregateClassification="true">
+              <Trait ID="17556" Type="Disease">
+                <Name>
+                  <ElementValue Type="Preferred">not provided</ElementValue>
+                  <XRef ID="13DG0619" DB="Genomic Medicine Center of Excellence, King Faisal Specialist Hospital and Research Centre" />
+                </Name>
+                <Name>
+                  <ElementValue Type="Alternate">none provided</ElementValue>
+                </Name>
+                <AttributeSet>
+                  <Attribute Type="public definition">The term 'not provided' is registered in MedGen to support identification of submissions to ClinVar for which no condition was named when assessing the variant. 'not provided' differs from 'not specified', which is used when a variant is asserted to be benign, likely benign, or of uncertain significance for conditions that have not been specified.</Attribute>
+                </AttributeSet>
+                <XRef ID="C3661900" DB="MedGen" />
+              </Trait>
+            </TraitSet>
+          </ConditionList>
+        </GermlineClassification>
+        <SomaticClinicalImpact DateLastEvaluated="2026-04-22" NumberOfSubmissions="2" NumberOfSubmitters="2" DateCreated="2025-11-22" MostRecentSubmission="2026-04-25">
+          <ReviewStatus>criteria provided, multiple submitters</ReviewStatus>
+          <Description>Tier I - Strong</Description>
+          <Citation Type="general">
+            <ID Source="PubMed">16799476</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">19251651</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">26343582</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">30069451</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">30190871</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">35160279</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">36261329</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">36351866</ID>
+          </Citation>
+          <Citation Type="general">
+            <ID Source="PubMed">36841436</ID>
+          </Citation>
+          <Citation Type="general">
+            <URL>https://civicdb.org/links/evidence/4181</URL>
+          </Citation>
+          <Citation Type="general">
+            <URL>https://civicdb.org/links/evidence/6179</URL>
+          </Citation>
+          <Citation Type="general">
+            <URL>https://civicdb.org/links/evidence/6939</URL>
+          </Citation>
+          <Citation Type="general">
+            <URL>https://civicdb.org/links/evidence/6941</URL>
+          </Citation>
+          <Citation Type="general">
+            <URL>https://pubmed.ncbi.nlm.nih.gov/23020132</URL>
+          </Citation>
+          <Citation Type="general">
+            <URL>https://pubmed.ncbi.nlm.nih.gov/25265492</URL>
+          </Citation>
+          <Citation Type="general">
+            <URL>https://pubmed.ncbi.nlm.nih.gov/25399551</URL>
+          </Citation>
+          <Citation Type="general">
+            <URL>https://pubmed.ncbi.nlm.nih.gov/28891408</URL>
+          </Citation>
+          <ConditionList>
+            <TraitSet ID="107577" Type="Disease" ContributesToAggregateClassification="true">
+              <Trait ID="80166" Type="Disease">
+                <Name>
+                  <ElementValue Type="Preferred">Spitz Melanocytoma</ElementValue>
+                </Name>
+                <XRef ID="C4522245" DB="MedGen" />
+              </Trait>
+            </TraitSet>
+            <TraitSet ID="43169" Type="Disease" ContributesToAggregateClassification="true">
+              <Trait ID="23374" Type="Disease">
+                <Name>
+                  <ElementValue Type="Preferred">Melanoma</ElementValue>
+                  <XRef ID="MONDO:0005105" DB="MONDO" />
+                </Name>
+                <AttributeSet>
+                  <Attribute Type="keyword">Neoplasm</Attribute>
+                </AttributeSet>
+                <Citation Type="Suggested Reading" Abbrev="NCI PDQ, Skin Cancer">
+                  <ID Source="PubMed">26389333</ID>
+                </Citation>
+                <Citation Type="Suggested Reading" Abbrev="NCI PDQ, Cancer Genetics Counseling">
+                  <ID Source="PubMed">26389258</ID>
+                </Citation>
+                <Citation Type="general" Abbrev="SEOM, 2021">
+                  <ID Source="PubMed">33651321</ID>
+                  <ID Source="pmc">8057998</ID>
+                </Citation>
+                <Citation Type="practice guideline" Abbrev="NICE, 2022">
+                  <URL>https://www.nice.org.uk/guidance/ng14</URL>
+                  <CitationText>UK NICE Guideline NG14, Melanoma: assessment and management, 2022</CitationText>
+                </Citation>
+                <XRef ID="C0025202" DB="MedGen" />
+                <XRef ID="D008545" DB="MeSH" />
+                <XRef ID="MONDO:0005105" DB="MONDO" />
+                <XRef Type="primary" ID="HP:0002861" DB="Human Phenotype Ontology" />
+                <XRef Type="secondary" ID="HP:0002887" DB="Human Phenotype Ontology" />
+                <XRef Type="secondary" ID="HP:0006777" DB="Human Phenotype Ontology" />
+                <XRef Type="secondary" ID="HP:0007474" DB="Human Phenotype Ontology" />
+              </Trait>
+            </TraitSet>
+          </ConditionList>
+        </SomaticClinicalImpact>
+      </Classifications>
+      <ClinicalAssertionList>
+        <ClinicalAssertion ID="3050940" SubmissionDate="2021-03-31" ContributesToAggregateClassification="true" DateLastUpdated="2021-04-13" DateCreated="2021-04-13">
+          <ClinVarSubmissionID localKey="chr7:140453135-140453137:ce2ef48cc12e0dce447bf8fd1ac2613c" localKeyIsSubmitted="1" submittedAssembly="GRCh37" />
+          <ClinVarAccession Accession="SCV001550139" DateUpdated="2021-04-13" DateCreated="2021-04-13" Type="SCV" Version="1" SubmitterName="Department of Pathology and Laboratory Medicine, Sinai Health System" OrgID="506152" OrganizationCategory="laboratory" OrgAbbreviation="PLM-SHS" />
+          <AdditionalSubmitters>
+            <SubmitterDescription OrgID="506759" SubmitterName="Franklin by Genoox" Type="secondary" OrganizationCategory="other" />
+          </AdditionalSubmitters>
+          <RecordStatus>current</RecordStatus>
+          <Classification>
+            <ReviewStatus>no assertion criteria provided</ReviewStatus>
+            <GermlineClassification>Uncertain significance</GermlineClassification>
+          </Classification>
+          <Assertion>variation to disease</Assertion>
+          <ObservedInList>
+            <ObservedIn>
+              <Sample>
+                <Origin>unknown</Origin>
+                <Species TaxonomyId="9606">human</Species>
+                <AffectedStatus>yes</AffectedStatus>
+              </Sample>
+              <Method>
+                <MethodType>clinical testing</MethodType>
+              </Method>
+              <ObservedData>
+                <Attribute Type="VariantAlleles" integerValue="5" />
+              </ObservedData>
+            </ObservedIn>
+          </ObservedInList>
+          <SimpleAllele>
+            <GeneList>
+              <Gene Symbol="BRAF" />
+            </GeneList>
+            <VariantType>Variation</VariantType>
+            <Location>
+              <SequenceLocation Assembly="GRCh37" Chr="7" alternateAllele="TT" referenceAllele="AC" start="140453136" stop="140453137" variantLength="2" />
+            </Location>
+          </SimpleAllele>
+          <TraitSet Type="Disease">
+            <Trait Type="Disease">
+              <Name>
+                <ElementValue Type="Preferred">not provided</ElementValue>
+              </Name>
+            </Trait>
+          </TraitSet>
+          <StudyName>The Canadian Open Genetics Repository (COGR)</StudyName>
+          <SubmissionNameList>
+            <SubmissionName>SUB9371647</SubmissionName>
+          </SubmissionNameList>
+        </ClinicalAssertion>
+        <ClinicalAssertion ID="13564105" SubmissionDate="2025-11-20" ContributesToAggregateClassification="true" DateLastUpdated="2025-11-22" DateCreated="2025-11-22">
+          <ClinVarSubmissionID localKey="2882143f35846e9e7851e382d166347d11fe64ad4eb72316390c777649cf9288" localKeyIsSubmitted="1" />
+          <ClinVarAccession Accession="SCV007105129" DateUpdated="2025-11-22" DateCreated="2025-11-22" Type="SCV" Version="1" SubmitterName="Institute for Genomic Medicine (IGM) Clinical Laboratory, Nationwide Children's Hospital" OrgID="196472" OrganizationCategory="laboratory" />
+          <RecordStatus>current</RecordStatus>
+          <Classification DateLastEvaluated="2025-05-14">
+            <ReviewStatus>criteria provided, single submitter</ReviewStatus>
+            <SomaticClinicalImpact ClinicalImpactAssertionType="diagnostic" ClinicalImpactClinicalSignificance="supports diagnosis">Tier I - Strong</SomaticClinicalImpact>
+            <Citation>
+              <ID Source="PubMed">19251651</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">26343582</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">16799476</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">30069451</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">30190871</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">35160279</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">36261329</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">36351866</ID>
+            </Citation>
+            <Citation>
+              <ID Source="PubMed">36841436</ID>
+            </Citation>
+            <Comment Type="public">Variant has Tier I (strong) clinical significance as a diagnostic inclusion criterion in Spitz Melanocytoma, based on the following evidence: 1) Documented in one or more cancer databases (e.g., St. Jude Pecan, COSMIC, CIViC, OncoKB). 2) Appears in one or more well-established professional guidelines (e.g., World Health Organization [WHO]; National Comprehensive Cancer Network [NCCN]) as providing diagnostic, prognostic, or therapeutic information. 3) Information in the literature supports potential biologic effect of variant (PMIDs: 19251651, 26343582). 4) Diagnostic for a specific tumor type/classification based on well-powered studies with expert-level consensus (Evidence Level B; PMIDs: 16799476, 30069451, 30190871, 35160279, 36261329, 36351866, 36841436).</Comment>
+          </Classification>
+          <Assertion>variation to disease</Assertion>
+          <AttributeSet>
+            <Attribute Type="AssertionMethod">AMP/ASCO/CAP Guidelines, 2017</Attribute>
+            <Citation>
+              <ID Source="PubMed">27993330</ID>
+            </Citation>
+          </AttributeSet>
+          <ObservedInList>
+            <ObservedIn>
+              <Sample>
+                <Origin>somatic</Origin>
+                <Species TaxonomyId="9606">human</Species>
+                <AffectedStatus>yes</AffectedStatus>
+              </Sample>
+              <Method>
+                <MethodType>clinical testing</MethodType>
+              </Method>
+              <ObservedData>
+                <Attribute Type="Description">not provided</Attribute>
+              </ObservedData>
+            </ObservedIn>
+          </ObservedInList>
+          <SimpleAllele>
+            <GeneList>
+              <Gene Symbol="BRAF" />
+            </GeneList>
+            <VariantType>Variation</VariantType>
+            <OtherNameList>
+              <Name Type="SubmitterVariantId">NM_004333.6:c.1798_1799delGTinsAA p.(Val600Lys)</Name>
+            </OtherNameList>
+            <AttributeSet>
+              <Attribute Type="HGVS">NM_004333.6:c.1798_1799delinsAA</Attribute>
+            </AttributeSet>
+          </SimpleAllele>
+          <TraitSet Type="Disease">
+            <Trait Type="Disease">
+              <Name>
+                <ElementValue Type="Preferred">Spitz Melanocytoma</ElementValue>
+              </Name>
+              <XRef DB="MedGen" ID="C4522245" />
+            </Trait>
+          </TraitSet>
+          <SubmissionNameList>
+            <SubmissionName>SUB15784428</SubmissionName>
+          </SubmissionNameList>
+        </ClinicalAssertion>
+        <ClinicalAssertion ID="14403895" SubmissionDate="2026-04-22" ContributesToAggregateClassification="true" DateLastUpdated="2026-04-25" DateCreated="2026-04-25">
+          <ClinVarSubmissionID localKey="civic.aid:13" localKeyIsSubmitted="1" submittedAssembly="GRCh38" />
+          <ClinVarAccession Accession="SCV007542592" DateUpdated="2026-04-25" DateCreated="2026-04-25" Type="SCV" Version="1" SubmitterName="CIViC Knowledgebase, Washington University School of Medicine" OrgID="506594" OrganizationCategory="laboratory" OrgAbbreviation="CIViC" />
+          <RecordStatus>current</RecordStatus>
+          <Classification DateLastEvaluated="2026-04-22">
+            <ReviewStatus>criteria provided, single submitter</ReviewStatus>
+            <SomaticClinicalImpact ClinicalImpactAssertionType="therapeutic" ClinicalImpactClinicalSignificance="sensitivity/response" DrugForTherapeuticAssertion="Dabrafenib;Trametinib">Tier I - Strong</SomaticClinicalImpact>
+            <Citation>
+              <URL>https://pubmed.ncbi.nlm.nih.gov/28891408</URL>
+            </Citation>
+            <Citation>
+              <URL>https://civicdb.org/links/evidence/6179</URL>
+            </Citation>
+            <Citation>
+              <URL>https://pubmed.ncbi.nlm.nih.gov/23020132</URL>
+            </Citation>
+            <Citation>
+              <URL>https://civicdb.org/links/evidence/6941</URL>
+            </Citation>
+            <Citation>
+              <URL>https://pubmed.ncbi.nlm.nih.gov/25399551</URL>
+            </Citation>
+            <Citation>
+              <URL>https://civicdb.org/links/evidence/4181</URL>
+            </Citation>
+            <Citation>
+              <URL>https://pubmed.ncbi.nlm.nih.gov/25265492</URL>
+            </Citation>
+            <Citation>
+              <URL>https://civicdb.org/links/evidence/6939</URL>
+            </Citation>
+            <Comment Type="public">Combination treatment of BRAF inhibitor dabrafenib and MEK inhibitor trametinib is recommended for adjuvant treatment of stage III or recurrent melanoma with the less common BRAF V600K mutation detected by the approved THxID kit, as well as first line treatment for metastatic melanoma. This treatment combination was FDA approved based on the (COMBI-v) trial, where 68 V600K metastatic melanoma patients had either a 65 percent response rate to dabrafenib and trametinib combination therapy, or a 44 percent with vemurafenib alone (civic.EID:4181), as well as the COMBI-D (civic.EID:6939), and COMBI-AD (civic.EID:6179) Trials, which also showed superiority of combination therapy.</Comment>
+          </Classification>
+          <Assertion>variation to disease</Assertion>
+          <AttributeSet>
+            <Attribute Type="AssertionMethod">AMP/ASCO/CAP Guidelines, 2017</Attribute>
+            <Citation>
+              <ID Source="PubMed">27993330</ID>
+            </Citation>
+          </AttributeSet>
+          <ObservedInList>
+            <ObservedIn>
+              <Sample>
+                <Origin>somatic</Origin>
+                <Species TaxonomyId="9606">human</Species>
+                <AffectedStatus>unknown</AffectedStatus>
+              </Sample>
+              <Method>
+                <MethodType>curation</MethodType>
+              </Method>
+              <ObservedData>
+                <Attribute Type="Description">not provided</Attribute>
+              </ObservedData>
+            </ObservedIn>
+          </ObservedInList>
+          <SimpleAllele>
+            <GeneList>
+              <Gene Symbol="BRAF" />
+            </GeneList>
+            <VariantType>Variation</VariantType>
+            <OtherNameList>
+              <Name Type="SubmitterVariantId">civic.mpid:559</Name>
+              <Name>VAL600LYS</Name>
+            </OtherNameList>
+            <AttributeSet>
+              <Attribute Type="HGVS">NM_004333.4:c.1798_1799delGTinsAA</Attribute>
+            </AttributeSet>
+          </SimpleAllele>
+          <TraitSet Type="Disease">
+            <Trait Type="Disease">
+              <Name>
+                <ElementValue Type="Preferred">Melanoma</ElementValue>
+              </Name>
+            </Trait>
+          </TraitSet>
+          <SubmissionNameList>
+            <SubmissionName>SUB16140015</SubmissionName>
+          </SubmissionNameList>
+        </ClinicalAssertion>
+      </ClinicalAssertionList>
+      <TraitMappingList>
+        <TraitMapping ClinicalAssertionID="3050940" TraitType="Disease" MappingType="Name" MappingValue="not provided" MappingRef="Preferred">
+          <MedGen CUI="C3661900" Name="not provided" />
+        </TraitMapping>
+        <TraitMapping ClinicalAssertionID="13564105" TraitType="Disease" MappingType="Name" MappingValue="Spitz Melanocytoma" MappingRef="Preferred">
+          <MedGen CUI="C4522245" Name="Spitz Melanocytoma" />
+        </TraitMapping>
+        <TraitMapping ClinicalAssertionID="14403895" TraitType="Disease" MappingType="Name" MappingValue="Melanoma" MappingRef="Preferred">
+          <MedGen CUI="C0025202" Name="Melanoma" />
+        </TraitMapping>
+      </TraitMappingList>
+    </ClassifiedRecord>
+  </VariationArchive>
+</ClinVarResult-Set>

@@ -1,0 +1,78 @@
+{
+  "_id": "chr17:g.7577572T>A",
+  "chrom": "17",
+  "hg19": {
+    "end": 7577572,
+    "start": 7577572
+  },
+  "vcf": {
+    "alt": "A",
+    "position": "7577572",
+    "ref": "T"
+  },
+  "clinvar": {
+    "variant_id": 2774649,
+    "gene": {
+      "id": "7157",
+      "symbol": "TP53"
+    },
+    "rcv": {
+      "accession": "RCV003585851",
+      "clinical_significance": "Uncertain significance",
+      "conditions": {
+        "identifiers": {
+          "medgen": "C0027672",
+          "mesh": "D009386",
+          "mondo": "MONDO:0015356"
+        },
+        "name": "Hereditary cancer-predisposing syndrome",
+        "synonyms": [
+          "Neoplastic Syndromes, Hereditary",
+          "Tumor predisposition",
+          "Cancer predisposition",
+          "Hereditary neoplastic syndrome",
+          "Hereditary Cancer Syndrome"
+        ]
+      },
+      "last_evaluated": "2023-06-20",
+      "number_submitters": 1,
+      "origin": "germline",
+      "preferred_name": "NM_000546.6(TP53):c.709A>T (p.Met237Leu)",
+      "review_status": "criteria provided, single submitter"
+    },
+    "hgvs": {
+      "coding": [
+        "NM_000546.6:c.709A>T"
+      ]
+    }
+  },
+  "snpeff": {
+    "ann": [
+      {
+        "cdna": {
+          "length": "2591",
+          "position": "911"
+        },
+        "cds": {
+          "length": "1182",
+          "position": "709"
+        },
+        "effect": "missense_variant",
+        "feature_id": "NM_000546.5",
+        "feature_type": "transcript",
+        "gene_id": "TP53",
+        "genename": "TP53",
+        "hgvs_c": "c.709A>T",
+        "hgvs_p": "p.Met237Leu",
+        "protein": {
+          "length": "393",
+          "position": "237"
+        },
+        "putative_impact": "MODERATE",
+        "rank": "7",
+        "total": "11",
+        "transcript_biotype": "protein_coding"
+      }
+    ]
+  }
+}
