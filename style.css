@@ -536,6 +536,11 @@ footer a:hover {
 .evidence-comment {
     white-space: pre-wrap;
 }
+.clinvar-submission-group > h4 {
+    margin: 0.8rem 0 0.25rem;
+    font-size: 0.84rem;
+    overflow-wrap: anywhere;
+}
 .evidence-links {
     display: flex;
     flex-wrap: wrap;
@@ -762,8 +767,7 @@ footer a:hover {
 }
 
 .ai-review-intro,
-.ai-review-summary,
-.ai-review-rationale {
+.ai-review-summary {
     margin: 0 0 0.75rem;
     line-height: 1.45;
 }
@@ -928,22 +932,27 @@ footer a:hover {
     border: 1px solid #fecaca;
 }
 
-.ai-review-badges {
-    display: flex;
-    flex-wrap: wrap;
+.ai-review-assessments {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
     gap: 0.5rem;
-    margin-bottom: 0.75rem;
+    margin: 0 0 0.75rem;
 }
-
-.ai-review-badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 0.35rem 0.55rem;
-    border-radius: 999px;
-    background: #eef2ff;
+.ai-review-assessments > div {
+    padding: 0.55rem 0.65rem;
+    border: 1px solid #e0e7ff;
+    border-radius: 0.45rem;
+    overflow-wrap: anywhere;
+}
+.ai-review-assessments dt {
     color: #3730a3;
     font-size: 0.82rem;
     font-weight: 700;
+}
+.ai-review-assessments dd {
+    margin: 0.25rem 0 0;
+    color: #1f2937;
+    font-size: 0.87rem;
 }
 
 .ai-review-output h4 {

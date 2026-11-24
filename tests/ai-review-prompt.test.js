@@ -46,10 +46,11 @@ for (const [label, prompt] of [['JSON', JSON_PROMPT], ['human', HUMAN_PROMPT]]) 
 // Spot-check that the tiering substance really is in both, not just byte-equal
 // blobs — these are the rules most likely to be edited in one place only.
 for (const [label, prompt] of [['JSON', JSON_PROMPT], ['human', HUMAN_PROMPT]]) {
-    check(`${label} prompt defines Tier IIE`, prompt.includes('Tier IIE (tentative):'));
-    check(`${label} prompt keeps the tissue-agnostic rule`, prompt.includes('Tissue-agnostic / all-solid-tumor approvals count as same-tumor evidence'));
-    check(`${label} prompt keeps the KRAS G12C colorectal rule`, prompt.includes('KRAS G12C inhibitor + anti-EGFR combination therapy'));
-    check(`${label} prompt keeps the Pathogenic floor of Tier IIE`, prompt.includes('must receive a minimum of Tier IIE'));
+    check(`${label} prompt asks for three independent results`, /Germline pathogenicity[\s\S]+Somatic oncogenicity[\s\S]+Tumor-specific clinical significance/.test(prompt));
+    check(`${label} prompt limits tissue-agnostic evidence to qualifying settings`, prompt.includes('when the submitted tumor and biomarker meet the indication'));
+    check(`${label} prompt retains the KRAS G12C evidence example`, prompt.includes('KRAS G12C inhibitor + anti-EGFR combinations'));
+    check(`${label} prompt allows an insufficient disease context`, prompt.includes('Insufficient disease context'));
+    check(`${label} prompt uses independent clinical tiers`, prompt.includes('has no automatic effect on the clinical significance tier') && !prompt.includes('Tier IIE'));
 }
 
 // --- placeholders ---------------------------------------------------------
@@ -80,7 +81,8 @@ check('JSON prompt asks for strict JSON', JSON_PROMPT.includes('Return ONLY vali
 // arrays. Assert the tail still names JSON and the schema keys.
 const jsonTail = JSON_PROMPT.slice(JSON_PROMPT.indexOf(CONTEXT_BLOCK) + CONTEXT_BLOCK.length);
 check('JSON prompt tail names JSON', jsonTail.includes('single valid JSON object'));
-check('JSON prompt tail names schema keys', jsonTail.includes('amp_tier') && jsonTail.includes('limitations'));
+check('JSON prompt tail names schema keys', ['germline_pathogenicity', 'somatic_oncogenicity', 'clinical_significance', 'limitations']
+    .every(key => jsonTail.includes(key)));
 check('JSON prompt tail forbids code fences', jsonTail.includes('no markdown code fences'));
 
 // The human prompt must not mention JSON output at all. Its only legitimate use of

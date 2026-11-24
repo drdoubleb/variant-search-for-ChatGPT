@@ -22,6 +22,7 @@ import HUMAN_PROMPT_TEMPLATE from './_ai-review-prompt-human.js';
 import { checkRateLimits } from './_ratelimit.js';
 import { verifyTurnstile } from './_turnstile.js';
 import { isOriginAllowed } from './_origin.js';
+import { normalizeReview, REVIEW_SCHEMA } from './_ai-review-result.js';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODEL = 'openai/gpt-6-luna';
@@ -134,40 +135,6 @@ function extractUserNotes(context) {
     return trimmed.length > USER_NOTES_MAX_CHARS ? `${trimmed.slice(0, USER_NOTES_MAX_CHARS)}\n...[truncated]` : trimmed;
 }
 
-const SCHEMA = {
-    pathogenicity: 'Pathogenic | Likely Pathogenic | VUS | Likely Benign | Benign',
-    amp_tier: 'Tier IA | Tier IB | Tier IIC | Tier IID | Tier IIE (tentative) | Tier III | Tier IV',
-    amp_tier_rationale: 'brief rationale with tumor-type considerations and the evidence level supporting the selected AMP tier',
-    fda_approved_therapies: [
-        {
-            drug: 'string',
-            indication: 'string',
-            biomarker_context: 'string',
-            evidence: 'string'
-        }
-    ],
-    resistance_or_lack_of_benefit: [
-        {
-            therapy: 'string',
-            tumor_type: 'string',
-            biomarker_context: 'string',
-            evidence: 'string'
-        }
-    ],
-    clinical_trials: [
-        {
-            nct_id: 'string',
-            title: 'string',
-            phase: 'string',
-            intervention: 'string',
-            relevance: 'string',
-            url: 'string'
-        }
-    ],
-    summary: 'brief variant interpretation and clinical significance',
-    limitations: ['brief caveats and verification needs']
-};
-
 // Two self-contained prompts, assembled from the same clinical core (see
 // ./_ai-review-prompt-core.js) but with their own output-format sections:
 //   humanReadable: false → strict JSON, parsed into the site's result cards.
@@ -184,7 +151,7 @@ function buildPrompt(context, contextText, { humanReadable = false } = {}) {
 
     const replacements = {
         '{{USER_NOTES_SECTION}}': userNotesSection,
-        '{{SCHEMA_JSON}}': JSON.stringify(SCHEMA), // no-op in the human prompt
+        '{{SCHEMA_JSON}}': JSON.stringify(REVIEW_SCHEMA), // no-op in the human prompt
         '{{CONTEXT_JSON}}': contextText
     };
 
@@ -361,7 +328,9 @@ export default async function handler(req, res) {
             }
         }
 
-        return res.status(200).json({ model, review, usage: data.usage || null, used_user_key: usingUserKey, ...contextOmissions });
+        return res.status(200).json({
+            model, review: normalizeReview(review, context), usage: data.usage || null, used_user_key: usingUserKey, ...contextOmissions
+        });
     } catch (err) {
         const message = err?.name === 'AbortError' ? 'OpenRouter request timed out' : (err.message || 'AI review failed');
         return res.status(502).json({ error: message });

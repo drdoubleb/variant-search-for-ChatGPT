@@ -5,7 +5,8 @@
   "description": "Variant Search (Beta) — HGVS variant annotation frontend with Vercel serverless proxies.",
   "type": "module",
   "scripts": {
-    "test": "for f in tests/*.test.js; do echo \"# $f\"; node \"$f\" || exit 1; done"
+    "test": "for f in tests/*.test.js; do echo \"# $f\"; node \"$f\" || exit 1; done",
+    "test:release": "node tests/release-smoke.js"
   },
   "dependencies": {
     "@upstash/ratelimit": "^2.0.5",

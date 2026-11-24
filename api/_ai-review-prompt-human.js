@@ -27,24 +27,25 @@ const OUTPUT_FORMAT = `Output format:
 
 Write a clear, human-readable clinical interpretation for a knowledgeable clinical or scientific reader. Use Markdown, with a short heading per section and bullet points within sections. Do not return a machine-readable data structure — this answer is for a person to read.
 
-Cover these sections, in this order:
+Use these sections in order.
 
-1. Pathogenicity — the classification (Pathogenic, Likely Pathogenic, VUS, Likely Benign, or Benign) and a one-line justification.
-2. AMP/ASCO/CAP tier — the tier (Tier IA, Tier IB, Tier IIC, Tier IID, Tier IIE (tentative), Tier III, or Tier IV) and a brief rationale referencing the evidence level and the submitted tumor type.
-3. FDA-approved therapies — one bullet per therapy, giving the drug, indication, biomarker context, and evidence. If none are supported, say so explicitly.
-4. Resistance or lack of benefit — one bullet per therapy, giving the therapy, tumor type, biomarker context, and evidence. If none are supported, say so explicitly.
-5. Clinical trials — one bullet per trial, giving the NCT ID, title, phase, intervention, relevance, and URL. If none are relevant, say so explicitly.
-6. Summary — a short paragraph on the variant interpretation and its clinical significance.
-7. Limitations and verification needs — brief bullets on caveats and what must be confirmed.
+1. Germline pathogenicity — give the classification, the evaluated condition, and the independent rationale.
+2. Somatic oncogenicity — give the classification and the supporting rationale.
+3. Tumor-specific clinical significance — name the submitted tumor type and the assigned AMP/ASCO/CAP tier. Give the evidence level for an assessed Tier I or II. Use Insufficient disease context or Insufficient evidence when applicable.
+4. FDA-approved therapies — give the drug, indication, biomarker, and supporting evidence for each finding.
+5. Resistance or lack of benefit — give the therapy, tumor type, biomarker, and evidence with a source for each finding.
+6. Clinical trials — give the NCT ID, title, phase, intervention, relevance, and URL for each lead.
+7. Summary — briefly explain the variant and the most relevant evidence.
+8. Limitations and verification needs — state what is uncertain and what sources or criteria need checking.
 
-Keep the clinical caution and disclaimers throughout: this is for research and education only, it is not medical advice, and it must be verified against curated databases, current FDA labeling, clinical guidelines, and trial eligibility criteria before any clinical use.`;
+State plainly when the supplied evidence supports no findings for a section. Present the interpretation as a research and education summary that requires verification before clinical use.`;
 
 // Repeated AFTER the context payload for the same reason as the JSON prompt: the
 // payload can run to hundreds of thousands of tokens, leaving the output-format
 // instruction far from the end. Phrased positively (write Markdown prose) rather
 // than as a prohibition, so this prompt still never mentions JSON at all.
 const FINAL_REMINDER = `Reminder — output format for this response:
-Write the answer as Markdown prose for a human reader, using the seven sections in the order given above.
+Write the answer as Markdown prose for a human reader, using the eight sections in the order given above.
 Do not return a machine-readable data structure. Keep each section concise.`;
 
 export default [CORE_GUIDANCE, OUTPUT_FORMAT, SELF_CHECK, CONTEXT_BLOCK, FINAL_REMINDER].join('\n\n');

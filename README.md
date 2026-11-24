@@ -1089,7 +1089,7 @@ coordinate.
 
 `GET /api/clinvar-variant?id=2774649` returns the existing germline, somatic clinical-impact, oncogenicity, and per-condition somatic fields. It also returns the VCV accession and retrieval metadata under `record` and individual SCVs under `submissions`. Each SCV retains its submitter, classification type, condition, criteria, evaluation date, and comments. PubMed IDs retain the SCV and XML location that supplied them. Citations from the classification or observation can contribute to the variant literature lookup. The assertion-method and general citations remain available with the submission. [ClinVar VCV schema](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/xsd_public/ClinVar_VCV_2.6.xsd)
 
-The ClinVar card displays the SCVs under **Submission evidence**. The PubMed card adds cited papers in its variant panel. `GET /api/pubmed?pmids=12826609,30224644` accepts up to 20 comma-separated PMIDs in a separate lookup mode. The card reuses variant-search records and requests missing metadata for up to 40 distinct cited PMIDs per lookup. It reports unavailable or omitted metadata and retains the original citation links. Both AI actions reuse the same data regardless of which sections are open.
+The ClinVar card groups SCVs by assertion type and submitted condition set under **Submission evidence**. It displays ClinVar’s aggregate participation flag on each SCV when available. The PubMed card adds cited papers in its variant panel. `GET /api/pubmed?pmids=12826609,30224644` accepts up to 20 comma-separated PMIDs in a separate lookup mode. The card reuses variant-search records and requests missing metadata for up to 40 distinct cited PMIDs per lookup. It reports unavailable or omitted metadata and retains the original citation links. Both AI actions reuse the same data regardless of which sections are open.
 
 The regression case is TP53 `NM_000546.6:c.709A>T` (p.Met237Leu), VCV002774649. The Color Health submission describes different results from yeast transactivation, human-cell growth suppression, and proliferation assays. Its wording and citations are preserved as a submitter interpretation. [ClinVar record](https://www.ncbi.nlm.nih.gov/clinvar/variation/2774649/)
 
@@ -1108,7 +1108,22 @@ The regression case is TP53 `NM_000546.6:c.709A>T` (p.Met237Leu), VCV002774649. 
 
 A versioned genomic HGVS such as `NC_000017.10:g.7577572T>A` also carries the assembly. A chromosome-based HGVS requires the separate `assembly` field. MutationView often omits reference bases for indels. Those rows can match through an exact versioned cDNA change. The coding sequences of NM_000546.5 and NM_000546.6 are identical across 1,182 bases, so those versions are compatible for coding SNVs. Other transcript versions require exact agreement. [NM_000546.5](https://www.ncbi.nlm.nih.gov/nuccore/NM_000546.5), [NM_000546.6](https://www.ncbi.nlm.nih.gov/nuccore/NM_000546.6)
 
-The response reports `selection`, `matches` with match types, and `omitted_match_count`. A unique exact record supplies the allele-specific summary, including occurrence counts and splice predictions. Same-protein, same-codon and coordinate matches provide context. Multiple exact candidates produce an ambiguous selection. The TP53 card shows Kato's yeast reporter activity as percent of wild type and labels the separate Mathe structure-based computational prediction. The latter was trained on Kato's data. [NCI TP53 data dictionary](https://tp53.cancer.gov/help), [structure-based method](https://tp53.cancer.gov/dt_method)
+The response reports `selection`, `matches` with match types, and `omitted_match_count`. A unique exact record supplies the allele-specific summary, including occurrence counts and splice predictions. Same-protein, same-codon and coordinate matches provide context. Multiple exact candidates produce an ambiguous selection. The card separately labels the Mathe structure-based computational prediction, which was trained on Kato's assay data. [Structure-based method](https://tp53.cancer.gov/dt_method)
+
+### TP53 assay comparison
+
+When MutationView has assay evidence for a matched protein change, the collapsed **Assay comparison** shows the available Kato yeast reporter values, Kakudo Saos-2 reporter and apoptosis values, and NCI cellular functional classifications. Each study lists its endpoint and units. Identical observations across alleles that encode the same protein change appear once. If records disagree, the table retains each value and its source records. Both AI paths receive the comparison even when the section is closed. [MutationView r21](https://tp53.cancer.gov/static/data/MutationView_r21.csv), [NCI TP53 data dictionary](https://tp53.cancer.gov/help)
+
+The M237L comparison also includes independently checked Giacomelli Z-scores. The two Kotler scores each require an exact match to the corresponding M237L allele.
+
+| Study | Source |
+| --- | --- |
+| Kato 2003 | The NCI TP53 Database r21 yeast dataset is curated into MutationView. For `M237L`, the eight reporter values run from 6.6% to 78.2% of wild type, with a median of 40.6%. [NCI data](https://tp53.cancer.gov/static/data/FunctionIshiokaDownload_r21.csv) |
+| Kakudo 2005 | NCI curates the human Saos-2 reporter measurements and sub-G1 apoptosis readout as percentages of wild-type p53 activity. [Article](https://pubmed.ncbi.nlm.nih.gov/15781620/) · [NCI TP53 data dictionary](https://tp53.cancer.gov/help) |
+| Giacomelli 2018 | `M237L` in Supplementary Table 3, row 4957. Scores are grouped by amino-acid change. [Publisher table](https://media.springernature.com/full/springer-static/esm/art%3A10.1038%2Fs41588-018-0204-y/MediaObjects/41588_2018_204_MOESM6_ESM.xlsx) |
+| Kotler 2018 | Wild-type-backbone constructs 302465 (`c.709A>T`) and 302463 (`c.709A>C`) in the current Table S3. The current publisher workbook matches the author-deposited GEO workbook. MaveDB reports the same scores at residue 136 of the fragment, with a 101-residue offset to full-length p53. [GEO data](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE115072) · [MaveDB score set](https://mavedb.org/score-sets/urn%3Amavedb%3A00000059-a-1) · [Correction](https://pubmed.ncbi.nlm.nih.gov/30193102/) |
+
+Sources checked November 24, 2026.
 
 ### Dataset source links
 
@@ -1136,6 +1151,16 @@ Pass `debug: true` in the POST body to receive:
 - dataset fetch/download attempt log (`dataset_attempts`)
 - sample protein values parsed from rows
 
+## Release smoke check
+
+After the Vercel update and the Hostinger copy of `index.html`, `script.js`, and `style.css`, run the command below from the release checkout. It uses the same Playwright and Chromium setup as `tests/browser-smoke.js`.
+
+```sh
+CHROMIUM_PATH=/path/to/chromium npm run test:release
+```
+
+To check a different deployment, pass its URL after `--`. The check verifies the hosted asset references and bytes, searches the rendered site for `NM_000546.6:c.709A>T`, and requires MutationView record 3082 and the expected TP53 and ClinVar evidence sections.
+
 ## Optional OpenRouter AI review
 
 This repo includes an optional AI interpretation endpoint at `api/ai-review.js`. The webpage adds a bottom "Optional AI Review" card after a variant lookup. The card does not send data automatically; users choose a model and click **Run AI review** to send the retrieved annotation, transcript, FDA companion-diagnostic, and clinical-trial context to the backend proxy.
@@ -1158,7 +1183,9 @@ This repo includes an optional AI interpretation endpoint at `api/ai-review.js`.
 }
 ```
 
-The endpoint prompts OpenRouter for strict JSON containing pathogenicity, specific AMP tier/subtier, FDA-approved therapies, clinical trials, a short interpretation summary, and limitations. AI output is intended for research and education only and must be verified against current FDA labeling, guidelines, curated databases, and trial eligibility criteria before clinical use.
+The endpoint prompts OpenRouter for three independent assessments in strict JSON. These are germline pathogenicity with the relevant condition, somatic oncogenicity, and tumor-specific clinical significance. Clinical significance uses AMP/ASCO/CAP Tier I through IV and levels A through D where applicable. A missing tumor type returns insufficient disease context with the tier unassigned. The site displays resistance and lack-of-benefit findings with their biomarker, disease and evidence alongside therapies, trial leads, and limitations. Older clients receive the flat pathogenicity and AMP tier fields derived from the structured assessment. [AMP/ASCO/CAP clinical significance guidance](https://pubmed.ncbi.nlm.nih.gov/27993330/) · [ClinGen somatic oncogenicity guidance](https://pubmed.ncbi.nlm.nih.gov/35101336/)
+
+AI output is intended for research and education only and must be verified against current FDA labeling, guidelines, curated databases, and trial eligibility criteria before clinical use.
 
 ### Abuse protection for the owner's key
 
@@ -1201,7 +1228,7 @@ The two prompts share their clinical guidance so they cannot drift apart:
 
 | File | Role |
 | --- | --- |
-| `api/_ai-review-prompt-core.js` | **Shared clinical guidance** — AMP/ASCO/CAP tier definitions, hard tiering rules, controlled vocabularies, interpretation rules, and the self-check. Format-neutral: it never mentions JSON, schemas, or arrays. **Tiering and evidence edits go here** and take effect in both prompts. |
+| `api/_ai-review-prompt-core.js` | **Shared clinical guidance** — Independent assessments, AMP/ASCO/CAP tier definitions, evidence guidance, and the self-check. Format-neutral: it never mentions JSON, schemas, or arrays. **Tiering and evidence edits go here** and take effect in both prompts. |
 | `api/_ai-review-prompt.js` | Core + a **JSON** output-format section (the schema, field semantics). Used by "Run AI review". |
 | `api/_ai-review-prompt-human.js` | Core + a **Markdown** output-format section (numbered sections for a reader). Used by "Copy prompt". |
 
