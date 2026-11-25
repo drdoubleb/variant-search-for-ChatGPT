@@ -110,6 +110,9 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 const url = new URL(request.url());
                 const path = decodeURIComponent(url.pathname);
                 if (url.hostname === 'grch37.rest.ensembl.org') {
+                    if (scenario === 'complete' && path.startsWith('/lookup/')) {
+                        return route.fulfill({ status: 500, contentType: 'text/html', body: 'Ensembl unavailable' });
+                    }
                     if (path === '/lookup/symbol/homo_sapiens/TP53') return json(route, tp53Map.gene);
                     if (path === `/lookup/id/${tp53Map.transcript.id}` && url.searchParams.get('expand') === '1') {
                         return json(route, tp53Map.transcript);
@@ -118,6 +121,12 @@ export async function runEvidenceSmoke(newPage, base, check) {
                         if (scenario === 'superseded') await withheld;
                         return json(route, tp53Map.domains);
                     }
+                }
+                if (scenario === 'complete' && url.hostname === 'grch37-archive.rest.ensembl.org') {
+                    if (path === '/lookup/symbol/homo_sapiens/TP53' && url.searchParams.get('expand') === '1') {
+                        return json(route, tp53Map.archiveGene);
+                    }
+                    if (path === `/overlap/translation/${tp53Map.transcript.Translation.id}`) return json(route, tp53Map.domains);
                 }
                 if (url.hostname === 'myvariant.info' && path === `/v1/variant/${annotation._id}`) return json(route, annotation);
                 if (url.hostname === 'api.ncbi.nlm.nih.gov' && path.includes('/hgvs/NM_000546.6:c.709A>T/')) {
@@ -245,6 +254,11 @@ export async function runEvidenceSmoke(newPage, base, check) {
                 const exonPlot = map.getByRole('img', { name: /11 exons.*chr17:7,577,572/ });
                 const proteinPlot = map.getByRole('img', { name: /393 amino acids.*residue 237/ });
                 await proteinPlot.waitFor();
+                assert.ok(await map.getByText(/Canonical transcript · Ensembl GRCh37 archive/).isVisible());
+                assert.ok(await map.getByRole('heading', { name: /Exons · GRCh37/ }).isVisible());
+                const recordLink = map.getByRole('link', { name: /^ENST00000269305\.4/ });
+                assert.equal(new URL(await recordLink.getAttribute('href')).hostname, 'grch37-archive.rest.ensembl.org');
+                check('gene map: the GRCh37 archive supplies the transcript and domains after a primary lookup fails', true);
                 assert.ok(await exonPlot.locator('.gene-map-pointer').isVisible());
                 assert.ok(await proteinPlot.locator('.gene-map-pointer').evaluate(el => {
                     const track = el.parentElement.getBoundingClientRect();
