@@ -1005,6 +1005,16 @@ a genomic query fails over to nobody, and with the mirror down the lookup
 reports an outage. The mitochondrion, whose sequence is the same in both
 assemblies, still fails over.
 
+Nor does a name on one of **Ensembl's own transcripts or proteins** fail over
+to the main host. Those have another version on each assembly, and the host
+reads a name on the version it has, whatever version the name gives:
+`ENST00000288602.6:c.1799T>A` — BRAF V600E on GRCh37's version 6 — is read
+there on version 12, where that position is another base, and with the mirror
+down the lookup said *"names a reference base that is not there:
+ENST00000288602.6 has C at that position, not T"*. (Where the base happened to
+agree it would have been another variant.) RefSeq accessions name the same
+sequence under the same version on both hosts and fail over as before.
+
 When Ensembl has not answered an accessioned name within 2.5 s — or has failed
 outright — the recoder also asks **NCBI Variation Services**
 (`api.ncbi.nlm.nih.gov/variation/v0`, CORS-open, independent infrastructure), and
@@ -1057,6 +1067,91 @@ and a reverse-strand protein name that could not be checked is still not shown.
 That is deliberate — Ensembl's name for a spelling that is not left-aligned is
 wrong often enough (`KRAS c.34_36dup` came out as another variant) that a
 missing name is the better answer. See `tests/reference-source.test.js`.
+
+### When Ensembl's GRCh37 service is down: its archive
+
+Every lookup needs Ensembl's VEP for what a variant does on each transcript,
+and a variant nobody else holds a record of cannot be shown without it. VEP was
+asked of one host. On a day `grch37.rest.ensembl.org` answered HTTP 500 from
+every endpoint — `/info/ping` included; a browser reports that as a *network
+error*, because the error page carries no CORS header — `17 7576910 TP53 G GGT`
+ended in *"Lookup could not complete: Resolve nomenclature · Ensembl,
+Consequences · Ensembl VEP did not respond"*.
+
+Ensembl keeps an archive of the same services for the same assembly,
+`grch37-archive.rest.ensembl.org` (release 99, of January 2020), on other
+machines. It went on answering, and the gene map already falls back to it. For
+a **genomic allele**, `fetchVepHgvsHg19` now asks it when the current service
+fails (a transport error or a 5xx, after its retries), or has not answered
+after 10 s, and takes the first of the two to answer (`answerFromEither`). The
+row above comes back as `NM_000546.5:c.934_935dup`, `p.Ser313ProfsTer33`,
+`frameshift_variant`.
+
+What the archive names is said to be the archive's:
+
+- Its transcripts are in the versions of 2020, and none is flagged MANE Select.
+  A row that is another version of the MANE Select transcript (`NM_000546.5`,
+  where MANE Select is `NM_000546.6`) is **not** labelled "(MANE Select)". It is
+  the row shown, though — the latest version first, where the archive has
+  several — rather than whichever RefSeq accession is lowest
+  (`markManeTranscripts`, `maneSelectVersion`).
+- The card says so under the transcript: *"Named by Ensembl's GRCh37 archive
+  (release 99, 2020): the current Ensembl service did not answer. NM_000546.5
+  is another version of the MANE Select transcript, NM_000546.6: where the two
+  versions differ, so does the numbering."*
+- The panel's VEP step is `▲`: *"answered by Ensembl's GRCh37 archive (release
+  99) — the current service did not answer; transcript versions are the
+  archive's"*.
+
+How far the archive's names agree with the current service's was measured: the
+49 questions about an allele that the test recordings hold the current
+service's answer to were put to the archive, and its rows compared with the
+current ones on the same accession, versions aside. Of 145 RefSeq rows, 143
+give the same coding position. The two that do not are the two ways an older
+annotation can differ:
+
+- **A transcript the archive counts a base off.** PTEN's `NM_000314.6` differs
+  from GRCh37 by one base in its 5′ UTR, and the VEP of that release names
+  `chr10:g.89725116del` `c.1101del` on it — `c.1100del` on `NM_000314.4`, on
+  Ensembl's own transcript, and (NCBI, the current service) on `NM_000314.8`.
+  VEP flags such a row itself (`refseq_match`: `rseq_5p_mismatch`,
+  `rseq_cds_mismatch`), and a row so flagged is **left out** of the archive's
+  answer (`archiveRowReliable`); if none that names a coding change is left,
+  Ensembl's own transcripts are asked for instead. A mismatch after the coding
+  sequence — most are the poly-A tail — moves no coding position and is kept.
+- **A version that is numbered differently.** MUTYH's `NM_001048171.1` starts
+  its coding sequence elsewhere than `.2` does: `c.494A>G`, `p.Tyr165Cys` there
+  is `c.452A>G`, `p.Tyr151Cys` on the later version. That is right for the
+  version named, which is why the card names the version and says the
+  numbering can differ.
+
+The effect is the archive's too: at the end of an exon its VEP says
+`inframe_insertion` where the current one says `inframe_insertion,
+splice_region_variant`. (And on a reverse-strand transcript it names an
+in-frame insertion the same however it is written, where the current one does
+not — see *One allele, one protein name*; the left-aligned question is still
+put, to both.)
+
+What is and is not put to the archive:
+
+| | asked of the archive? |
+| --- | --- |
+| a genomic allele (`17:g.7576910_7576911insGT`, `MT:g.8993T>G`) | yes — a chromosomal position means the same in both |
+| a name on an Ensembl transcript (`ENST00000288602.6:c.1799T>A`) | yes — GRCh37's Ensembl transcripts are the same in both, version for version |
+| a name on a RefSeq transcript, a gene symbol or a protein | no — the archive has none of the newer RefSeq versions and would refuse names the current service reads. These are placed by NCBI Variation Services or MyVariant as before, and the *allele* they come to is then put to the archive |
+
+A **refusal** by the current service (HTTP 400: a wrong reference base, an
+unreadable insertion) is its answer, and the archive is not asked. A refusal by
+the archive is not taken for an answer: with the current service down it is
+still reported as the outage it is.
+
+Ensembl's variant recoder is not asked of the archive (release 99 answers in
+another shape, and reads names on older versions). For a genomic input that
+costs only the re-spelling — a duplication stays written as the insertion that
+was entered. The GRCh38 box's coordinate mapping tries the archive as a third
+host (`ENSEMBL_MAP_HOSTS`). With the archive down as well, a lookup that needs
+VEP ends in the outage message it always did. See
+`tests/ensembl-archive.test.js`.
 
 The app previously made a single attempt behind a 6-7 second deadline, so a
 slow or unwell upstream produced:

@@ -171,11 +171,18 @@ const ensemblSet = '?content-type=application/json&hgvs=1&mane=1&canonical=1';
         await assert.rejects(h.fetchVepHgvsHg19(allele), (err) => err.status === 500);
 
         // A NAME is read on the transcripts a service has, and the archive has
-        // none of the newer versions: it is not asked about names.
-        for (const name of ['NM_000546.6:c.934_935dup', 'TP53:c.934_935dup', 'ENST00000269305.4:c.934_935dup', 'rs28934578']) {
+        // none of the newer RefSeq versions: it is not asked about names.
+        for (const name of ['NM_000546.6:c.934_935dup', 'TP53:c.934_935dup', 'NP_000537.3:p.Arg175His', 'ENSP00000269305.4:p.Arg175His', 'rs28934578', 'LRG_321t1:c.524G>A']) {
             asked = serve({ current: down, archive: json(archived) });
             await assert.rejects(h.fetchVepHgvsHg19(name), (err) => err.status === 500, name);
             assert.deepEqual(ofArchive(asked), [], name);
+        }
+        // ...except a name on one of Ensembl's own transcripts: GRCh37's are the
+        // same in the archive, version for version.
+        for (const name of ['ENST00000269305.4:c.934_935dup', 'ENST00000269305:c.934_935dup', 'enst00000269305.4:c.934_935dup', 'ENST00000269305.4:n.1124_1125dup']) {
+            asked = serve({ current: down, archive: json(archived) });
+            assert.equal((await h.fetchVepHgvsHg19(name)).archive, true, name);
+            assert.deepEqual(ofArchive(asked), [`${ARCHIVE}${encodeURIComponent(name)}${refseqSet}`], name);
         }
         // Every chromosome's alleles are, the mitochondrial genome's on Ensembl's own transcripts.
         for (const [genomic, asUrl, set] of [['chrX:g.20156693_20156694insAGA', 'X:g.20156693_20156694insAGA', refseqSet],
@@ -184,6 +191,39 @@ const ensemblSet = '?content-type=application/json&hgvs=1&mane=1&canonical=1';
             assert.equal((await h.fetchVepHgvsHg19(genomic)).archive, true, genomic);
             assert.deepEqual(ofArchive(asked), [`${ARCHIVE}${encodeURIComponent(asUrl)}${set}`], genomic);
         }
+        // Rows the archive cannot be relied on for are left out: VEP's own flag
+        // that a RefSeq transcript does not match the genome before or within its
+        // coding sequence. (PTEN, as the archive answered: NM_000314.6 a base off.)
+        const pten = (transcript, c, flags) => ({ transcript_id: transcript, hgvsc: `${transcript}:${c}`, hgvsp: 'NP_000305.3:p.Pro367GlnfsTer49',
+            gene_symbol: 'PTEN', consequence_terms: ['frameshift_variant'], strand: 1, ...(flags ? { refseq_match: flags } : {}) });
+        const ptenRows = [pten('NM_000314.4', 'c.1100del'), pten('NM_000314.6', 'c.1101del', ['rseq_mrna_nonmatch', 'rseq_5p_mismatch']),
+            pten('NM_001304717.2', 'c.1619del', ['rseq_mrna_nonmatch', 'rseq_cds_mismatch']), pten('NM_000314.5', 'c.1100del', ['rseq_mrna_nonmatch', 'rseq_3p_mismatch'])];
+        assert.deepEqual(ptenRows.map(h.archiveRowReliable), [true, false, false, true], 'a mismatch after the coding sequence moves no coding position');
+        assert.deepEqual([{ refseq_match: ['rseq_mrna_match'] }, { refseq_match: ['rseq_ens_match_cds', 'rseq_mrna_nonmatch'] }, { refseq_match: 'rseq_5p_mismatch' },
+            { refseq_match: [] }, {}, null].map(h.archiveRowReliable), [true, true, false, true, true, true]);
+        const ptenAnswer = [{ ...archived[0], most_severe_consequence: 'frameshift_variant', transcript_consequences: ptenRows }];
+        asked = serve({ current: down, archive: json(ptenAnswer) });
+        vep = await h.fetchVepHgvsHg19('chr10:g.89725116del');
+        assert.deepEqual(vep.consequences.map(row => row.hgvsc), ['NM_000314.4:c.1100del', 'NM_000314.5:c.1100del']);
+        assert.equal(ofArchive(asked).length, 1, 'what is left names the change: nobody else is asked');
+        // ...of the archive's answer only: the current service's rows are all its own.
+        asked = serve({ current: json(ptenAnswer), archive: json(archived) });
+        assert.equal((await h.fetchVepHgvsHg19('chr10:g.89725116del')).consequences.length, 4);
+        // None left that names a coding change: Ensembl's own transcripts are asked for.
+        const upstream = { transcript_id: 'NM_000999.1', gene_symbol: 'OTHER', consequence_terms: ['upstream_gene_variant'], strand: 1 };
+        for (const flaggedOnly of [[ptenRows[1], ptenRows[2]], [ptenRows[1], upstream]]) {
+            asked = serve({ current: down, archive: url => (url.includes('refseq=1') ? json([{ ...archived[0], transcript_consequences: flaggedOnly }])()
+                : json(vepAnswer('ENST00000371953.3', 'ENSP00000361021.3'))()) });
+            vep = await h.fetchVepHgvsHg19('chr10:g.89725116del');
+            assert.deepEqual([vep.archive, vep.refseqFailed, vep.consequences.map(row => row.transcript_id)], [true, false, ['ENST00000371953.3']]);
+            assert.deepEqual(ofArchive(asked).map(url => url.includes('refseq=1')), [true, false]);
+        }
+        // (Rows without a coding name left, and none taken out: that is RefSeq's answer, as it always was.)
+        asked = serve({ current: down, archive: json([{ ...archived[0], transcript_consequences: [upstream] }]) });
+        vep = await h.fetchVepHgvsHg19('chr10:g.89725116del');
+        assert.deepEqual(vep.consequences.map(row => row.transcript_id), ['NM_000999.1']);
+        assert.equal(ofArchive(asked).length, 1);
+
         // Where the archive's RefSeq set has no transcript here, its own set is asked, as the current service's is.
         asked = serve({ current: down, archive: url => (url.includes('refseq=1') ? json([{ ...archived[0], transcript_consequences: [] }])() : json(vepAnswer('ENST00000269305.4', 'ENSP00000269305.4'))()) });
         vep = await h.fetchVepHgvsHg19(allele);
@@ -221,6 +261,33 @@ const ensemblSet = '?content-type=application/json&hgvs=1&mane=1&canonical=1';
     console.log('ensembl-archive: VEP from the archive — unit checks passed');
 }
 
+// ── Who may read a name ────────────────────────────────────────────────────
+{
+    const hosts = query => h.recoderHostsFor(query).map(host => host.replace('https://', ''));
+    const mirror = ['grch37.rest.ensembl.org'];
+    const both = ['grch37.rest.ensembl.org', 'rest.ensembl.org'];
+    // A name on one of Ensembl's own transcripts or proteins is read on GRCh37's
+    // version of it. The main host has another version, and reads the name on
+    // that whatever version is asked for.
+    for (const name of ['ENST00000288602.6:c.1799T>A', 'ENST00000288602:c.1799T>A', 'enst00000288602.6:c.1799T>A',
+        'ENST00000361899.2:n.10A>T', 'ENSP00000288602.6:p.Val600Glu', ' ENST00000288602.6:c.1799T>A']) {
+        assert.deepEqual(hosts(name), mirror, name);
+    }
+    // RefSeq's transcripts and proteins are the same sequence under the same
+    // accession and version on both; a gene symbol and an rsID name no version.
+    for (const name of ['NM_004333.6:c.1799T>A', 'NP_004324.2:p.Val600Glu', 'BRAF:c.1799T>A', 'BRAF:p.Val600Glu', 'rs113488022', 'LRG_299t1:c.1799T>A']) {
+        assert.deepEqual(hosts(name), both, name);
+    }
+    // (As before: a chromosomal position is GRCh37's alone; the mitochondrion's is the same in both.)
+    assert.deepEqual(hosts('chr7:g.140453136A>T'), mirror);
+    assert.deepEqual(hosts('chrMT:g.8993T>G'), both);
+    assert.deepEqual([h.namesEnsemblTranscript('ENST00000288602.6:c.1799T>A'), h.namesEnsemblTranscript('ENST00000288602:n.5A>T'),
+        h.namesEnsemblTranscript('ENSP00000288602.6:p.Val600Glu'), h.namesEnsemblTranscript('NM_004333.6:c.1799T>A'),
+        h.namesEnsemblTranscript('ENST00000288602.6'), h.namesEnsemblTranscript('7:g.140453136A>T'), h.namesEnsemblTranscript(null)],
+    [true, true, false, false, false, false, false]);
+    console.log('ensembl-archive: who may read a name — unit checks passed');
+}
+
 // ── The archive's transcripts beside MANE Select ───────────────────────────
 {
     const row = (transcript, extra = {}) => ({ transcript, cDNA: 'c.35G>A', protein: 'p.Gly12Asp', gene: 'KRAS', source: 'vep', archive: true, ...extra });
@@ -253,9 +320,9 @@ const ensemblSet = '?content-type=application/json&hgvs=1&mane=1&canonical=1';
 
     // What the card says beside such a row.
     assert.equal(h.ensemblArchiveNote(marked[1]), 'Named by Ensembl\'s GRCh37 archive (release 99, 2020): the current Ensembl service did not answer. '
-        + 'NM_004985.4 is another version of the MANE Select transcript, NM_004985.5.');
+        + 'NM_004985.4 is another version of the MANE Select transcript, NM_004985.5: where the two versions differ, so does the numbering.');
     assert.equal(h.ensemblArchiveNote(marked[2]), 'Named by Ensembl\'s GRCh37 archive (release 99, 2020): the current Ensembl service did not answer. '
-        + 'Its transcripts are in the versions of that release, and it does not say which is MANE Select.');
+        + 'Its transcripts are in the versions of that release, which can be numbered differently from today\'s, and it does not say which is MANE Select.');
     console.log('ensembl-archive: transcripts beside MANE Select — unit checks passed');
 }
 
@@ -309,7 +376,7 @@ const outage = 'Error: Lookup could not complete: Resolve nomenclature · Ensemb
     assert.match(page.variant, /g\.: chr17:g\.7576910_7576911insGTVCF \(hg19\): 17-7576910-G-GGTGene: TP53Transcript: NM_000546\.5Named by/);
     assert.match(page.variant, /c\.: c\.934_935dupp\.: p\.Ser313ProfsTer33 \(p\.S313Pfs\*33\)Effect: frameshift_variant/);
     assert.deepEqual(archiveNote(page), ['Named by Ensembl\'s GRCh37 archive (release 99, 2020): the current Ensembl service did not answer. '
-        + 'NM_000546.5 is another version of the MANE Select transcript, NM_000546.6.']);
+        + 'NM_000546.5 is another version of the MANE Select transcript, NM_000546.6: where the two versions differ, so does the numbering.']);
     assert.doesNotMatch(page.variant, /\(MANE Select\)/, 'a version MANE Select is not, is not called it');
     assert.match(page.panel, /^Variant resolved/);
     assert.match(page.panel, /Coding\s*NM_000546\.5:c\.934_935dup\s*Protein\s*p\.Ser313ProfsTer33\s*Effect\s*frameshift_variant/);
@@ -348,7 +415,7 @@ const outage = 'Error: Lookup could not complete: Resolve nomenclature · Ensemb
     assertResolved(assert, page, '12 25398284 KRAS C T');
     assert.match(page.variant, /Gene: KRASTranscript: NM_004985\.4Named by.*c\.: c\.35G>Ap\.: p\.Gly12Asp \(p\.G12D\)Effect: missense_variant/);
     assert.deepEqual(archiveNote(page), ['Named by Ensembl\'s GRCh37 archive (release 99, 2020): the current Ensembl service did not answer. '
-        + 'NM_004985.4 is another version of the MANE Select transcript, NM_004985.5.']);
+        + 'NM_004985.4 is another version of the MANE Select transcript, NM_004985.5: where the two versions differ, so does the numbering.']);
     assert.match(page.variant, /NM_004985\.3: c\.35G>A, NP_004976\.2:p\.Gly12Asp — missense_variant/);
     assert(page.panel.includes(`▲Consequences · Ensembl VEP5 transcripts · ${said}`), page.panel);
     assert.match(page.panel, /●Annotations · MyVariant\.info\s*annotation found/);
@@ -392,7 +459,7 @@ const outage = 'Error: Lookup could not complete: Resolve nomenclature · Ensemb
     assert.match(page.variant, /NF1 c\.6789_6792del is read on NM_000267\.4, a MANE Plus Clinical transcript of NF1\./);
     assert.match(page.variant, /Gene: NF1Transcript: NM_000267\.3Named by.*c\.: c\.6789_6792delp\.: p\.Tyr2264ThrfsTer5 \(p\.Y2264Tfs\*5\)Effect: frameshift_variant/);
     assert.deepEqual(archiveNote(page), ['Named by Ensembl\'s GRCh37 archive (release 99, 2020): the current Ensembl service did not answer. '
-        + 'Its transcripts are in the versions of that release, and it does not say which is MANE Select.']);
+        + 'Its transcripts are in the versions of that release, which can be numbered differently from today\'s, and it does not say which is MANE Select.']);
     assert.match(page.variant, /NM_001042492\.2: c\.6852_6855del, NP_001035957\.1:p\.Tyr2285ThrfsTer5/, 'the MANE Select transcript, in the archive\'s version, is listed');
     console.log('ok ensembl archive: a name read on another transcript keeps that transcript');
 }
@@ -450,6 +517,54 @@ const outage = 'Error: Lookup could not complete: Resolve nomenclature · Ensemb
     assert.match(vepOnly.status, /^Error: chr12:g\.25398280_25398285insCCA is not a readable insertion: /);
     assert.deepEqual(ofArchive(vepOnly), []);
     console.log('ok ensembl archive: a refusal of the current service is its answer — the archive is not asked');
+}
+
+// 10. A name on one of Ensembl's own transcripts: "ENST00000288602.6:c.1799T>A",
+//     BRAF V600E on GRCh37's version of the transcript. With the mirror down
+//     the name went to the main, GRCh38, host, which reads it on ITS version
+//     (12) of that transcript, where the position is another base — and the
+//     lookup said "names a reference base that is not there: ENST00000288602.6
+//     has C at that position, not T". (That answer is in the recording, as the
+//     main host gave it the same day.) The name is not sent there; the archive
+//     has the same versions GRCh37 has, and reads it.
+{
+    const page = await runLookup(cassettes.enstBrafArchive, {});
+    assertResolved(assert, page, 'ENST00000288602.6:c.1799T>A');
+    assert.match(page.variant, /g\.: chr7:g\.140453136A>TVCF \(hg19\): 7-140453136-A-TGene: BRAFTranscript: NM_004333\.4Named by/);
+    assert.match(page.variant, /c\.: c\.1799T>Ap\.: p\.Val600Glu \(p\.V600E\)Effect: missense_variant/);
+    assert(!page.requests.some(r => r.startsWith('rest.ensembl.org/variant_recoder/')), 'the name is not read on the GRCh38 host');
+    assert.deepEqual(ofArchive(page).map(r => r.split('?')[0]), ['ENST00000288602.6:c.1799T>A', '7:g.140453136A>T'], 'the name, then the allele it is');
+    assert(page.panel.includes(said), page.panel);
+    assert.doesNotMatch(page.status + page.panel, /reference base that is not there|has C there/);
+    // With the archive down as well it is an outage, and is called one — not a fault in the name.
+    const without = await runLookup(cassettes.enstBrafArchive, { without: archiveDown });
+    assert.equal(without.status, outage);
+    assert(!without.requests.some(r => r.startsWith('rest.ensembl.org/variant_recoder/')));
+    console.log('ok ensembl archive: a name on an Ensembl transcript is read on GRCh37\'s version of it, not on the GRCh38 host\'s');
+}
+
+// 11. A transcript the archive counts a base off. PTEN's NM_000314.6 differs
+//     from GRCh37 by one base in its 5' UTR; the VEP of that release names
+//     "chr10:g.89725116del" c.1101del on it — and c.1100del on NM_000314.4, on
+//     Ensembl's own transcript, and (NCBI, the current service) on NM_000314.8.
+//     VEP flags the row itself, and it is left out: the later version is not
+//     the one shown where it cannot be relied on.
+{
+    const page = await runLookup(cassettes.ptenDelArchive, {});
+    assertResolved(assert, page, 'chr10:g.89725116del');
+    assert.match(page.variant, /Gene: PTENTranscript: NM_000314\.4Named by.*c\.: c\.1100delp\.: p\.Pro367GlnfsTer49 \(p\.P367Qfs\*49\)Effect: frameshift_variant/);
+    assert.deepEqual(archiveNote(page), ['Named by Ensembl\'s GRCh37 archive (release 99, 2020): the current Ensembl service did not answer. '
+        + 'NM_000314.4 is another version of the MANE Select transcript, NM_000314.8: where the two versions differ, so does the numbering.']);
+    assert.doesNotMatch(page.variant + page.panel, /NM_000314\.6|c\.1101del|NM_001304717|NM_001304718/, 'the rows that cannot be relied on are not shown at all');
+    // (They are in what the archive sent.)
+    const sent = cassettes.ptenDelArchive.responses[`grch37-archive.rest.ensembl.org/vep/human/hgvs/10:g.89725116del${sets.refseq}`].body[0].transcript_consequences;
+    assert.deepEqual(sent.map(row => [row.hgvsc, (row.refseq_match || []).join(',')]), [
+        ['NM_000314.4:c.1100del', ''],
+        ['NM_000314.6:c.1101del', 'rseq_mrna_nonmatch,rseq_5p_mismatch'],
+        ['NM_001304717.2:c.1619del', 'rseq_mrna_nonmatch,rseq_cds_mismatch'],
+        ['NM_001304718.1:c.510del', 'rseq_mrna_nonmatch,rseq_5p_mismatch']
+    ]);
+    console.log('ok ensembl archive: a transcript the archive counts a base off (PTEN NM_000314.6) is left out');
 }
 
 console.log('Ensembl archive tests passed');

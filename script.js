@@ -4170,8 +4170,8 @@ function markManeTranscripts(transcripts, accessions) {
 function ensemblArchiveNote(row) {
     return 'Named by Ensembl\'s GRCh37 archive (release 99, 2020): the current Ensembl service did not answer. '
         + (row && row.maneSelectVersion
-            ? `${row.transcript} is another version of the MANE Select transcript, ${row.maneSelectVersion}.`
-            : 'Its transcripts are in the versions of that release, and it does not say which is MANE Select.');
+            ? `${row.transcript} is another version of the MANE Select transcript, ${row.maneSelectVersion}: where the two versions differ, so does the numbering.`
+            : 'Its transcripts are in the versions of that release, which can be numbered differently from today\'s, and it does not say which is MANE Select.');
 }
 
 function selectCanonicalTranscript(candidates, targetProtein) {
@@ -4352,9 +4352,25 @@ const RECODER_HOSTS = ['https://grch37.rest.ensembl.org', 'https://rest.ensembl.
 //
 // A transcript-level query carries no coordinate and fails over as before, and
 // so does the mitochondrion, whose sequence is the same in both assemblies.
+//
+// Not a name on one of Ensembl's own transcripts or proteins, though. Those
+// have another version on each assembly, and the host reads the name on the
+// one it has, whatever version the name gives: "ENST00000288602.6:c.1799T>A"
+// — BRAF V600E on GRCh37's version 6 — is read by the main host on its version
+// 12, where that position is another base, and refused ("names a reference
+// base that is not there"); where the base happened to agree it would be
+// another variant. Such a name is not sent there. (VEP's reading of a
+// transcript's name on Ensembl's GRCh37 archive, which has the same versions,
+// is what is left: fetchVepHgvsHg19.)
 function recoderHostsFor(query) {
     const parts = splitGenomicHgvsPositions(query);
-    return parts && !/^MT?$/.test(parts.chrom) ? RECODER_HOSTS.slice(0, 1) : RECODER_HOSTS;
+    if (parts && !/^MT?$/.test(parts.chrom)) return RECODER_HOSTS.slice(0, 1);
+    return /^ENS[TP]\d+(?:\.\d+)?:/i.test(String(query || '').trim()) ? RECODER_HOSTS.slice(0, 1) : RECODER_HOSTS;
+}
+
+// "ENST00000288602.6:c.1799T>A": a change named on one of Ensembl's transcripts.
+function namesEnsemblTranscript(query) {
+    return /^ENST\d+(?:\.\d+)?:[cn]\./i.test(String(query || '').trim());
 }
 
 async function fetchVariantRecoderEnsembl(query, { abandoned = null } = {}) {
@@ -8675,8 +8691,12 @@ const ENSEMBL_GRCH37 = 'https://grch37.rest.ensembl.org';
  * notations (NM_005485.6:c.52_54del, NP_005476.4:p.Lys18del) match the
  * nomenclature users expect. Ensembl's own set is the fallback where RefSeq
  * gives no transcript consequences, or its request fails.
+ *
+ * `reliable`, where given, says which of the RefSeq set's rows may be used
+ * (see archiveRowReliable); if none that names a coding change is left,
+ * Ensembl's own set is asked, as where RefSeq has no transcript at all.
  */
-async function fetchVepFrom(host, hgvs, onAttempt = null) {
+async function fetchVepFrom(host, hgvs, { onAttempt = null, reliable = null } = {}) {
     const requestVep = async (useRefseq) => {
         const params = useRefseq ? 'hgvs=1&refseq=1&mane=1&canonical=1' : 'hgvs=1&mane=1&canonical=1';
         const url = `${host}/vep/human/hgvs/${encodeURIComponent(hgvs)}?content-type=application/json&${params}`;
@@ -8712,8 +8732,15 @@ async function fetchVepFrom(host, hgvs, onAttempt = null) {
     let refseqFailed = false;
     try {
         data = await requestVep(!mitochondrial);
-        const cons = (data[0] && data[0].transcript_consequences) || [];
-        if (cons.length === 0 && !mitochondrial) {
+        let cons = (data[0] && data[0].transcript_consequences) || [];
+        let dropped = false;
+        if (reliable && !mitochondrial) {
+            const kept = cons.filter(reliable);
+            dropped = kept.length < cons.length;
+            if (dropped) data = [{ ...data[0], transcript_consequences: kept }, ...data.slice(1)];
+            cons = kept;
+        }
+        if ((cons.length === 0 || (dropped && !cons.some(row => row && row.hgvsc))) && !mitochondrial) {
             data = await requestVep(false);
         }
     } catch (refseqErr) {
@@ -8723,6 +8750,22 @@ async function fetchVepFrom(host, hgvs, onAttempt = null) {
         data = await requestVep(false);
     }
     return { data, refseqFailed };
+}
+
+/*
+ * May a row of the ARCHIVE's VEP answer be used? Not one on a RefSeq transcript
+ * that VEP itself flags as not matching the genome before or within its coding
+ * sequence (`refseq_match`: rseq_5p_mismatch, rseq_cds_mismatch). The VEP of
+ * that release can count such a transcript's coding positions a base off:
+ * PTEN's NM_000314.6, whose 5' UTR differs from GRCh37 by one base, comes back
+ * "c.1101del" for the allele that is c.1100del on every other PTEN transcript
+ * it has, on Ensembl's own, and on NM_000314.8 as NCBI and the current service
+ * place it. (Of 145 archived rows compared with the current service's, the one
+ * wrong coding position was on a row so flagged.) A mismatch after the coding
+ * sequence — most are the poly-A tail — moves no coding position.
+ */
+function archiveRowReliable(row) {
+    return ![].concat((row && row.refseq_match) || []).some(flag => /^rseq_(?:5p|cds)_mismatch$/.test(String(flag)));
 }
 
 /*
@@ -8740,13 +8783,19 @@ async function fetchVepFrom(host, hgvs, onAttempt = null) {
  * not answered after a head start, the archive is asked as well and the first
  * of the two to answer is taken — `archive` is then true, and the result says
  * so wherever it is shown: the archive's transcripts are those of 2020, in the
- * versions of that day, and none of them is flagged MANE Select.
+ * versions of that day, and none of them is flagged MANE Select. Rows it
+ * cannot be relied on for are left out (archiveRowReliable).
  *
  * That is for an ALLELE: a chromosomal position means the same in both. A NAME
  * (NM_000546.6:c.…) is read on the transcripts a service has, and the archive,
- * which has none of the newer versions, would refuse names the current service
- * reads; it is not asked about those. Nor is a refusal of the archive's taken
- * for an answer: only the current service's is (a wrong reference base, say).
+ * which has none of the newer RefSeq versions, would refuse names the current
+ * service reads; it is not asked about those. A name on one of Ensembl's own
+ * transcripts is the exception: GRCh37's are the same in both, version for
+ * version, so the archive reads "ENST00000288602.6:c.1799T>A" as the current
+ * service does (and the main, GRCh38, host does not: see recoderHostsFor).
+ *
+ * Nor is a refusal of the archive's taken for an answer: only the current
+ * service's is (a wrong reference base, say).
  */
 async function fetchVepHgvsHg19(variant) {
     if (!variant) throw new Error('No variant provided');
@@ -8757,10 +8806,10 @@ async function fetchVepHgvsHg19(variant) {
         hgvs = `${m[1]}:g.${m[2]}`;
     }
     const current = fetchVepFrom(ENSEMBL_GRCH37, hgvs,
-        ({ attempt, attempts }) => LookupProgress.attempt('vep', attempt, attempts));
+        { onAttempt: ({ attempt, attempts }) => LookupProgress.attempt('vep', attempt, attempts) });
     let answer;
     let archive = false;
-    if (!/^(?:[1-9]|1\d|2[0-2]|X|Y|MT?):g\./i.test(hgvs)) {
+    if (!/^(?:[1-9]|1\d|2[0-2]|X|Y|MT?):g\./i.test(hgvs) && !namesEnsemblTranscript(hgvs)) {
         answer = await current;
     } else {
         // A service that is down has no answer; one that refuses the allele has given its answer.
@@ -8771,7 +8820,7 @@ async function fetchVepHgvsHg19(variant) {
                 currentErr = err;
                 return null;
             }),
-            () => fetchVepFrom(ENSEMBL_GRCH37_ARCHIVE, hgvs).catch((err) => {
+            () => fetchVepFrom(ENSEMBL_GRCH37_ARCHIVE, hgvs, { reliable: archiveRowReliable }).catch((err) => {
                 console.warn('Ensembl\'s GRCh37 archive gave no VEP answer:', err);
                 return null;
             }),
@@ -15280,7 +15329,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
         ensemblRecoderAnswer, recoderPaneText, allelesNotAskedAbout, fetchProteinSubstitutionAlleles,
         nomenclatureRefusal, refusedNameError, nameUnknownToEnsembl, geneGivenBesideCoordinates,
-        answerFromEither, fetchVepHgvsHg19, fetchVepFrom, ensemblArchiveNote, mapGrch38GenomicToGrch37,
+        answerFromEither, fetchVepHgvsHg19, fetchVepFrom, ensemblArchiveNote, mapGrch38GenomicToGrch37, namesEnsemblTranscript, archiveRowReliable,
         fetchGrch37ReferenceSequence, fetchUcscReferenceSequence, ucscHg19Chromosome,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
