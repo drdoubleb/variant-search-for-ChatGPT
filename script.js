@@ -136,6 +136,10 @@ const API_TIMEOUT_MS = {
     // How long Ensembl's recoder is given before NCBI is asked as well.
     recoderHeadStart: 2500,
     vep: 20000,
+    // How long Ensembl's GRCh37 service is given for the consequences of an
+    // allele before the archive of it is asked as well (see fetchVepHgvsHg19).
+    // Longer than a slow answer takes: the archive's transcripts are older.
+    vepArchiveHeadStart: 10000,
     lookup: 4000,
     // How long a result is held for the "(MANE Select)" label. Both sources
     // for it (maneSelectForLabel) are asked as soon as the gene is known, so
@@ -207,6 +211,45 @@ function settledWithin(promise, ms, message) {
     });
     promise.catch(() => {});
     return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/*
+ * One answer wanted, and two sources that can give it. `first` has been asked
+ * already: a promise of its answer, or of null where it has none to give (it
+ * is down). `askSecond` asks the other, and promises the same. The second is
+ * asked when the first has failed, or has not answered after `headStartMs`,
+ * and the first of the two to give an answer is taken.
+ *
+ * Resolves { answer, second } — `second` true when the answer is the second
+ * source's; `answer` null when neither has one. Rejects if `first` does: that
+ * is the first source refusing the question, which the second is not asked to
+ * overrule.
+ */
+async function answerFromEither(first, askSecond, headStartMs) {
+    const pending = Symbol('pending');
+    let headStart;
+    const early = await Promise.race([
+        first,
+        new Promise((resolve) => { headStart = setTimeout(() => resolve(pending), headStartMs); })
+    ]).finally(() => clearTimeout(headStart));
+    if (early !== pending && early != null) return { answer: early, second: false };
+    const second = askSecond();
+    // The first has already failed: the second's answer is all there can be.
+    if (early !== pending) {
+        const answer = await second;
+        return { answer: answer == null ? null : answer, second: answer != null };
+    }
+    // The first is still working: whichever of the two has an answer first.
+    return new Promise((resolve, reject) => {
+        let left = 2;
+        const from = isSecond => (value) => {
+            left -= 1;
+            if (value != null) resolve({ answer: value, second: isSecond });
+            else if (left === 0) resolve({ answer: null, second: false });
+        };
+        first.then(from(false), reject);
+        second.then(from(true), reject);
+    });
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
@@ -3307,10 +3350,14 @@ function transcriptsFromRecoderAllele(allele) {
     });
 }
 
-function transcriptsFromVep(consequences) {
+// (`vep`: the answer the consequences came with. Rows of an answer Ensembl's
+// archive gave say so — `archive: true` — see fetchVepHgvsHg19.)
+function transcriptsFromVep(consequences, vep = null) {
+    const archive = vep && vep.archive ? { archive: true } : {};
     return (consequences || []).filter(c => c?.hgvsc).map(c => {
         const sc = splitTranscriptHgvs(c.hgvsc);
         return {
+            ...archive,
             transcript: sc.transcript || c.transcript_id || '',
             cDNA: sc.change,
             protein: splitTranscriptHgvs(c.hgvsp).change,
@@ -4104,10 +4151,27 @@ function geneSymbolCodingName(query) {
     return { gene, change: m[2] };
 }
 
+// (Ensembl's archive names the transcripts of its day: the gene's MANE Select
+// transcript is there in another version, if at all — NM_000546.5 where MANE
+// Select is NM_000546.6. Such a row is not MANE Select and is not labelled so,
+// but it is that transcript: `maneSelectVersion` holds the accession it is a
+// version of, and it is the row shown. See fetchVepHgvsHg19.)
 function markManeTranscripts(transcripts, accessions) {
-    return transcripts.map(t => ({ ...t,
-        maneSelect: Boolean(t.maneSelect || accessions.some(a => sameTranscript(a, t.transcript)))
-    }));
+    const unversioned = accession => String(accession || '').toUpperCase().replace(/\.\d+$/, '');
+    return transcripts.map((t) => {
+        const maneSelect = Boolean(t.maneSelect || accessions.some(a => sameTranscript(a, t.transcript)));
+        const versionOf = !maneSelect && t.archive
+            ? accessions.find(a => unversioned(a) === unversioned(t.transcript)) : '';
+        return { ...t, maneSelect, ...(versionOf ? { maneSelectVersion: versionOf } : {}) };
+    });
+}
+
+// What the card says beside a transcript that Ensembl's archive named.
+function ensemblArchiveNote(row) {
+    return 'Named by Ensembl\'s GRCh37 archive (release 99, 2020): the current Ensembl service did not answer. '
+        + (row && row.maneSelectVersion
+            ? `${row.transcript} is another version of the MANE Select transcript, ${row.maneSelectVersion}.`
+            : 'Its transcripts are in the versions of that release, and it does not say which is MANE Select.');
 }
 
 function selectCanonicalTranscript(candidates, targetProtein) {
@@ -4118,7 +4182,10 @@ function selectCanonicalTranscript(candidates, targetProtein) {
             parseProteinChange(t.protein), parseProteinChange(targetProtein));
         // When MANE is unavailable keep the established RefSeq accession
         // preference, including UTRs; a longer CDS is not a clinical default.
-        return [proteinMatch ? 1 : 0, t.maneSelect ? 1 : 0,
+        // (Of several versions of the MANE Select transcript — Ensembl's archive
+        // has NM_004985.3 and .4 where MANE Select is .5 — the latest.)
+        const version = Number((String(t.transcript || '').match(/\.(\d+)$/) || [])[1]) || 0;
+        return [proteinMatch ? 1 : 0, t.maneSelect ? 1 : 0, t.maneSelectVersion ? 1 + version : 0,
             nm ? 1 : 0, nm ? -Number(nm[1]) : 0, t.canonicalSource ? 1 : 0,
             ({ vep: 4, snpeff: 3, recoder: 2, root: 1 })[t.source] || 0,
             t.protein ? 1 : 0];
@@ -4474,7 +4541,7 @@ async function fetchVariantRecoder(query) {
 // GRCh37 mirror is a separate deployment answering the same paths in both
 // directions, and it has stayed up through outages that took the main host's
 // /map and /vep endpoints down entirely — so it is worth trying before giving up.
-const ENSEMBL_MAP_HOSTS = ['https://rest.ensembl.org', 'https://grch37.rest.ensembl.org'];
+const ENSEMBL_MAP_HOSTS = ['https://rest.ensembl.org', 'https://grch37.rest.ensembl.org', ENSEMBL_GRCH37_ARCHIVE];
 
 // Liftover a genomic variant from hg38 to hg19 using Ensembl REST API. If the
 // conversion fails or the variant is already hg19, returns the original
@@ -8595,29 +8662,31 @@ async function resolveGeneSymbolFromVep(consequences, recoderData, mostSevere = 
     return '';
 }
 
-async function fetchVepHgvsHg19(variant) {
-    if (!variant) throw new Error('No variant provided');
-    // Normalize: strip leading "chr" prefix (case-insensitive) before the colon
-    let hgvs = variant;
-    const m = variant.match(/^chr([\w]+):g\.(.+)$/i);
-    if (m) {
-        hgvs = `${m[1]}:g.${m[2]}`;
-    }
-    // Request HGVS notations (hgvs=1) so hgvsc/hgvsp strings are returned per transcript, and
-    // prefer the RefSeq transcript set (refseq=1). The rest of the app selects and displays the
-    // canonical isoform by RefSeq NM_ accession, so RefSeq notations (e.g. NM_005485.6:c.52_54del,
-    // NP_005476.4:p.Lys18del) match the nomenclature users expect. Fall back to the default
-    // Ensembl transcript set when RefSeq returns no transcript consequences.
+// Ensembl's GRCh37 services — and the archive of them (release 99, of 2020),
+// which is kept on other machines and goes on answering when they do not.
+const ENSEMBL_GRCH37 = 'https://grch37.rest.ensembl.org';
+
+/*
+ * VEP's answer for one variant from one Ensembl host: { data, refseqFailed }.
+ *
+ * HGVS notations are requested (hgvs=1) so hgvsc/hgvsp strings come back per
+ * transcript, on the RefSeq transcript set (refseq=1): the rest of the app
+ * selects and displays the canonical isoform by RefSeq NM_ accession, so RefSeq
+ * notations (NM_005485.6:c.52_54del, NP_005476.4:p.Lys18del) match the
+ * nomenclature users expect. Ensembl's own set is the fallback where RefSeq
+ * gives no transcript consequences, or its request fails.
+ */
+async function fetchVepFrom(host, hgvs, onAttempt = null) {
     const requestVep = async (useRefseq) => {
         const params = useRefseq ? 'hgvs=1&refseq=1&mane=1&canonical=1' : 'hgvs=1&mane=1&canonical=1';
-        const url = `https://grch37.rest.ensembl.org/vep/human/hgvs/${encodeURIComponent(hgvs)}?content-type=application/json&${params}`;
+        const url = `${host}/vep/human/hgvs/${encodeURIComponent(hgvs)}?content-type=application/json&${params}`;
         const response = await fetchWithRetry(url, {
             headers: {
                 'Accept': 'application/json'
             }
         }, API_TIMEOUT_MS.vep, {
             attempts: 2,
-            onAttempt: ({ attempt, attempts }) => LookupProgress.attempt('vep', attempt, attempts)
+            onAttempt
         });
         if (!response.ok) {
             const text = await response.text();
@@ -8653,15 +8722,74 @@ async function fetchVepHgvsHg19(variant) {
         refseqFailed = true;
         data = await requestVep(false);
     }
+    return { data, refseqFailed };
+}
+
+/*
+ * VEP's consequences for a variant on GRCh37.
+ *
+ * They came from one place, Ensembl's GRCh37 service, and when that is down —
+ * HTTP 500 from every endpoint, its "ping" included, which a browser reports
+ * as a network error because the error page carries no CORS header — a
+ * variant nobody else has a record of could not be looked up at all:
+ * "17 7576910 TP53 G GGT" ended in "Lookup could not complete: … did not
+ * respond".
+ *
+ * Ensembl keeps an archive of the same services for the same assembly, which
+ * went on answering through that. So where the current service fails, or has
+ * not answered after a head start, the archive is asked as well and the first
+ * of the two to answer is taken — `archive` is then true, and the result says
+ * so wherever it is shown: the archive's transcripts are those of 2020, in the
+ * versions of that day, and none of them is flagged MANE Select.
+ *
+ * That is for an ALLELE: a chromosomal position means the same in both. A NAME
+ * (NM_000546.6:c.…) is read on the transcripts a service has, and the archive,
+ * which has none of the newer versions, would refuse names the current service
+ * reads; it is not asked about those. Nor is a refusal of the archive's taken
+ * for an answer: only the current service's is (a wrong reference base, say).
+ */
+async function fetchVepHgvsHg19(variant) {
+    if (!variant) throw new Error('No variant provided');
+    // Normalize: strip leading "chr" prefix (case-insensitive) before the colon
+    let hgvs = variant;
+    const m = variant.match(/^chr([\w]+):g\.(.+)$/i);
+    if (m) {
+        hgvs = `${m[1]}:g.${m[2]}`;
+    }
+    const current = fetchVepFrom(ENSEMBL_GRCH37, hgvs,
+        ({ attempt, attempts }) => LookupProgress.attempt('vep', attempt, attempts));
+    let answer;
+    let archive = false;
+    if (!/^(?:[1-9]|1\d|2[0-2]|X|Y|MT?):g\./i.test(hgvs)) {
+        answer = await current;
+    } else {
+        // A service that is down has no answer; one that refuses the allele has given its answer.
+        let currentErr = null;
+        const either = await answerFromEither(
+            current.catch((err) => {
+                if (!err || !err.retryable) throw err;
+                currentErr = err;
+                return null;
+            }),
+            () => fetchVepFrom(ENSEMBL_GRCH37_ARCHIVE, hgvs).catch((err) => {
+                console.warn('Ensembl\'s GRCh37 archive gave no VEP answer:', err);
+                return null;
+            }),
+            API_TIMEOUT_MS.vepArchiveHeadStart);
+        if (!either.answer) throw currentErr || new Error('VEP HGVS request failed');
+        answer = either.answer;
+        archive = either.second;
+    }
     // Extract transcript consequences list from the first result
-    const first = data[0];
+    const first = answer.data[0];
     const consequences = first.transcript_consequences || [];
     return {
-        vepData: data,
+        vepData: answer.data,
         consequences,
         mostSevere: first.most_severe_consequence || '',
         gVariant: buildGenomicHgvsFromVep(first),
-        refseqFailed
+        refseqFailed: answer.refseqFailed,
+        archive
     };
 }
 
@@ -11865,7 +11993,7 @@ const initVariantSearchUi = () => {
                                         // canonical isoform. Split the "accession:change" strings into a transcript
                                         // accession plus the c./p. portion, matching the shape used elsewhere. Skip
                                         // consequences without an hgvsc (e.g. neighbouring upstream/downstream genes).
-                                        transcriptsFromRecoder = transcriptsFromVep(vepConsequences);
+                                        transcriptsFromRecoder = transcriptsFromVep(vepConsequences, vepRes);
                                         altFound = true;
                                     }
                                 } catch (vepErr) {
@@ -12248,7 +12376,7 @@ const initVariantSearchUi = () => {
                         : await vepRequest;
                     if (!isCurrentSearch()) return;
                     assertResolvedVariantIdentity(gVariant, vep.gVariant || gVariant, null);
-                    const paired = transcriptsFromVep(vep.consequences);
+                    const paired = transcriptsFromVep(vep.consequences, vep);
                     const intentGene = parseMyVariantQueryIntent(query).gene;
                     // A query that names a transcript has named its gene: VEP's row
                     // for that accession says which. That outranks a gene label on
@@ -12373,7 +12501,7 @@ const initVariantSearchUi = () => {
                             const patience = unprompted ? API_TIMEOUT_MS.vepUnprompted : API_TIMEOUT_MS.vep;
                             const answer = await settledWithin(request, Math.max(1000, patience - waited),
                                 'Ensembl VEP did not answer in time');
-                            leftAlignedRows = transcriptsFromVep(answer.consequences);
+                            leftAlignedRows = transcriptsFromVep(answer.consequences, answer);
                         } catch (errLeftAligned) {
                             console.warn('VEP did not answer for the left-aligned spelling:', errLeftAligned);
                         }
@@ -12396,6 +12524,12 @@ const initVariantSearchUi = () => {
                         if (LookupProgress.stateOf('vep') === null) LookupProgress.step('vep', remark.state || 'ok', remark.text);
                         else LookupProgress.note('vep', remark.text, remark.state);
                     }
+                }
+                // Rows Ensembl's archive gave (see fetchVepHgvsHg19) are said to be its.
+                if (transcriptsFromRecoder.some(row => row.source === 'vep' && row.archive)) {
+                    const said = 'answered by Ensembl\'s GRCh37 archive (release 99) — the current service did not answer; transcript versions are the archive\'s';
+                    if (LookupProgress.stateOf('vep') === null) LookupProgress.step('vep', 'warn', said);
+                    else LookupProgress.note('vep', said, 'warn');
                 }
             }
             if (!isCurrentSearch()) return;
@@ -12936,6 +13070,15 @@ const initVariantSearchUi = () => {
                 if (selectedTranscript?.transcript) {
                     content.appendChild(makeLine('Transcript', selectedTranscript.transcript
                         + (selectedTranscript.maneSelect ? ' (MANE Select)' : '')));
+                }
+                if (selectedTranscript?.archive) {
+                    // The names below are the archive's (see fetchVepHgvsHg19):
+                    // right for the allele, on the transcripts of 2020.
+                    const archiveNote = document.createElement('span');
+                    archiveNote.className = 'archive-transcript-note';
+                    archiveNote.style.cssText = 'font-size:0.78rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;';
+                    archiveNote.textContent = ensemblArchiveNote(selectedTranscript);
+                    content.appendChild(archiveNote);
                 }
                 content.appendChild(makeLine('c.', canonicalCVal));
                 // What was typed has to be what is shown. A substitution has one
@@ -15137,6 +15280,7 @@ if (typeof process !== 'undefined' && process.versions && process.versions.node)
         proteinSubstitutionAlleles, proteinResidueQuery, recoderShapedFromAlleles, translationForProteinName, fetchStandardEnsemblTranscripts,
         ensemblRecoderAnswer, recoderPaneText, allelesNotAskedAbout, fetchProteinSubstitutionAlleles,
         nomenclatureRefusal, refusedNameError, nameUnknownToEnsembl, geneGivenBesideCoordinates,
+        answerFromEither, fetchVepHgvsHg19, fetchVepFrom, ensemblArchiveNote, mapGrch38GenomicToGrch37,
         fetchGrch37ReferenceSequence, fetchUcscReferenceSequence, ucscHg19Chromosome,
         recoderAlleleNamesProtein, gnomadMitochondrialGroups, leftAlignedRowAlleles, resolveVcfAlleles, inFrameIndel, leftAlignedSpelling, vepSpellingFor, withoutUncheckedProteinNames,
         reverseStrandRowsFrom, uncheckedVepSpelling,
