@@ -74,6 +74,79 @@
       "assembly_name": "GRCh37",
       "canonical_transcript": "ENST00000269305.4"
     },
+    "archiveGene": {
+      "id": "ENSG00000141510",
+      "display_name": "TP53",
+      "assembly_name": "GRCh37",
+      "Transcript": [
+        {
+          "id": "ENST00000413465",
+          "is_canonical": 0
+        },
+        {
+          "id": "ENST00000269305",
+          "version": 4,
+          "is_canonical": 1,
+          "assembly_name": "GRCh37",
+          "seq_region_name": "17",
+          "strand": -1,
+          "start": 7571720,
+          "end": 7590856,
+          "Translation": {
+            "id": "ENSP00000269305",
+            "length": 393,
+            "start": 7572927,
+            "end": 7579912
+          },
+          "Exon": [
+            {
+              "start": 7590695,
+              "end": 7590856
+            },
+            {
+              "start": 7579839,
+              "end": 7579940
+            },
+            {
+              "start": 7579700,
+              "end": 7579721
+            },
+            {
+              "start": 7579312,
+              "end": 7579590
+            },
+            {
+              "start": 7578371,
+              "end": 7578554
+            },
+            {
+              "start": 7578177,
+              "end": 7578289
+            },
+            {
+              "start": 7577499,
+              "end": 7577608
+            },
+            {
+              "start": 7577019,
+              "end": 7577155
+            },
+            {
+              "start": 7576853,
+              "end": 7576926
+            },
+            {
+              "start": 7573927,
+              "end": 7574033
+            },
+            {
+              "start": 7571720,
+              "end": 7573008
+            }
+          ]
+        }
+      ]
+    },
     "domains": [
       {
         "type": "PANTHER",

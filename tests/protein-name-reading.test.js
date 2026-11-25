@@ -445,7 +445,9 @@ console.log('ok protein name: KRAS G12X is the codon, X read as any amino acid')
         assert.match(page.variant, /Resolved to residue 12 on NP_004976\.2 only\./, String(order));
         assert(page.requests.some(r => /map\/translation\/ENSP00000256078\/12\.\.12/.test(r)), 'the codon is mapped on Ensembl\'s protein for it');
         assert(page.requests.some(r => /datasets\/v2\/gene\/accession\/NP_004976\.2$/.test(r)), 'and the gene is NCBI\'s for the accession');
-        assert(!page.requests.some(r => /lookup\/symbol\/homo_sapiens\/KRAS\?expand=1/.test(r)), 'not the gene\'s canonical protein');
+        // The map can read the archive after resolution. Check the lookup used to resolve the codon.
+        assert(!page.requests.some(r => r.startsWith('grch37.rest.ensembl.org/lookup/symbol/homo_sapiens/KRAS?expand=1')),
+            'codon resolution skips the gene canonical lookup');
     }
     // MyVariant not answering: the codon just the same, and nothing said of records.
     const down = (url, k, respond) => (url.hostname === 'myvariant.info' ? respond({ error: 'Service Unavailable' }, 503) : undefined);

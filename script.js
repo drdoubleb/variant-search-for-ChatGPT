@@ -914,12 +914,20 @@ function parseGenomicHgvs(gVariant) {
 
 const geneMapRequests = new Map();
 const geneMapLabelObservers = new WeakMap();
+const ENSEMBL_GRCH37_ARCHIVE = 'https://grch37-archive.rest.ensembl.org';
+const GENE_MAP_HOSTS = {
+    GRCh37: ['https://grch37.rest.ensembl.org', ENSEMBL_GRCH37_ARCHIVE],
+    GRCh38: ['https://rest.ensembl.org']
+};
 const GENE_MAP_DOMAIN_TYPES = { Pfam: /^PF\d+$/, SMART: /^SM\d+$/, Prosite_profiles: /^PS\d+$/ };
 const GENE_MAP_COLORS = ['#3b62a1', '#087e79', '#7456a6', '#a85426', '#516e32', '#466579'];
 
-function geneMapRequest(assembly, path) {
-    const host = assembly === 'GRCh37' ? 'https://grch37.rest.ensembl.org' : 'https://rest.ensembl.org';
-    const url = `${host}/${path}${path.includes('?') ? '&' : '?'}content-type=application/json`;
+function geneMapUrl(host, path) {
+    return `${host}/${path}${path.includes('?') ? '&' : '?'}content-type=application/json`;
+}
+
+function geneMapRequest(host, path) {
+    const url = geneMapUrl(host, path);
     if (!geneMapRequests.has(url)) {
         if (geneMapRequests.size >= 96) geneMapRequests.delete(geneMapRequests.keys().next().value);
         const request = fetchWithTimeout(url, { headers: { Accept: 'application/json' } }, API_TIMEOUT_MS.ensemblLookup)
@@ -964,19 +972,34 @@ function geneMapTranscript(record, assembly) {
     };
 }
 
+async function lookupGeneMapTranscript(host, assembly, accession) {
+    const match = /^(ENST\d+)(?:\.(\d+))?$/.exec(accession || '');
+    if (!match) return null;
+    const record = await geneMapRequest(host, `lookup/id/${match[1]}?expand=1`);
+    const transcript = geneMapTranscript(record, assembly);
+    return transcript?.id === match[1] && (!match[2] || Number(match[2]) === transcript.version) ? transcript : null;
+}
+
 async function loadGeneMapTranscript(gene, assembly, selected) {
-    const lookup = async accession => {
-        const match = /^(ENST\d+)(?:\.(\d+))?$/.exec(accession || '');
-        if (!match) return null;
-        const record = await geneMapRequest(assembly, `lookup/id/${match[1]}?expand=1`);
-        const transcript = geneMapTranscript(record, assembly);
-        return transcript?.id === match[1] && (!match[2] || Number(match[2]) === transcript.version) ? transcript : null;
-    };
-    const chosen = await lookup(selected).catch(() => null);
-    if (chosen) return { gene, transcript: chosen, canonical: false };
-    const record = await geneMapRequest(assembly, `lookup/symbol/homo_sapiens/${encodeURIComponent(gene)}`);
-    const transcript = await lookup(record?.canonical_transcript);
-    return transcript ? { gene: record.display_name || gene, transcript, canonical: true } : null;
+    const genePath = `lookup/symbol/homo_sapiens/${encodeURIComponent(gene)}`;
+    for (const host of GENE_MAP_HOSTS[assembly]) {
+        try {
+            const chosen = await lookupGeneMapTranscript(host, assembly, selected).catch(() => null);
+            if (chosen) return { gene, transcript: chosen, canonical: false, host };
+
+            // The GRCh37 archive flags the canonical transcript in the expanded gene record.
+            const archive = host === ENSEMBL_GRCH37_ARCHIVE;
+            const record = await geneMapRequest(host, archive ? `${genePath}?expand=1` : genePath);
+            if (record?.assembly_name !== assembly) continue;
+            const transcript = archive
+                ? geneMapTranscript(record.Transcript?.find(item => item.is_canonical === 1), assembly)
+                : await lookupGeneMapTranscript(host, assembly, record.canonical_transcript);
+            if (transcript) return { gene: record.display_name || gene, transcript, canonical: true, host };
+        } catch {
+            // Try the next host for this assembly when a request fails.
+        }
+    }
+    return null;
 }
 
 function geneMapVariantLocus(transcript, genomic) {
@@ -1223,11 +1246,15 @@ async function showGeneMap(panel, { gene, assembly, selected, genomic, markerLab
     }
     status.remove();
     heading.textContent = `${model.gene} gene map`;
-    const { transcript, canonical } = model;
+    const { transcript, canonical, host } = model;
     const accession = [transcript.id, transcript.version].filter(Boolean).join('.');
-    const host = assembly === 'GRCh37' ? 'https://grch37.ensembl.org' : 'https://www.ensembl.org';
-    const metadata = appendEvidenceText(panel, canonical ? 'Ensembl canonical transcript · ' : 'Mapped Ensembl transcript · ', 'gene-map-note');
-    appendEvidenceLink(metadata, accession, `${host}/Homo_sapiens/Transcript/Summary?t=${encodeURIComponent(transcript.id)}`);
+    const webHost = assembly === 'GRCh37' ? 'https://grch37.ensembl.org' : 'https://www.ensembl.org';
+    const source = host === ENSEMBL_GRCH37_ARCHIVE ? 'Ensembl GRCh37 archive' : 'Ensembl';
+    const metadata = appendEvidenceText(panel, `${canonical ? 'Canonical' : 'Mapped'} transcript · ${source} · `, 'gene-map-note');
+    const transcriptUrl = host === ENSEMBL_GRCH37_ARCHIVE
+        ? geneMapUrl(host, `lookup/id/${transcript.id}?expand=1`)
+        : `${webHost}/Homo_sapiens/Transcript/Summary?t=${transcript.id}`;
+    appendEvidenceLink(metadata, accession, transcriptUrl);
     renderGeneMapExons(panel, transcript, genomic, markerLabel);
     if (unresolved) appendEvidenceText(panel, 'Genomic position unresolved for this query.', 'gene-map-note');
     if (!transcript.protein) return;
@@ -1237,7 +1264,7 @@ async function showGeneMap(panel, { gene, assembly, selected, genomic, markerLab
     const position = marker ? `${markerLabel} · ${marker.start === marker.end ? `residue ${marker.start}` : `residues ${marker.start}–${marker.end}`}` : '';
     const track = geneMapTrack(panel, `Protein domains · ${[protein.id, protein.version].filter(Boolean).join('.')}`, position);
     const loading = appendEvidenceText(track, 'Loading Ensembl protein domains…', 'gene-map-note');
-    const domains = await geneMapRequest(assembly, `overlap/translation/${protein.id}?feature=protein_feature`)
+    const domains = await geneMapRequest(host, `overlap/translation/${protein.id}?feature=protein_feature`)
         .then(features => geneMapDomains(features, protein.length)).catch(() => null);
     if (!isCurrentSearch()) return;
     loading.remove();
