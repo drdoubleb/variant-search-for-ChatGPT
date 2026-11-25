@@ -253,6 +253,27 @@ export async function runEvidenceSmoke(newPage, base, check) {
                     return fraction > 0.60 && fraction < 0.61;
                 }));
                 assert.ok(await map.getByRole('link', { name: /p53, DNA-binding domain.*95–288/ }).isVisible());
+                const exonLabels = exonPlot.locator('.gene-map-inline-label:visible');
+                const domainLabels = proteinPlot.locator('.gene-map-inline-label:visible');
+                assert.deepEqual(await domainLabels.allTextContents(), [
+                    'p53 transactivation domain', 'p53, DNA-binding domain', 'p53, tetramerisation domain'
+                ]);
+                assert.ok(await exonLabels.filter({ hasText: /^7$/ }).isVisible());
+                // The same in-track labels must fit after resizing the result.
+                await page.setViewportSize({ width: 320, height: 844 });
+                await page.waitForFunction(() => {
+                    const plots = [...document.querySelectorAll('#geneMap .gene-map-diagram')];
+                    return plots.length === 2 && plots.every(plot => {
+                        const frame = plot.getBoundingClientRect();
+                        const boxes = [...plot.querySelectorAll('.gene-map-inline-label.gene-map-label-placed')]
+                            .map(label => label.getBoundingClientRect());
+                        return boxes.length > 0 && boxes.every((box, index) => box.left >= frame.left - 1 && box.right <= frame.right + 1
+                            && boxes.slice(index + 1).every(other => box.right <= other.left + 1 || box.left >= other.right - 1
+                                || box.bottom <= other.top + 1 || box.top >= other.bottom - 1));
+                    });
+                });
+                await page.setViewportSize({ width: 390, height: 844 });
+                check('gene map: exon and domain labels fit in the tracks while the linked legend stays visible', true);
                 assert.ok(await map.evaluate(el => el.scrollWidth <= el.clientWidth
                     && el.getBoundingClientRect().right <= innerWidth
                     && Boolean(el.compareDocumentPosition(document.querySelector('#cardsContainer')) & Node.DOCUMENT_POSITION_FOLLOWING)));

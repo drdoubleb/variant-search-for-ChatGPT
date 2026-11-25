@@ -913,6 +913,7 @@ function parseGenomicHgvs(gVariant) {
 }
 
 const geneMapRequests = new Map();
+const geneMapLabelObservers = new WeakMap();
 const GENE_MAP_DOMAIN_TYPES = { Pfam: /^PF\d+$/, SMART: /^SM\d+$/, Prosite_profiles: /^PS\d+$/ };
 const GENE_MAP_COLORS = ['#3b62a1', '#087e79', '#7456a6', '#a85426', '#516e32', '#466579'];
 
@@ -1043,12 +1044,58 @@ function geneMapGeometry(bounds, span, reverse = false) {
     };
 }
 
+function layoutGeneMapLabels(plot, labels) {
+    if (!labels.length) return;
+    labels.sort((a, b) => Number(b.overlapsQuery) - Number(a.overlapsQuery));
+    let lastWidth = 0;
+    const place = (force = false) => {
+        const width = plot.clientWidth;
+        if (!plot.isConnected || !width || (!force && width === lastWidth)) return;
+        lastWidth = width;
+        const gap = 3;
+        const rows = [];
+        const placements = labels.map(({ anchor, text }) => {
+            const labelWidth = text.getBoundingClientRect().width;
+            const left = Math.max(0, Math.min(width - labelWidth, width * anchor / 100 - labelWidth / 2));
+            const right = left + labelWidth;
+            let row = rows.findIndex(boxes => boxes.every(box => right + gap <= box.left || left >= box.right + gap));
+            if (row === -1) {
+                // Keep dense transcripts compact and put labels at the query first.
+                if (rows.length >= 3) return null;
+                row = rows.length;
+                rows.push([]);
+            }
+            rows[row].push({ left, right });
+            return { left, row };
+        });
+        plot.style.setProperty('--map-label-rows', rows.length);
+        labels.forEach(({ text, guide }, index) => {
+            const placement = placements[index];
+            text.classList.toggle('gene-map-label-placed', Boolean(placement));
+            guide.classList.toggle('gene-map-label-placed', Boolean(placement));
+            if (placement) {
+                text.style.setProperty('--map-label-left', `${placement.left}px`);
+                text.style.setProperty('--map-label-row', placement.row);
+                guide.style.setProperty('--map-label-row', placement.row);
+            }
+        });
+    };
+    place();
+    if (typeof ResizeObserver === 'function') {
+        const observer = new ResizeObserver(() => requestAnimationFrame(() => place()));
+        geneMapLabelObservers.set(plot, observer);
+        observer.observe(plot);
+    }
+    document.fonts?.ready.then(() => place(true));
+}
+
 function geneMapDiagram(parent, { bounds, blocks, marker, label, reverse = false, shadeMarker = true }) {
     const plot = document.createElement('div');
     plot.className = 'gene-map-diagram';
     plot.setAttribute('role', 'img');
     plot.setAttribute('aria-label', label);
     plot.style.setProperty('--map-lanes', Math.max(1, ...blocks.map(block => (block.lane || 0) + 1)));
+    const trackLabels = [];
     const segment = (className, span) => {
         const element = document.createElement('span');
         element.className = className;
@@ -1056,19 +1103,36 @@ function geneMapDiagram(parent, { bounds, blocks, marker, label, reverse = false
         element.style.setProperty('--map-left', `${left}%`);
         element.style.setProperty('--map-width', `${width}%`);
         plot.appendChild(element);
-        return element;
+        return { element, left, width };
     };
     for (const block of blocks) {
-        const element = segment('gene-map-segment', block);
+        const { element, left, width } = segment('gene-map-segment', block);
         element.style.setProperty('--map-lane', block.lane || 0);
         if (block.color) element.style.setProperty('--map-color', block.color);
-        if (block.name) element.title = block.name;
+        if (block.name) {
+            element.title = block.name;
+            const anchor = left + width / 2;
+            const overlapsQuery = Boolean(geneMapOverlap(block, marker));
+            const text = document.createElement('span');
+            text.className = 'gene-map-inline-label';
+            text.title = block.name;
+            text.textContent = block.inlineLabel || block.name;
+            if (overlapsQuery) text.classList.add('gene-map-label-at-query');
+            const guide = document.createElement('span');
+            guide.className = 'gene-map-label-guide';
+            guide.style.setProperty('--map-label-anchor', `${anchor}%`);
+            guide.style.setProperty('--map-lane', block.lane || 0);
+            if (block.color) guide.style.setProperty('--map-color', block.color);
+            plot.append(guide, text);
+            trackLabels.push({ anchor, text, guide, overlapsQuery });
+        }
     }
     if (marker) {
         if (shadeMarker && marker.end > marker.start) segment('gene-map-affected-span', marker);
         segment('gene-map-pointer', marker);
     }
     parent.appendChild(plot);
+    layoutGeneMapLabels(plot, trackLabels);
 }
 
 function geneMapAxis(parent, left, right) {
@@ -1110,7 +1174,7 @@ function renderGeneMapExons(parent, transcript, genomic, markerLabel) {
     geneMapDiagram(track, {
         bounds: transcript, reverse, marker, shadeMarker: genomic?.type !== 'ins',
         label: `${transcript.exons.length} exons, 5′ ${left} to 3′ ${right}${position ? `. ${position}` : ''}`,
-        blocks: [...transcript.exons.map((exon, index) => ({ ...exon, name: `Exon ${index + 1}` })),
+        blocks: [...transcript.exons.map((exon, index) => ({ ...exon, name: `Exon ${index + 1}`, inlineLabel: String(index + 1) })),
             ...transcript.coding.map(exon => ({ ...exon, color: '#315b8b' }))]
     });
     geneMapAxis(track, `5′ ${left}`, `${right} 3′`);
@@ -9923,8 +9987,11 @@ const initVariantSearchUi = () => {
         // after a newer one and overwrite the newer results with stale cards.
         const mySeq = ++searchSeq;
         const isCurrentSearch = () => mySeq === searchSeq;
-        geneMap?.replaceChildren();
-        geneMap?.classList.add('hidden');
+        if (geneMap) {
+            for (const plot of geneMap.querySelectorAll('.gene-map-diagram')) geneMapLabelObservers.get(plot)?.disconnect();
+            geneMap.replaceChildren();
+            geneMap.classList.add('hidden');
+        }
         // Reset any previous gene hint.  Without resetting, a prior search that
         // included a gene symbol could incorrectly influence the next query.
         geneHintGlobal = null;
